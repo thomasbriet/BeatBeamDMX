@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>BeatBeam DMX</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark"></span>
+        <div>
+          <h1>BeatBeam DMX</h1>
+          <p id="rangeLabel">Geen fixture actief</p>
+        </div>
+      </div>
+      <div class="connection">
+        <span id="dmxDot" class="status-dot"></span>
+        <span id="dmxStatus">DMX off</span>
+        <select id="portSelect" aria-label="DMX poort"></select>
+        <button id="refreshPortsBtn" type="button">Refresh</button>
+        <button id="connectBtn" type="button" class="primary">Connect</button>
+        <button id="disconnectBtn" type="button">Disconnect</button>
+        <button id="blackoutBtn" type="button" class="danger">Blackout</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel">
+        <div class="section-title">
+          <h2>Fixture</h2>
+          <div class="slot-tools">
+            <select id="slotSelect" aria-label="Fixture slot"></select>
+            <label class="toggle-chip"><input id="slotEnabledInput" type="checkbox" checked> Actief</label>
+          </div>
+        </div>
+        <div id="slotRanges" class="slot-ranges"></div>
+        <div class="field-grid">
+          <label>
+            <span>Model</span>
+            <select id="fixtureSelect"></select>
+          </label>
+          <label>
+            <span>Mode</span>
+            <select id="modeSelect"></select>
+          </label>
+          <label>
+            <span>Startadres</span>
+            <input id="addressInput" type="number" min="1" max="512" value="1">
+          </label>
+          <label>
+            <span>FPS</span>
+            <input id="fpsInput" type="number" min="1" max="60" value="30">
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-title">
+          <h2>Kleur</h2>
+          <span id="colorPreview" class="color-preview"></span>
+        </div>
+        <div id="swatches" class="swatches"></div>
+        <div class="slider-grid">
+          <label class="slider-row red">
+            <span>R</span>
+            <input id="redInput" type="range" min="0" max="255" value="255">
+            <output id="redValue">255</output>
+          </label>
+          <label class="slider-row green">
+            <span>G</span>
+            <input id="greenInput" type="range" min="0" max="255" value="0">
+            <output id="greenValue">0</output>
+          </label>
+          <label class="slider-row blue">
+            <span>B</span>
+            <input id="blueInput" type="range" min="0" max="255" value="0">
+            <output id="blueValue">0</output>
+          </label>
+          <label class="slider-row white">
+            <span>W</span>
+            <input id="whiteInput" type="range" min="0" max="255" value="0">
+            <output id="whiteValue">0</output>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Rekordbox</h2>
+        <div class="osc-status">
+          <div>
+            <span id="oscDot" class="status-dot"></span>
+            <strong id="oscStatus">OSC idle</strong>
+          </div>
+          <button id="startBridgeBtn" type="button">Start bridge</button>
+          <button id="stopBridgeBtn" type="button">Stop bridge</button>
+        </div>
+        <dl class="telemetry">
+          <div><dt>BPM</dt><dd id="bpmValue">-</dd></div>
+          <div><dt>Beat</dt><dd id="beatValue">-</dd></div>
+          <div><dt>Phrase</dt><dd id="phraseValue">-</dd></div>
+          <div><dt>Mood</dt><dd id="moodValue">-</dd></div>
+          <div><dt>Bank</dt><dd id="bankValue">-</dd></div>
+          <div><dt>Wave</dt><dd id="waveformValue">-</dd></div>
+          <div><dt>Strobe</dt><dd id="strobeOscValue">-</dd></div>
+        </dl>
+        <div class="last-message" id="lastMessage">-</div>
+      </section>
+
+      <section class="panel">
+        <h2>Beat Sync</h2>
+        <div class="toggle-row">
+          <label><input id="syncEnabledInput" type="checkbox" checked> Sync</label>
+          <label><input id="beatPulseEnabledInput" type="checkbox" checked> Pulse</label>
+          <label><input id="oscStrobeEnabledInput" type="checkbox" checked> Strobe</label>
+          <label id="finePanTiltToggleRow"><input id="useFinePanTiltInput" type="checkbox" checked> Fine Pan/Tilt</label>
+        </div>
+        <div class="field-grid compact">
+          <label>
+            <span>Kleurbron</span>
+            <select id="colorSourceSelect">
+              <option value="manual">Manual</option>
+              <option value="phrase">Phrase</option>
+              <option value="mood">Mood</option>
+              <option value="color_bank">Color bank</option>
+            </select>
+          </label>
+        </div>
+        <div class="slider-grid sync-sliders">
+          <label class="slider-row">
+            <span>Depth</span>
+            <input id="beatDepthInput" type="range" min="0" max="255" value="65">
+            <output id="beatDepthValue">65</output>
+          </label>
+          <label class="slider-row">
+            <span>Decay</span>
+            <input id="beatDecayInput" type="range" min="30" max="1500" value="180">
+            <output id="beatDecayValue">180</output>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Control</h2>
+        <div class="slider-grid">
+          <label class="slider-row" data-requires="intensity">
+            <span>Dim</span>
+            <input id="dimmerInput" type="range" min="0" max="255" value="255">
+            <output id="dimmerValue">255</output>
+          </label>
+          <label class="slider-row" data-requires="strobe">
+            <span>Str</span>
+            <input id="strobeInput" type="range" min="0" max="255" value="0">
+            <output id="strobeValue">0</output>
+          </label>
+          <label class="slider-row" data-requires="program">
+            <span>Prg</span>
+            <input id="programInput" type="range" min="0" max="255" value="0">
+            <output id="programValue">0</output>
+          </label>
+          <label class="slider-row" data-requires="speed">
+            <span>Spd</span>
+            <input id="speedInput" type="range" min="0" max="255" value="0">
+            <output id="speedValue">0</output>
+          </label>
+          <label class="slider-row" data-requires="pan">
+            <span>Pan</span>
+            <input id="panInput" type="range" min="0" max="255" value="127">
+            <output id="panValue">127</output>
+          </label>
+          <label class="slider-row" data-requires="tilt">
+            <span>Tilt</span>
+            <input id="tiltInput" type="range" min="0" max="255" value="127">
+            <output id="tiltValue">127</output>
+          </label>
+          <label class="slider-row" data-requires="pan_tilt_speed">
+            <span>P/T</span>
+            <input id="panTiltSpeedInput" type="range" min="0" max="255" value="0">
+            <output id="panTiltSpeedValue">0</output>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel channel-panel">
+        <h2>DMX</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Kanaal</th>
+                <th>Naam</th>
+                <th>Waarde</th>
+              </tr>
+            </thead>
+            <tbody id="channelTable"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+dist-native-app/
+beatbeam_remote.json
+vendor/
+*.xcuserstate
+xcuserdata/
+*.log
+*.tmp
+/tmp/

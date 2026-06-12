@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>BeatBeam Live Remote</title>
+    <link rel="stylesheet" href="/remote.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">BeatBeam DMX</p>
+        <h1>Live Remote</h1>
+        <p id="trackMeta" class="subtle">Wachten op trackdata</p>
+      </div>
+      <div class="status-stack">
+        <div class="status-line">
+          <span id="dmxDot" class="status-dot"></span>
+          <span id="dmxStatus">DMX off</span>
+        </div>
+        <div class="status-line">
+          <span id="oscDot" class="status-dot"></span>
+          <span id="oscStatus">OSC idle</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel panel-wide">
+        <div class="panel-header">
+          <h2>Now</h2>
+          <span id="cueBadge" class="badge">Auto Show uit</span>
+        </div>
+        <div class="metric-grid">
+          <div class="metric">
+            <span class="label">BPM</span>
+            <strong id="bpmValue">-</strong>
+          </div>
+          <div class="metric">
+            <span class="label">Beat</span>
+            <strong id="beatValue">-</strong>
+          </div>
+          <div class="metric">
+            <span class="label">Phrase</span>
+            <strong id="phraseValue">-</strong>
+          </div>
+          <div class="metric">
+            <span class="label">Next</span>
+            <strong id="nextValue">-</strong>
+          </div>
+        </div>
+        <p id="autoShowDetail" class="subtle">Geen autoshow details</p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Auto Show</h2>
+          <label class="switch">
+            <input id="autoShowToggle" type="checkbox">
+            <span>Enabled</span>
+          </label>
+        </div>
+        <div id="styleButtons" class="button-grid button-grid-3"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Color Override</h2>
+        </div>
+        <div id="colorButtons" class="button-grid button-grid-5"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Effects</h2>
+          <button id="clearOverridesBtn" type="button" class="ghost">Clear</button>
+        </div>
+        <p id="overrideSummary" class="subtle">Geen overrides</p>
+        <div id="effectButtons" class="button-grid button-grid-3"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Cue Shots</h2>
+        </div>
+        <p id="cueSummary" class="subtle">Geen cue actief</p>
+        <div id="cueButtons" class="button-grid button-grid-3"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>System</h2>
+        </div>
+        <div class="button-grid button-grid-2">
+          <button id="blackoutBtn" type="button" class="danger">Blackout</button>
+          <button id="releaseBlackoutBtn" type="button" class="ghost">Release Blackout</button>
+        </div>
+        <p id="remoteHint" class="subtle">Gebruik deze remote alleen voor live ingrepen.</p>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/remote.js"></script>
+  </body>
+</html>

@@ -1,0 +1,297 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "uking_zq06016",
+      "manufacturer": "U'King",
+      "model": "24PCS LED Wall Wash Light ZQ06016",
+      "beam_layout": {
+        "type": "strip",
+        "length": 24
+      },
+      "modes": [
+        {
+          "name": "A001",
+          "footprint": 2,
+          "channels": [
+            {
+              "offset": 1,
+              "name": "Function",
+              "type": "program",
+              "ranges": [
+                { "from": 0, "to": 5, "name": "Off" },
+                { "from": 6, "to": 16, "name": "LED Color Selection: Red" },
+                { "from": 17, "to": 27, "name": "LED Color Selection: Green" },
+                { "from": 28, "to": 38, "name": "LED Color Selection: Blue" },
+                { "from": 39, "to": 49, "name": "LED Color Selection: Yellow" },
+                { "from": 50, "to": 60, "name": "LED Color Selection: Purple" },
+                { "from": 61, "to": 71, "name": "LED Color Selection: Cyan" },
+                { "from": 72, "to": 82, "name": "LED Color Selection: White" },
+                { "from": 83, "to": 93, "name": "Point to Point Control 1" },
+                { "from": 94, "to": 104, "name": "Point to Point Control 2" },
+                { "from": 105, "to": 115, "name": "Point to Point Control 3" },
+                { "from": 116, "to": 126, "name": "Point to Point Control 4" },
+                { "from": 127, "to": 137, "name": "Point to Point Control 5" },
+                { "from": 138, "to": 148, "name": "Point to Point Control 6" },
+                { "from": 149, "to": 159, "name": "Point to Point Control 7" },
+                { "from": 160, "to": 170, "name": "Point to Point Control 8" },
+                { "from": 171, "to": 181, "name": "Point to Point Control 9" },
+                { "from": 182, "to": 192, "name": "Red Gradient Effect" },
+                { "from": 193, "to": 203, "name": "Green Gradient Effect" },
+                { "from": 204, "to": 214, "name": "Blue Gradient Effect" },
+                { "from": 215, "to": 225, "name": "Purple Gradient Effect" },
+                { "from": 226, "to": 236, "name": "Yellow Gradient Effect" },
+                { "from": 237, "to": 247, "name": "Cyclic Gradient Effect" },
+                { "from": 248, "to": 255, "name": "Sound" }
+              ]
+            },
+            { "offset": 2, "name": "Function Speed", "type": "speed" }
+          ]
+        },
+        {
+          "name": "C001",
+          "footprint": 3,
+          "channels": [
+            { "offset": 1, "name": "Red", "type": "color", "component": "red" },
+            { "offset": 2, "name": "Green", "type": "color", "component": "green" },
+            { "offset": 3, "name": "Blue", "type": "color", "component": "blue" }
+          ]
+        },
+        {
+          "name": "d001",
+          "footprint": 4,
+          "channels": [
+            { "offset": 1, "name": "Dimmer", "type": "intensity" },
+            { "offset": 2, "name": "Red", "type": "color", "component": "red" },
+            { "offset": 3, "name": "Green", "type": "color", "component": "green" },
+            { "offset": 4, "name": "Blue", "type": "color", "component": "blue" }
+          ]
+        },
+        {
+          "name": "E001",
+          "footprint": 6,
+          "channels": [
+            { "offset": 1, "name": "Zone 1 Red", "type": "color", "component": "red", "zone": 1 },
+            { "offset": 2, "name": "Zone 1 Green", "type": "color", "component": "green", "zone": 1 },
+            { "offset": 3, "name": "Zone 1 Blue", "type": "color", "component": "blue", "zone": 1 },
+            { "offset": 4, "name": "Zone 2 Red", "type": "color", "component": "red", "zone": 2 },
+            { "offset": 5, "name": "Zone 2 Green", "type": "color", "component": "green", "zone": 2 },
+            { "offset": 6, "name": "Zone 2 Blue", "type": "color", "component": "blue", "zone": 2 }
+          ]
+        },
+        {
+          "name": "H001",
+          "footprint": 7,
+          "channels": [
+            { "offset": 1, "name": "Dimmer", "type": "intensity" },
+            { "offset": 2, "name": "Red", "type": "color", "component": "red" },
+            { "offset": 3, "name": "Green", "type": "color", "component": "green" },
+            { "offset": 4, "name": "Blue", "type": "color", "component": "blue" },
+            {
+              "offset": 5,
+              "name": "Strobe",
+              "type": "strobe",
+              "ranges": [
+                { "from": 0, "to": 6, "name": "Off" },
+                { "from": 7, "to": 255, "name": "Strobe" }
+              ]
+            },
+            {
+              "offset": 6,
+              "name": "Function",
+              "type": "program",
+              "ranges": [
+                { "from": 0, "to": 11, "name": "Off" },
+                { "from": 12, "to": 23, "name": "LED Color: Red" },
+                { "from": 24, "to": 35, "name": "LED Color: Green" },
+                { "from": 36, "to": 47, "name": "LED Color: Blue" },
+                { "from": 48, "to": 59, "name": "LED Color: Yellow" },
+                { "from": 60, "to": 71, "name": "LED Color: Purple" },
+                { "from": 72, "to": 83, "name": "LED Color: Cyan" },
+                { "from": 84, "to": 95, "name": "LED Color: White" },
+                { "from": 96, "to": 107, "name": "Program Effect 1" },
+                { "from": 108, "to": 119, "name": "Program Effect 2" },
+                { "from": 120, "to": 131, "name": "Program Effect 3" },
+                { "from": 132, "to": 143, "name": "Program Effect 4" },
+                { "from": 144, "to": 155, "name": "Program Effect 5" },
+                { "from": 156, "to": 167, "name": "Program Effect 6" },
+                { "from": 168, "to": 179, "name": "Program Effect 7" },
+                { "from": 180, "to": 191, "name": "Program Effect 8" },
+                { "from": 192, "to": 203, "name": "Program Effect 9" },
+                { "from": 204, "to": 215, "name": "Program Effect 10" },
+                { "from": 216, "to": 227, "name": "Program Effect 11" },
+                { "from": 228, "to": 239, "name": "Program Effect 12" },
+                { "from": 240, "to": 251, "name": "Program Effect 13" },
+                { "from": 252, "to": 255, "name": "Sound Effect" }
+              ]
+            },
+            { "offset": 7, "name": "Function Speed", "type": "speed" }
+          ]
+        },
+        {
+          "name": "L001",
+          "footprint": 12,
+          "channels": [
+            { "offset": 1, "name": "Zone 1 Red", "type": "color", "component": "red", "zone": 1 },
+            { "offset": 2, "name": "Zone 1 Green", "type": "color", "component": "green", "zone": 1 },
+            { "offset": 3, "name": "Zone 1 Blue", "type": "color", "component": "blue", "zone": 1 },
+            { "offset": 4, "name": "Zone 2 Red", "type": "color", "component": "red", "zone": 2 },
+            { "offset": 5, "name": "Zone 2 Green", "type": "color", "component": "green", "zone": 2 },
+            { "offset": 6, "name": "Zone 2 Blue", "type": "color", "component": "blue", "zone": 2 },
+            { "offset": 7, "name": "Zone 3 Red", "type": "color", "component": "red", "zone": 3 },
+            { "offset": 8, "name": "Zone 3 Green", "type": "color", "component": "green", "zone": 3 },
+            { "offset": 9, "name": "Zone 3 Blue", "type": "color", "component": "blue", "zone": 3 },
+            { "offset": 10, "name": "Zone 4 Red", "type": "color", "component": "red", "zone": 4 },
+            { "offset": 11, "name": "Zone 4 Green", "type": "color", "component": "green", "zone": 4 },
+            { "offset": 12, "name": "Zone 4 Blue", "type": "color", "component": "blue", "zone": 4 }
+          ]
+        },
+        {
+          "name": "P001",
+          "footprint": 24,
+          "channels": [
+            { "offset": 1, "name": "Zone 1 Red", "type": "color", "component": "red", "zone": 1 },
+            { "offset": 2, "name": "Zone 1 Green", "type": "color", "component": "green", "zone": 1 },
+            { "offset": 3, "name": "Zone 1 Blue", "type": "color", "component": "blue", "zone": 1 },
+            { "offset": 4, "name": "Zone 2 Red", "type": "color", "component": "red", "zone": 2 },
+            { "offset": 5, "name": "Zone 2 Green", "type": "color", "component": "green", "zone": 2 },
+            { "offset": 6, "name": "Zone 2 Blue", "type": "color", "component": "blue", "zone": 2 },
+            { "offset": 7, "name": "Zone 3 Red", "type": "color", "component": "red", "zone": 3 },
+            { "offset": 8, "name": "Zone 3 Green", "type": "color", "component": "green", "zone": 3 },
+            { "offset": 9, "name": "Zone 3 Blue", "type": "color", "component": "blue", "zone": 3 },
+            { "offset": 10, "name": "Zone 4 Red", "type": "color", "component": "red", "zone": 4 },
+            { "offset": 11, "name": "Zone 4 Green", "type": "color", "component": "green", "zone": 4 },
+            { "offset": 12, "name": "Zone 4 Blue", "type": "color", "component": "blue", "zone": 4 },
+            { "offset": 13, "name": "Zone 5 Red", "type": "color", "component": "red", "zone": 5 },
+            { "offset": 14, "name": "Zone 5 Green", "type": "color", "component": "green", "zone": 5 },
+            { "offset": 15, "name": "Zone 5 Blue", "type": "color", "component": "blue", "zone": 5 },
+            { "offset": 16, "name": "Zone 6 Red", "type": "color", "component": "red", "zone": 6 },
+            { "offset": 17, "name": "Zone 6 Green", "type": "color", "component": "green", "zone": 6 },
+            { "offset": 18, "name": "Zone 6 Blue", "type": "color", "component": "blue", "zone": 6 },
+            { "offset": 19, "name": "Zone 7 Red", "type": "color", "component": "red", "zone": 7 },
+            { "offset": 20, "name": "Zone 7 Green", "type": "color", "component": "green", "zone": 7 },
+            { "offset": 21, "name": "Zone 7 Blue", "type": "color", "component": "blue", "zone": 7 },
+            { "offset": 22, "name": "Zone 8 Red", "type": "color", "component": "red", "zone": 8 },
+            { "offset": 23, "name": "Zone 8 Green", "type": "color", "component": "green", "zone": 8 },
+            { "offset": 24, "name": "Zone 8 Blue", "type": "color", "component": "blue", "zone": 8 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "shehds_flat_par_12x3w_rgbw",
+      "manufacturer": "Shehds",
+      "model": "LED Flat PAR 12x3W RGBW",
+      "beam_layout": {
+        "type": "rings",
+        "beams_by_ring": [3, 9]
+      },
+      "modes": [
+        {
+          "name": "8ch",
+          "footprint": 8,
+          "channels": [
+            { "offset": 1, "name": "Dimmer", "type": "intensity" },
+            { "offset": 2, "name": "Red", "type": "color", "component": "red" },
+            { "offset": 3, "name": "Green", "type": "color", "component": "green" },
+            { "offset": 4, "name": "Blue", "type": "color", "component": "blue" },
+            { "offset": 5, "name": "White", "type": "color", "component": "white" },
+            { "offset": 6, "name": "Strobe", "type": "strobe" },
+            {
+              "offset": 7,
+              "name": "Program",
+              "type": "program",
+              "ranges": [
+                { "from": 0, "to": 250, "name": "Auto Mode / Fade" },
+                { "from": 251, "to": 255, "name": "Sound Mode" }
+              ]
+            },
+            { "offset": 8, "name": "Function Speed", "type": "speed" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "shehds_led_wash_7x12w_rgbw_moving_head",
+      "manufacturer": "Shehds",
+      "model": "LED Wash 7x12W RGBW Moving Head Lighting",
+      "pan_range": 540,
+      "tilt_range": 180,
+      "beam_layout": {
+        "type": "rings",
+        "beams_by_ring": [1, 6]
+      },
+      "modes": [
+        {
+          "name": "10ch",
+          "footprint": 10,
+          "channels": [
+            { "offset": 1, "name": "Pan", "type": "pan" },
+            { "offset": 2, "name": "Tilt", "type": "tilt" },
+            { "offset": 3, "name": "Strobe", "type": "strobe" },
+            { "offset": 4, "name": "Red", "type": "color", "component": "red" },
+            { "offset": 5, "name": "Green", "type": "color", "component": "green" },
+            { "offset": 6, "name": "Blue", "type": "color", "component": "blue" },
+            { "offset": 7, "name": "White", "type": "color", "component": "white" },
+            {
+              "offset": 8,
+              "name": "Auto Mode",
+              "type": "program",
+              "ranges": [
+                { "from": 0, "to": 7, "name": "Off" },
+                { "from": 8, "to": 140, "name": "Auto Mode" },
+                { "from": 141, "to": 255, "name": "Sound Control" }
+              ]
+            },
+            { "offset": 9, "name": "Pan/Tilt Speed", "type": "pan_tilt_speed" },
+            {
+              "offset": 10,
+              "name": "Reset",
+              "type": "reset",
+              "ranges": [
+                { "from": 250, "to": 255, "name": "Reset" }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "15ch",
+          "footprint": 15,
+          "channels": [
+            { "offset": 1, "name": "Pan", "type": "pan" },
+            { "offset": 2, "name": "Pan Fine", "type": "pan_fine" },
+            { "offset": 3, "name": "Tilt", "type": "tilt" },
+            { "offset": 4, "name": "Tilt Fine", "type": "tilt_fine" },
+            { "offset": 5, "name": "Pan/Tilt Speed", "type": "pan_tilt_speed" },
+            { "offset": 6, "name": "Dimmer", "type": "intensity" },
+            { "offset": 7, "name": "Strobe", "type": "strobe" },
+            {
+              "offset": 8,
+              "name": "Color Selection",
+              "type": "color_program",
+              "ranges": [
+                { "from": 0, "to": 7, "name": "Color Selection" },
+                { "from": 8, "to": 231, "name": "Color Combination" },
+                { "from": 232, "to": 255, "name": "Color Jump" }
+              ]
+            },
+            { "offset": 9, "name": "Color Jump Speed", "type": "color_speed" },
+            { "offset": 10, "name": "Red", "type": "color", "component": "red" },
+            { "offset": 11, "name": "Green", "type": "color", "component": "green" },
+            { "offset": 12, "name": "Blue", "type": "color", "component": "blue" },
+            { "offset": 13, "name": "White", "type": "color", "component": "white" },
+            { "offset": 14, "name": "Auto Mode", "type": "auto_mode" },
+            {
+              "offset": 15,
+              "name": "Reset",
+              "type": "reset",
+              "ranges": [
+                { "from": 250, "to": 255, "name": "Reset" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
