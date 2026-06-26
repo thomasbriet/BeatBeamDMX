@@ -40,6 +40,9 @@ TRACK_PREVIEW_CACHE_DIR = Path(
     os.environ.get("BEATBEAM_TRACK_PREVIEW_CACHE_DIR")
     or (Path.home() / "Library/Application Support" / "BeatBeamDMX" / "track_preview_cache")
 )
+TRACK_PREVIEW_CACHE_FALLBACK_DIR = (
+    Path.home() / "Library/Application Support" / "BeatBeamDMX-user" / "track_preview_cache"
+)
 DEFAULT_HTTP_PORT = 8780
 DEFAULT_OSC_PORT = 4461
 DEFAULT_DMX_FPS = 30.0
@@ -48,6 +51,70 @@ FIXTURE_LIBRARY = load_fixture_profiles()
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = DEFAULT_HTTP_PORT
 REMOTE_ACCESS_CONFIG = None
+
+
+def _track_preview_cache_dirs():
+    dirs = [TRACK_PREVIEW_CACHE_DIR]
+    if "BEATBEAM_TRACK_PREVIEW_CACHE_DIR" not in os.environ:
+        dirs.append(TRACK_PREVIEW_CACHE_FALLBACK_DIR)
+    ordered = []
+    seen = set()
+    for path in dirs:
+        path_str = str(path)
+        if path_str in seen:
+            continue
+        seen.add(path_str)
+        ordered.append(path)
+    return ordered
+
+
+def _track_preview_cache_dir_is_writable(path):
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return False
+    probe = path / ".beatbeam_write_test"
+    try:
+        with probe.open("w", encoding="utf-8") as handle:
+            handle.write("ok")
+    except Exception:
+        return False
+    with suppress(Exception):
+        probe.unlink()
+    return True
+
+
+def track_preview_cache_write_dir():
+    for path in _track_preview_cache_dirs():
+        if _track_preview_cache_dir_is_writable(path):
+            return path
+    return _track_preview_cache_dirs()[0]
+
+
+def track_preview_summary_existing_paths_for_cache_key(cache_key):
+    paths = []
+    name = f"{str(cache_key or '').strip()}.json"
+    for cache_dir in _track_preview_cache_dirs():
+        path = cache_dir / name
+        try:
+            if path.exists():
+                paths.append(path)
+        except OSError:
+            continue
+    return paths
+
+
+def track_preview_summary_best_path_for_cache_key(cache_key):
+    existing = []
+    for path in track_preview_summary_existing_paths_for_cache_key(cache_key):
+        try:
+            existing.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    if existing:
+        existing.sort(key=lambda item: item[0], reverse=True)
+        return existing[0][1]
+    return track_preview_cache_write_dir() / f"{str(cache_key or '').strip()}.json"
 
 
 class TriggerLogger:
@@ -2547,11 +2614,13 @@ def track_preview_cache_key(track_title=None, track_artist=None, track_album=Non
 
 
 def track_preview_summary_path(track_title=None, track_artist=None, track_album=None):
-    return TRACK_PREVIEW_CACHE_DIR / f"{track_preview_cache_key(track_title, track_artist, track_album)}.json"
+    return track_preview_summary_best_path_for_cache_key(
+        track_preview_cache_key(track_title, track_artist, track_album)
+    )
 
 
 def track_preview_summary_path_for_cache_key(cache_key):
-    return TRACK_PREVIEW_CACHE_DIR / f"{str(cache_key or '').strip()}.json"
+    return track_preview_summary_best_path_for_cache_key(cache_key)
 
 
 def pick_variant(options, seed, fallback):
@@ -6400,6 +6469,7 @@ class DmxController:
                     "identity",
                     track_preview_identity(track_title, track_artist, track_album),
                 )
+                loaded.setdefault("dense_samples", [])
                 summary = loaded
         except Exception as exc:
             self.debug_log.log(
@@ -6426,10 +6496,22 @@ class DmxController:
 
     def _all_track_preview_summaries(self):
         summaries = []
-        try:
-            paths = sorted(TRACK_PREVIEW_CACHE_DIR.glob("*.json"))
-        except Exception:
-            return summaries
+        path_map = {}
+        for cache_dir in _track_preview_cache_dirs():
+            try:
+                raw_paths = sorted(cache_dir.glob("*.json"))
+            except Exception:
+                continue
+            for path in raw_paths:
+                cache_key = path.stem
+                try:
+                    cache_mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                current = path_map.get(cache_key)
+                if current is None or cache_mtime >= current[0]:
+                    path_map[cache_key] = (cache_mtime, path)
+        paths = [item[1] for item in sorted(path_map.values(), key=lambda item: item[1].stem)]
         for path in paths:
             cache_key = path.stem
             try:
@@ -6446,6 +6528,7 @@ class DmxController:
                         loaded = json.load(handle)
                     if isinstance(loaded, dict) and isinstance(loaded.get("segments"), list):
                         loaded.setdefault("cache_key", cache_key)
+                        loaded.setdefault("dense_samples", [])
                         summary = loaded
                 except Exception:
                     summary = None
@@ -6477,6 +6560,39 @@ class DmxController:
                 break
         return selected
 
+    def _preview_summary_dense_sample_for_seconds(self, preview_summary, current_seconds):
+        try:
+            current_seconds = max(0.0, float(current_seconds))
+        except (TypeError, ValueError):
+            return None
+        dense_samples = preview_summary.get("dense_samples") or []
+        if not dense_samples:
+            return None
+        previous = None
+        for sample in dense_samples:
+            try:
+                sample_seconds = max(0.0, float(sample.get("seconds") or 0.0))
+            except (TypeError, ValueError):
+                continue
+            if current_seconds <= sample_seconds:
+                if previous is None:
+                    return sample
+                try:
+                    previous_seconds = max(0.0, float(previous.get("seconds") or 0.0))
+                except (TypeError, ValueError):
+                    return sample
+                if abs(current_seconds - previous_seconds) <= abs(sample_seconds - current_seconds):
+                    return previous
+                return sample
+            previous = sample
+        return previous
+
+    def _preview_summary_signal_for_seconds(self, preview_summary, current_seconds):
+        return self._preview_summary_dense_sample_for_seconds(
+            preview_summary,
+            current_seconds,
+        ) or self._preview_summary_segment_for_seconds(preview_summary, current_seconds)
+
     def _preview_summary_match_score(self, preview_summary, osc_like):
         current_seconds = osc_like.get("time_display_seconds")
         if current_seconds is None:
@@ -6498,19 +6614,19 @@ class DmxController:
         if current_seconds > duration_seconds:
             time_penalty = min(1.0, (current_seconds - duration_seconds) / 18.0)
 
-        segment = self._preview_summary_segment_for_seconds(
+        signal = self._preview_summary_signal_for_seconds(
             preview_summary,
             min(current_seconds, duration_seconds),
         )
-        if not segment:
+        if not signal:
             return None
 
         score = 0.55 - time_penalty * 0.70
         band_state = osc_like.get("waveform_bands") or {}
         segment_pairs = [
-            (band_state.get("low"), segment.get("low")),
-            (band_state.get("mid"), segment.get("mid")),
-            (band_state.get("high"), segment.get("high")),
+            (band_state.get("low"), signal.get("low")),
+            (band_state.get("mid"), signal.get("mid")),
+            (band_state.get("high"), signal.get("high")),
         ]
         diffs = []
         for current_value, segment_value in segment_pairs:
@@ -6524,17 +6640,17 @@ class DmxController:
             score += max(0.0, 1.0 - (sum(diffs) / len(diffs))) * 0.95
 
         current_energy = osc_like.get("waveform_energy")
-        if current_energy is not None and segment.get("energy") is not None:
+        if current_energy is not None and signal.get("energy") is not None:
             try:
                 score += max(
                     0.0,
-                    1.0 - abs(float(current_energy) - float(segment.get("energy"))),
+                    1.0 - abs(float(current_energy) - float(signal.get("energy"))),
                 ) * 0.35
             except (TypeError, ValueError):
                 pass
 
         phrase_now = phrase_bucket(osc_like.get("phrase_current"))
-        phrase_segment = phrase_bucket(segment.get("phrase"))
+        phrase_segment = phrase_bucket(signal.get("phrase"))
         if phrase_now != "unknown":
             if phrase_now == phrase_segment:
                 score += 0.35
@@ -6548,15 +6664,26 @@ class DmxController:
         lookahead_state = osc_like.get("waveform_lookahead") or {}
         lookahead_2 = lookahead_state.get("2") or {}
         if any(lookahead_2.get(key) is not None for key in ("low", "mid", "high")):
-            next_index = min(
-                len(preview_summary.get("segments") or []) - 1,
-                int(segment.get("index") or 0) + 1,
-            )
-            next_segment = (preview_summary.get("segments") or [segment])[next_index]
+            next_signal = None
+            try:
+                bpm = float(osc_like.get("bpm") or 0.0)
+            except (TypeError, ValueError):
+                bpm = 0.0
+            if bpm > 0.0:
+                next_signal = self._preview_summary_signal_for_seconds(
+                    preview_summary,
+                    min(duration_seconds, current_seconds + (120.0 / bpm)),
+                )
+            if next_signal is None:
+                next_index = min(
+                    len(preview_summary.get("segments") or []) - 1,
+                    int(self._preview_summary_segment_for_seconds(preview_summary, min(current_seconds, duration_seconds)).get("index") or 0) + 1,
+                )
+                next_signal = (preview_summary.get("segments") or [signal])[next_index]
             diffs = []
             for key in ("low", "mid", "high"):
                 current_value = lookahead_2.get(key)
-                next_value = next_segment.get(key)
+                next_value = next_signal.get(key)
                 if current_value is None or next_value is None:
                     continue
                 try:
@@ -6565,6 +6692,32 @@ class DmxController:
                     continue
             if diffs:
                 score += max(0.0, 1.0 - (sum(diffs) / len(diffs))) * 0.45
+
+        lookahead_4 = lookahead_state.get("4") or {}
+        if any(lookahead_4.get(key) is not None for key in ("low", "mid", "high")):
+            future_signal = None
+            try:
+                bpm = float(osc_like.get("bpm") or 0.0)
+            except (TypeError, ValueError):
+                bpm = 0.0
+            if bpm > 0.0:
+                future_signal = self._preview_summary_signal_for_seconds(
+                    preview_summary,
+                    min(duration_seconds, current_seconds + (240.0 / bpm)),
+                )
+            if future_signal is not None:
+                diffs = []
+                for key in ("low", "mid", "high"):
+                    current_value = lookahead_4.get(key)
+                    next_value = future_signal.get(key)
+                    if current_value is None or next_value is None:
+                        continue
+                    try:
+                        diffs.append(abs(float(current_value) - float(next_value)))
+                    except (TypeError, ValueError):
+                        continue
+                if diffs:
+                    score += max(0.0, 1.0 - (sum(diffs) / len(diffs))) * 0.22
 
         return score
 
@@ -10569,7 +10722,7 @@ def remote_state():
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "BeatBeamDMX/0.1"
+    server_version = "BeatBeamDMX/1.0-rc1"
     protocol_version = "HTTP/1.1"
 
     def request_context(self):

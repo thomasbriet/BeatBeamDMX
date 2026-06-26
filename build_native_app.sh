@@ -36,9 +36,9 @@ cat > "${CONTENTS}/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key>
   <string>com.local.beatbeamdmx.native</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>100</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1</string>
+  <string>1.0</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>
