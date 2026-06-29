@@ -43,6 +43,7 @@ TRACK_PREVIEW_CACHE_DIR = Path(
 TRACK_PREVIEW_CACHE_FALLBACK_DIR = (
     Path.home() / "Library/Application Support" / "BeatBeamDMX-user" / "track_preview_cache"
 )
+REMOTE_ADDRESS_CACHE_TTL = 3.0
 DEFAULT_HTTP_PORT = 8780
 DEFAULT_OSC_PORT = 4461
 DEFAULT_DMX_FPS = 30.0
@@ -51,6 +52,7 @@ FIXTURE_LIBRARY = load_fixture_profiles()
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = DEFAULT_HTTP_PORT
 REMOTE_ACCESS_CONFIG = None
+REMOTE_ADDRESS_CACHE = {"updated_at": 0.0, "state": None}
 
 
 def _track_preview_cache_dirs():
@@ -10542,27 +10544,99 @@ def serial_ports():
     return ports
 
 
-def primary_lan_ip():
+def _hardware_port_labels():
+    labels = {}
+    with suppress(Exception):
+        result = subprocess.run(
+            ["networksetup", "-listallhardwareports"],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+        hardware_port = None
+        for raw_line in (result.stdout or "").splitlines():
+            line = raw_line.strip()
+            if line.startswith("Hardware Port:"):
+                hardware_port = line.partition(":")[2].strip()
+            elif line.startswith("Device:"):
+                device = line.partition(":")[2].strip()
+                if hardware_port and device:
+                    labels[device] = hardware_port
+    return labels
+
+
+def _interface_kind(name, label):
+    text = f"{name} {label}".lower()
+    if (
+        name.startswith(("lo", "utun", "awdl", "llw", "gif", "stf", "anpi"))
+        or "loopback" in text
+        or "tailscale" in text
+    ):
+        return None
+    if any(token in text for token in ("iphone usb", "ipad usb", " usb", "usb ")):
+        return "usb"
+    if any(token in text for token in ("ethernet", "lan", "thunderbolt")):
+        return "wired"
+    if any(token in text for token in ("wi-fi", "wifi", "airport")):
+        return "wifi"
+    return "network"
+
+
+def _interface_ipv4_candidates():
+    labels = _hardware_port_labels()
     candidates = []
-    with suppress(Exception):
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            udp.connect(("8.8.8.8", 80))
-            candidates.append(udp.getsockname()[0])
-        finally:
-            udp.close()
-    with suppress(Exception):
-        hostname_ip = socket.gethostbyname(socket.gethostname())
-        candidates.append(hostname_ip)
-    for candidate in candidates:
-        if (
-            candidate
-            and candidate != "127.0.0.1"
-            and "." in candidate
-            and not candidate.startswith("169.254.")
-        ):
-            return candidate
-    return None
+    seen_ips = set()
+    for _, name in socket.if_nameindex():
+        label = labels.get(name, name)
+        kind = _interface_kind(name, label)
+        if not kind:
+            continue
+        with suppress(Exception):
+            result = subprocess.run(
+                ["ifconfig", name],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=False,
+            )
+            text = result.stdout or ""
+            if "status: inactive" in text and "status: active" not in text:
+                continue
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line.startswith("inet "):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                ip = parts[1].strip()
+                if (
+                    not ip
+                    or ip == "127.0.0.1"
+                    or "." not in ip
+                    or ip.startswith("169.254.")
+                    or ip in seen_ips
+                ):
+                    continue
+                seen_ips.add(ip)
+                candidates.append(
+                    {
+                        "name": name,
+                        "label": label,
+                        "kind": kind,
+                        "ip": ip,
+                    }
+                )
+    kind_rank = {"usb": 0, "wired": 1, "wifi": 2, "network": 3}
+    candidates.sort(
+        key=lambda item: (
+            kind_rank.get(item["kind"], 9),
+            item["label"],
+            item["ip"],
+        )
+    )
+    return candidates
 
 
 def default_remote_access_config():
@@ -10651,35 +10725,71 @@ def remote_access_pairing_code():
 
 
 def remote_access_state():
+    now = time.time()
+    cached = REMOTE_ADDRESS_CACHE.get("state")
+    if cached and (now - float(REMOTE_ADDRESS_CACHE.get("updated_at") or 0.0)) < REMOTE_ADDRESS_CACHE_TTL:
+        return cached
+
     local_url = f"http://127.0.0.1:{SERVER_PORT}/remote"
-    lan_ip = primary_lan_ip()
-    tailscale_ip = tailscale_ipv4()
     bind_host = SERVER_HOST
     token = remote_access_token()
     token_suffix = f"?token={token}" if token and remote_access_requires_token() else ""
+    interface_urls = []
+    usb_url = None
+    lan_url = None
     if bind_host in ("0.0.0.0", "::"):
-        lan_url = f"http://{lan_ip}:{SERVER_PORT}/remote{token_suffix}" if lan_ip else None
-    elif bind_host in ("127.0.0.1", "localhost"):
-        lan_url = None
-    else:
+        for interface in _interface_ipv4_candidates():
+            url = f"http://{interface['ip']}:{SERVER_PORT}/remote{token_suffix}"
+            interface_urls.append(
+                {
+                    "name": interface["name"],
+                    "label": interface["label"],
+                    "kind": interface["kind"],
+                    "ip": interface["ip"],
+                    "url": url,
+                }
+            )
+            if interface["kind"] == "usb" and not usb_url:
+                usb_url = url
+            elif not lan_url:
+                lan_url = url
+    elif bind_host not in ("127.0.0.1", "localhost"):
         lan_url = f"http://{bind_host}:{SERVER_PORT}/remote{token_suffix}"
+        interface_urls.append(
+            {
+                "name": "bind",
+                "label": "Configured host",
+                "kind": "network",
+                "ip": bind_host,
+                "url": lan_url,
+            }
+        )
+
+    tailscale_ip = tailscale_ipv4()
     tailscale_url = (
         f"http://{tailscale_ip}:{SERVER_PORT}/remote{token_suffix}"
         if tailscale_ip
         else None
     )
-    preferred_url = tailscale_url or lan_url or (f"{local_url}{token_suffix}" if token_suffix else local_url)
-    return {
+    preferred_url = usb_url or tailscale_url or lan_url or (
+        f"{local_url}{token_suffix}" if token_suffix else local_url
+    )
+    payload = {
         "enabled": bind_host not in ("127.0.0.1", "localhost"),
         "bind_host": bind_host,
         "port": SERVER_PORT,
         "path": "/remote",
         "local_url": f"{local_url}{token_suffix}" if token_suffix else local_url,
         "lan_url": lan_url,
+        "usb_url": usb_url,
         "tailscale_url": tailscale_url,
         "preferred_url": preferred_url,
+        "interface_urls": interface_urls,
         "auth_required": bool(token_suffix),
     }
+    REMOTE_ADDRESS_CACHE["updated_at"] = now
+    REMOTE_ADDRESS_CACHE["state"] = payload
+    return payload
 
 
 def full_state():
@@ -10722,7 +10832,7 @@ def remote_state():
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "BeatBeamDMX/1.0-rc1"
+    server_version = "BeatBeamDMX/1.0"
     protocol_version = "HTTP/1.1"
 
     def request_context(self):

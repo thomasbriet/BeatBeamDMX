@@ -69,6 +69,16 @@ final class RemoteStore: ObservableObject {
     private var eventStreamTask: Task<Void, Never>?
     private let fallbackPollIntervalNanoseconds: UInt64 = 2_500_000_000
     private let streamRetryDelayNanoseconds: UInt64 = 900_000_000
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = 12
+        configuration.timeoutIntervalForResource = 3600
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.allowsConstrainedNetworkAccess = true
+        configuration.allowsExpensiveNetworkAccess = true
+        return URLSession(configuration: configuration)
+    }()
 
     let styles: [StyleOption] = [
         .init(value: "adaptive", title: "Adaptive"),
@@ -356,7 +366,7 @@ final class RemoteStore: ObservableObject {
 
     private func runEventStream() async throws {
         let request = try eventStreamRequest("/api/remote-events")
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
@@ -528,7 +538,7 @@ final class RemoteStore: ObservableObject {
             request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
@@ -566,7 +576,7 @@ final class RemoteStore: ObservableObject {
     }
 
     private func eventStreamRequest(_ path: String) throws -> URLRequest {
-        var request = try buildRequest(path: path, method: "GET", timeoutInterval: 300)
+        var request = try buildRequest(path: path, method: "GET", timeoutInterval: 3600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         return request

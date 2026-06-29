@@ -190,6 +190,7 @@ struct RemoteAccessState: Decodable {
     let path: String
     let localUrl: String?
     let lanUrl: String?
+    let usbUrl: String?
     let tailscaleUrl: String?
     let preferredUrl: String?
     let authRequired: Bool
@@ -2451,9 +2452,11 @@ final class AppModel: ObservableObject {
             return
         }
         if let remote = state.remote {
-            nativeLog("remote state decoded: preferred=\(remote.preferredUrl ?? "nil") tailscale=\(remote.tailscaleUrl ?? "nil") lan=\(remote.lanUrl ?? "nil") local=\(remote.localUrl ?? "nil")")
-            remoteURLText = remote.preferredUrl ?? remote.tailscaleUrl ?? remote.lanUrl ?? remote.localUrl ?? "-"
-            if let tailscaleUrl = remote.tailscaleUrl, !tailscaleUrl.isEmpty {
+            nativeLog("remote state decoded: preferred=\(remote.preferredUrl ?? "nil") usb=\(remote.usbUrl ?? "nil") tailscale=\(remote.tailscaleUrl ?? "nil") lan=\(remote.lanUrl ?? "nil") local=\(remote.localUrl ?? "nil")")
+            remoteURLText = remote.preferredUrl ?? remote.usbUrl ?? remote.tailscaleUrl ?? remote.lanUrl ?? remote.localUrl ?? "-"
+            if let usbUrl = remote.usbUrl, !usbUrl.isEmpty, remoteURLText == usbUrl {
+                remoteStatusText = "USB/Wired remote: \(usbUrl)"
+            } else if let tailscaleUrl = remote.tailscaleUrl, !tailscaleUrl.isEmpty {
                 remoteStatusText = "Tailscale remote: \(tailscaleUrl)"
             } else if let lanUrl = remote.lanUrl, !lanUrl.isEmpty {
                 remoteStatusText = "LAN remote: \(lanUrl)"
