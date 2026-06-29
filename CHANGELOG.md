@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.0-unreleased]
+
+### Added
+- Start van de `1.1` ontwikkelcyclus.
+
 ## [1.0.0] - 2026-06-29
 
 ### Added

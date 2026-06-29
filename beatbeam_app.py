@@ -10832,7 +10832,7 @@ def remote_state():
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "BeatBeamDMX/1.0"
+    server_version = "BeatBeamDMX/1.1-dev"
     protocol_version = "HTTP/1.1"
 
     def request_context(self):
