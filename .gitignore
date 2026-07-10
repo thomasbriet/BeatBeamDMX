@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 dist-native-app/
 beatbeam_remote.json
+beatbeam_transport.json
 vendor/
 *.xcuserstate
 xcuserdata/

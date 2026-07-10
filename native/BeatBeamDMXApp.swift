@@ -1,13 +1,195 @@
 import AppKit
+import AVFoundation
+import CoreAudio
 import CoreImage.CIFilterBuiltins
 import Darwin
 import Foundation
+import MetalKit
+import SceneKit
 import SwiftUI
 
-let nativeLogURL = URL(fileURLWithPath: "/tmp/beatbeam-native.log")
-let backendLogURL = URL(fileURLWithPath: "/tmp/beatbeam-native-backend.log")
+private let beamConeShaderModifiers: [SCNShaderModifierEntryPoint: String] = [
+    .geometry: """
+    #pragma varyings
+    float3 beamLocalPos;
+
+    #pragma body
+    out.beamLocalPos = _geometry.position.xyz;
+    """,
+    .fragment: """
+    #pragma arguments
+    float beamFalloffExponent;
+    float beamSourceLift;
+    float beamViewExponent;
+    float beamNoiseAmount;
+    float beamNoiseScale;
+    float beamMinimumAlpha;
+    float beamGlowBoost;
+
+    #pragma varyings
+    float3 beamLocalPos;
+
+    #pragma transparent
+
+    #pragma declaration
+    float beamNoiseHash(float3 p) {
+        return fract(sin(dot(p, float3(12.9898, 78.233, 37.719))) * 43758.5453);
+    }
+
+    #pragma body
+    float minY = scn_node.boundingBox[0].y;
+    float maxY = scn_node.boundingBox[1].y;
+    float lengthRange = max(0.0001, maxY - minY);
+    float beamT = saturate((in.beamLocalPos.y - minY) / lengthRange);
+    float sourceMask = pow(max(0.0, 1.0 - beamT), beamFalloffExponent);
+    float sideView = pow(
+        saturate(1.0 - abs(dot(normalize(_surface.view), normalize(_surface.geometryNormal)))),
+        beamViewExponent
+    );
+    float breakup = mix(
+        1.0 - beamNoiseAmount,
+        1.0,
+        beamNoiseHash(float3(
+            in.beamLocalPos.x * beamNoiseScale,
+            in.beamLocalPos.z * beamNoiseScale,
+            beamT * 21.0 + scn_frame.time * 0.25
+        ))
+    );
+    float beamMask = max(
+        beamMinimumAlpha,
+        (beamSourceLift + sourceMask * (1.0 - beamSourceLift)) *
+        (0.24 + sideView * 0.76) *
+        breakup
+    );
+    float glowMask = beamMask * (0.82 + sourceMask * beamGlowBoost);
+    _output.color.rgb *= glowMask;
+    _output.color.a *= beamMask;
+    """
+]
+
+private func appInfoString(_ key: String, default defaultValue: String) -> String {
+    guard let rawValue = Bundle.main.object(forInfoDictionaryKey: key) else {
+        return defaultValue
+    }
+    if let value = rawValue as? String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? defaultValue : trimmed
+    }
+    if let number = rawValue as? NSNumber {
+        return number.stringValue
+    }
+    return defaultValue
+}
+
+private func appInfoInt(_ key: String, default defaultValue: Int) -> Int {
+    guard let rawValue = Bundle.main.object(forInfoDictionaryKey: key) else {
+        return defaultValue
+    }
+    if let number = rawValue as? NSNumber {
+        return number.intValue
+    }
+    if let value = rawValue as? String,
+       let parsed = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) {
+        return parsed
+    }
+    return defaultValue
+}
+
+private let beatBeamAppDisplayName = appInfoString("CFBundleDisplayName", default: "BeatBeam DMX")
+private let beatBeamAppVersion = appInfoString("CFBundleShortVersionString", default: "1.2.0-dev")
+private let beatBeamAppBundleFileName = Bundle.main.bundleURL.lastPathComponent
+private let beatBeamDefaultsPrefix = appInfoString("BeatBeamDefaultsPrefix", default: "BeatBeamDMX")
+private let beatBeamBackendPort = appInfoInt("BeatBeamBackendPort", default: 8780)
+private let beatBeamBackendOscPort = appInfoInt("BeatBeamBackendOscPort", default: 4461)
+private let beatBeamSupportDirectoryName = appInfoString("BeatBeamSupportDirectoryName", default: "BeatBeamDMX Native")
+private let beatBeamStableSupportDirectoryName = appInfoString("BeatBeamStableSupportDirectoryName", default: "BeatBeamDMX Native")
+private let beatBeamTemporaryDirectoryName = appInfoString("BeatBeamTemporaryDirectoryName", default: "BeatBeamDMX")
+private let beatBeamLogStem = appInfoString("BeatBeamLogStem", default: beatBeamDefaultsPrefix.lowercased())
+private let beatBeamAppSlug = appInfoString("BeatBeamAppSlug", default: beatBeamDefaultsPrefix)
+let nativeLogURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(beatBeamLogStem)-native.log")
+let backendLogURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(beatBeamLogStem)-native-backend.log")
 private let stageMapAspectRatio: CGFloat = 16.0 / 9.0
-private let requiredBackendSchemaVersion = 3
+private let requiredBackendSchemaVersion = 4
+private let defaultBackendOscPort = beatBeamBackendOscPort
+
+private func defaultRekordboxBridgeScriptPath() -> String {
+    let fallback = (URL(fileURLWithPath: NSHomeDirectory()) as URL)
+        .appendingPathComponent("BPM Trigger/start_bridge.sh")
+        .path
+    let candidates: [String] = [
+        fallback,
+        URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("../BPM Trigger/start_bridge.sh")
+            .standardizedFileURL
+            .path,
+    ]
+    for candidate in candidates where FileManager.default.fileExists(atPath: candidate) {
+        return candidate
+    }
+    return fallback
+}
+
+private func runSystemProcess(_ executable: String, _ args: [String]) -> (ok: Bool, message: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = args
+
+    let out = Pipe()
+    let err = Pipe()
+    process.standardOutput = out
+    process.standardError = err
+
+    do {
+        try process.run()
+        process.waitUntilExit()
+        let outText = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let ok = process.terminationStatus == 0
+        let msg = (outText + "\n" + errText).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (ok, msg)
+    } catch {
+        return (false, error.localizedDescription)
+    }
+}
+
+private func launchSystemProcess(_ executable: String, _ args: [String], startupWaitMicros: useconds_t = 350_000) -> (ok: Bool, message: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = args
+
+    let out = Pipe()
+    let err = Pipe()
+    process.standardOutput = out
+    process.standardError = err
+
+    do {
+        try process.run()
+        usleep(startupWaitMicros)
+        if process.isRunning {
+            return (true, "")
+        }
+
+        let outText = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let ok = process.terminationStatus == 0
+        let msg = (outText + "\n" + errText).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (ok, msg)
+    } catch {
+        return (false, error.localizedDescription)
+    }
+}
+
+private func shellSingleQuote(_ text: String) -> String {
+    "'" + text.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+}
+
+private func runAdministratorShell(_ command: String) -> (ok: Bool, message: String) {
+    let escaped = command
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+    let script = "do shell script \"\(escaped)\" with administrator privileges"
+    return runSystemProcess("/usr/bin/osascript", ["-e", script])
+}
 
 final class BeatBeamAppDelegate: NSObject, NSApplicationDelegate {
     var onTerminate: (() -> Void)?
@@ -22,12 +204,12 @@ final class BeatBeamAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 enum StageWorld {
-    static let minX: Double = -450
-    static let maxX: Double = 450
-    static let minY: Double = -50
-    static let maxY: Double = 550
+    static let minX: Double = -700
+    static let maxX: Double = 700
+    static let minY: Double = -200
+    static let maxY: Double = 900
     static let minZ: Double = 0
-    static let maxZ: Double = 350
+    static let maxZ: Double = 450
     static let gridStepCm: Double = 50
     static let beamMaxDistanceCm: Double = 700
     static let movingHeadBeamDistanceCm: Double = 350
@@ -181,6 +363,7 @@ struct AppState: Decodable {
     let osc: OscState
     let remote: RemoteAccessState?
     let source: SourceState
+    let transport: TransportState
 }
 
 struct RemoteAccessState: Decodable {
@@ -258,6 +441,7 @@ struct SlotState: Decodable {
     let strobe: Int
     let program: Int
     let speed: Int
+    let extraValues: [String: Int]?
     let pan: Int
     let tilt: Int
     let panTiltSpeed: Int
@@ -308,6 +492,7 @@ struct SlotWorldPosition: Codable {
     var z: Double
     var yawDegrees: Double
     var pitchDegrees: Double
+    var rollDegrees: Double
     var panFlip: Bool
     var tiltFlip: Bool
 
@@ -317,6 +502,7 @@ struct SlotWorldPosition: Codable {
         z: Double,
         yawDegrees: Double = 0,
         pitchDegrees: Double = 0,
+        rollDegrees: Double = 0,
         panFlip: Bool = false,
         tiltFlip: Bool = false
     ) {
@@ -325,6 +511,7 @@ struct SlotWorldPosition: Codable {
         self.z = z
         self.yawDegrees = yawDegrees
         self.pitchDegrees = pitchDegrees
+        self.rollDegrees = rollDegrees
         self.panFlip = panFlip
         self.tiltFlip = tiltFlip
     }
@@ -335,6 +522,7 @@ struct SlotWorldPosition: Codable {
         case z
         case yawDegrees
         case pitchDegrees
+        case rollDegrees
         case panFlip
         case tiltFlip
     }
@@ -346,6 +534,7 @@ struct SlotWorldPosition: Codable {
         z = try container.decode(Double.self, forKey: .z)
         yawDegrees = try container.decodeIfPresent(Double.self, forKey: .yawDegrees) ?? 0
         pitchDegrees = try container.decodeIfPresent(Double.self, forKey: .pitchDegrees) ?? 0
+        rollDegrees = try container.decodeIfPresent(Double.self, forKey: .rollDegrees) ?? 0
         panFlip = try container.decodeIfPresent(Bool.self, forKey: .panFlip) ?? false
         tiltFlip = try container.decodeIfPresent(Bool.self, forKey: .tiltFlip) ?? false
     }
@@ -369,10 +558,36 @@ struct ChannelConflict: Decodable {
 
 struct SlotPreview: Decodable {
     let enabled: Bool
+    let fixtureKind: String?
     let red: Int
     let green: Int
     let blue: Int
     let white: Int
+    let spotRed: Int?
+    let spotGreen: Int?
+    let spotBlue: Int?
+    let spotWhite: Int?
+    let spotBrightness: Int?
+    let spotColorIndex: Int?
+    let spotColorLabel: String?
+    let spotColorToken: String?
+    let spotColorCycle: Bool?
+    let spotColorCycleRate: Double?
+    let spotColorCount: Int?
+    let spotPatternIndex: Int?
+    let spotPatternLabel: String?
+    let spotPatternId: String?
+    let spotPatternOpen: Bool?
+    let spotPatternCycle: Bool?
+    let spotPatternCycleRate: Double?
+    let spotPatternCount: Int?
+    let spotPatternRotationDegrees: Double?
+    let spotPatternSpinDps: Double?
+    let beeEffectMode: String?
+    let beeSpread: Double?
+    let beeBackgroundLevel: Double?
+    let beeSoftness: Double?
+    let beeShapeTransition: Double?
     let brightness: Int
     let strobe: Int
     let strobeActive: Bool
@@ -402,11 +617,45 @@ struct StageBeamPose {
     let tiltDegrees: Double
 }
 
-private let frontProjectionMirrorDefaultsKey = "BeatBeamDMX.frontProjectionMirrored"
-private let topProjectionRotationDefaultsKey = "BeatBeamDMX.topProjectionRotationQuarterTurns"
+private func defaultsKey(_ suffix: String) -> String {
+    "\(beatBeamDefaultsPrefix).\(suffix)"
+}
+
+private let frontProjectionMirrorDefaultsKey = defaultsKey("frontProjectionMirrored")
+private let topProjectionRotationDefaultsKey = defaultsKey("topProjectionRotationQuarterTurns")
+private let mapProjectionShow3DDefaultsKey = defaultsKey("mapProjectionShow3D")
+private let mapProjection2DZoomDefaultsKey = defaultsKey("mapProjection2DZoom")
 
 private func normalizedQuarterTurns(_ value: Int) -> Int {
     ((value % 4) + 4) % 4
+}
+
+private func clampedProjection2DZoom(_ value: Double) -> Double {
+    min(max(value, 0.55), 1.80)
+}
+
+private func projection2DZoomValue() -> Double {
+    let stored = UserDefaults.standard.double(forKey: mapProjection2DZoomDefaultsKey)
+    if stored == 0 {
+        return 1.0
+    }
+    return clampedProjection2DZoom(stored)
+}
+
+private func projectionViewportTransform(_ point: CGPoint, zoom: Double = projection2DZoomValue()) -> CGPoint {
+    let safeZoom = clampedProjection2DZoom(zoom)
+    return CGPoint(
+        x: 0.5 + (point.x - 0.5) * safeZoom,
+        y: 0.5 + (point.y - 0.5) * safeZoom
+    )
+}
+
+private func projectionViewportInverse(_ point: CGPoint, zoom: Double = projection2DZoomValue()) -> CGPoint {
+    let safeZoom = max(0.0001, clampedProjection2DZoom(zoom))
+    return CGPoint(
+        x: 0.5 + (point.x - 0.5) / safeZoom,
+        y: 0.5 + (point.y - 0.5) / safeZoom
+    )
 }
 
 private func rotatedTopProjectionPoint(_ point: CGPoint, quarterTurns: Int) -> CGPoint {
@@ -858,10 +1107,466 @@ struct OscMessage: Decodable {
 
 struct SourceState: Decodable {
     let mode: String
+    let resolvedMode: String?
     let app: String
     let port: Int
     let expectedDestination: String
     let lastSource: String?
+}
+
+struct TransportState: Decodable {
+    let mode: String
+    let resolvedMode: String
+    let manualBpm: Double
+    let effectiveBpm: Double?
+    let manualPhrase: String
+    let manualPhraseLabel: String
+    let idleAnimationEnabled: Bool
+    let tapCount: Int
+    let tapLocked: Bool
+    let externalAvailable: Bool
+    let lastTapAt: Double?
+}
+
+struct AudioInputDevice: Identifiable, Hashable {
+    let id: AudioDeviceID
+    let name: String
+}
+
+private func getAudioDeviceIDs() -> [AudioDeviceID] {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var dataSize: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize) == noErr else {
+        return []
+    }
+
+    let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+    var ids = Array(repeating: AudioDeviceID(0), count: count)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &ids) == noErr else {
+        return []
+    }
+    return ids
+}
+
+private func audioDeviceName(_ deviceID: AudioDeviceID) -> String {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioObjectPropertyName,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var name: CFString = "" as CFString
+    var dataSize = UInt32(MemoryLayout<CFString>.size)
+    let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &name)
+    return status == noErr ? (name as String) : "Onbekend"
+}
+
+private func audioDeviceHasInput(_ deviceID: AudioDeviceID) -> Bool {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreamConfiguration,
+        mScope: kAudioDevicePropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var dataSize: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &dataSize) == noErr else {
+        return false
+    }
+
+    let rawPointer = UnsafeMutableRawPointer.allocate(
+        byteCount: Int(dataSize),
+        alignment: MemoryLayout<AudioBufferList>.alignment
+    )
+    defer { rawPointer.deallocate() }
+
+    let bufferListPointer = rawPointer.bindMemory(to: AudioBufferList.self, capacity: 1)
+    guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, bufferListPointer) == noErr else {
+        return false
+    }
+
+    let buffers = UnsafeMutableAudioBufferListPointer(bufferListPointer)
+    return buffers.contains { $0.mNumberChannels > 0 }
+}
+
+private func listAudioInputDevices() -> [AudioInputDevice] {
+    getAudioDeviceIDs()
+        .filter { audioDeviceHasInput($0) }
+        .map { AudioInputDevice(id: $0, name: audioDeviceName($0)) }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+}
+
+private func setEngineInputDevice(engine: AVAudioEngine, deviceID: AudioDeviceID) -> Bool {
+    guard let audioUnit = engine.inputNode.audioUnit else { return false }
+    var id = deviceID
+    let status = AudioUnitSetProperty(
+        audioUnit,
+        kAudioOutputUnitProperty_CurrentDevice,
+        kAudioUnitScope_Global,
+        0,
+        &id,
+        UInt32(MemoryLayout<AudioDeviceID>.size)
+    )
+    return status == noErr
+}
+
+struct LiveAudioFeatureFrame {
+    let rms: Double
+    let low: Double
+    let mid: Double
+    let high: Double
+    let kick: Double
+    let snare: Double
+    let hihat: Double
+}
+
+final class LiveAudioFeatureAnalyzer {
+    private let sampleRate: Double
+    private let lowCutoff: Double = 180.0
+    private let midCutoff: Double = 2_000.0
+    private var lowPassState: Double = 0.0
+    private var midLowPassState: Double = 0.0
+    private var midHighPassState: Double = 0.0
+    private var highSplitLowPassState: Double = 0.0
+    private var peakLow: Double = 0.01
+    private var peakMid: Double = 0.01
+    private var peakHigh: Double = 0.01
+    private var fastLow: Double = 0.0
+    private var fastMid: Double = 0.0
+    private var fastHigh: Double = 0.0
+    private var slowLow: Double = 0.0
+    private var slowMid: Double = 0.0
+    private var slowHigh: Double = 0.0
+    private var kickHold: Double = 0.0
+    private var snareHold: Double = 0.0
+    private var hihatHold: Double = 0.0
+
+    init(sampleRate: Double) {
+        self.sampleRate = max(8_000.0, sampleRate)
+    }
+
+    func process(buffer: AVAudioPCMBuffer) -> LiveAudioFeatureFrame? {
+        guard let channels = buffer.floatChannelData else { return nil }
+        let frameCount = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard frameCount > 0, channelCount > 0 else { return nil }
+
+        let lowAlpha = filterAlpha(cutoff: lowCutoff)
+        let midAlpha = filterAlpha(cutoff: midCutoff)
+
+        var fullSumSquares = 0.0
+        var lowSumSquares = 0.0
+        var midSumSquares = 0.0
+        var highSumSquares = 0.0
+
+        for frame in 0..<frameCount {
+            var mono: Double = 0.0
+            for channel in 0..<channelCount {
+                mono += Double(channels[channel][frame])
+            }
+            mono /= Double(channelCount)
+
+            lowPassState += lowAlpha * (mono - lowPassState)
+            midLowPassState += midAlpha * (mono - midLowPassState)
+            midHighPassState += lowAlpha * (mono - midHighPassState)
+            highSplitLowPassState += midAlpha * (mono - highSplitLowPassState)
+
+            let low = lowPassState
+            let mid = midLowPassState - midHighPassState
+            let high = mono - highSplitLowPassState
+
+            fullSumSquares += mono * mono
+            lowSumSquares += low * low
+            midSumSquares += mid * mid
+            highSumSquares += high * high
+        }
+
+        let scale = max(1.0, Double(frameCount))
+        let rms = sqrt(fullSumSquares / scale + 1e-12)
+        let lowNorm = normalizedBand(sqrt(lowSumSquares / scale + 1e-12), peak: &peakLow, response: 0.996)
+        let midNorm = normalizedBand(sqrt(midSumSquares / scale + 1e-12), peak: &peakMid, response: 0.996)
+        let highNorm = normalizedBand(sqrt(highSumSquares / scale + 1e-12), peak: &peakHigh, response: 0.996)
+
+        let kick = updateOnset(
+            current: lowNorm,
+            fast: &fastLow,
+            slow: &slowLow,
+            hold: &kickHold,
+            energyFloor: 0.08,
+            liftFloor: 0.030,
+            riseFloor: 0.012,
+            dominance: clamp01(lowNorm - (midNorm * 0.55 + highNorm * 0.25))
+        )
+        let snare = updateOnset(
+            current: midNorm,
+            fast: &fastMid,
+            slow: &slowMid,
+            hold: &snareHold,
+            energyFloor: 0.07,
+            liftFloor: 0.022,
+            riseFloor: 0.010,
+            dominance: clamp01(midNorm - (lowNorm * 0.30 + highNorm * 0.30))
+        )
+        let hihat = updateOnset(
+            current: highNorm,
+            fast: &fastHigh,
+            slow: &slowHigh,
+            hold: &hihatHold,
+            energyFloor: 0.05,
+            liftFloor: 0.018,
+            riseFloor: 0.008,
+            dominance: clamp01(highNorm - (lowNorm * 0.18 + midNorm * 0.22))
+        )
+
+        return LiveAudioFeatureFrame(
+            rms: clamp01(rms * 10.0),
+            low: lowNorm,
+            mid: midNorm,
+            high: highNorm,
+            kick: kick,
+            snare: snare,
+            hihat: hihat
+        )
+    }
+
+    private func filterAlpha(cutoff: Double) -> Double {
+        let normalized = (2.0 * Double.pi * cutoff) / sampleRate
+        return clamp01(1.0 - exp(-normalized))
+    }
+
+    private func normalizedBand(_ value: Double, peak: inout Double, response: Double) -> Double {
+        peak = max(value, peak * response)
+        return clamp01(value / max(peak * 0.82, 1e-6))
+    }
+
+    private func updateOnset(
+        current: Double,
+        fast: inout Double,
+        slow: inout Double,
+        hold: inout Double,
+        energyFloor: Double,
+        liftFloor: Double,
+        riseFloor: Double,
+        dominance: Double
+    ) -> Double {
+        let previousFast = fast
+        fast += 0.55 * (current - fast)
+        slow += 0.10 * (current - slow)
+
+        let lift = max(0.0, fast - slow)
+        let rise = max(0.0, fast - previousFast)
+        let transient = (current >= energyFloor && (lift >= liftFloor || rise >= riseFloor))
+            ? clamp01(
+                ((lift - liftFloor) / 0.16) * 0.52
+                + ((rise - riseFloor) / 0.10) * 0.28
+                + ((current - energyFloor) / 0.30) * 0.12
+                + dominance * 0.08
+            )
+            : 0.0
+
+        hold = max(transient, hold * 0.58)
+        return hold
+    }
+
+    private func clamp01(_ value: Double) -> Double {
+        min(1.0, max(0.0, value))
+    }
+}
+
+final class OscFloatForwarder {
+    private var socketFD: Int32 = -1
+    private var remoteAddress = sockaddr_storage()
+    private var remoteAddressLength: socklen_t = 0
+    private let lock = NSLock()
+
+    deinit {
+        stop()
+    }
+
+    func start(host: String, port: Int) throws {
+        stop()
+        guard !host.isEmpty else {
+            throw NSError(domain: "BeatBeamDMX", code: 5101, userInfo: [NSLocalizedDescriptionKey: "Lege OSC host."])
+        }
+        guard port > 0 && port <= 65535 else {
+            throw NSError(domain: "BeatBeamDMX", code: 5102, userInfo: [NSLocalizedDescriptionKey: "Ongeldige OSC poort."])
+        }
+
+        var hints = addrinfo(
+            ai_flags: AI_NUMERICSERV,
+            ai_family: AF_UNSPEC,
+            ai_socktype: SOCK_DGRAM,
+            ai_protocol: IPPROTO_UDP,
+            ai_addrlen: 0,
+            ai_canonname: nil,
+            ai_addr: nil,
+            ai_next: nil
+        )
+
+        var result: UnsafeMutablePointer<addrinfo>?
+        let service = String(port)
+        let status = getaddrinfo(host, service, &hints, &result)
+        guard status == 0, let resolved = result else {
+            throw NSError(domain: "BeatBeamDMX", code: 5103, userInfo: [NSLocalizedDescriptionKey: "Kon OSC doel niet resolven."])
+        }
+        defer { freeaddrinfo(resolved) }
+
+        let fd = socket(resolved.pointee.ai_family, resolved.pointee.ai_socktype, resolved.pointee.ai_protocol)
+        guard fd >= 0 else {
+            throw NSError(domain: "BeatBeamDMX", code: 5104, userInfo: [NSLocalizedDescriptionKey: "Kon OSC socket niet openen."])
+        }
+
+        var storage = sockaddr_storage()
+        memcpy(&storage, resolved.pointee.ai_addr, Int(resolved.pointee.ai_addrlen))
+
+        lock.lock()
+        socketFD = fd
+        remoteAddress = storage
+        remoteAddressLength = resolved.pointee.ai_addrlen
+        lock.unlock()
+    }
+
+    func stop() {
+        lock.lock()
+        let fd = socketFD
+        socketFD = -1
+        remoteAddressLength = 0
+        lock.unlock()
+
+        if fd >= 0 {
+            Darwin.close(fd)
+        }
+    }
+
+    func sendFloat(address: String, value: Double) {
+        guard value.isFinite else { return }
+        let payload = encode(address: address, value: value)
+        guard !payload.isEmpty else { return }
+
+        lock.lock()
+        let fd = socketFD
+        var addr = remoteAddress
+        let addrLen = remoteAddressLength
+        lock.unlock()
+
+        guard fd >= 0, addrLen > 0 else { return }
+        payload.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    _ = sendto(fd, base, payload.count, 0, sockPtr, addrLen)
+                }
+            }
+        }
+    }
+
+    private func encode(address: String, value: Double) -> Data {
+        var data = Data()
+        data.append(paddedOscString(address))
+        data.append(paddedOscString(",f"))
+        var bits = Float32(value).bitPattern.bigEndian
+        withUnsafeBytes(of: &bits) { data.append(contentsOf: $0) }
+        return data
+    }
+
+    private func paddedOscString(_ value: String) -> Data {
+        var bytes = Array(value.utf8)
+        bytes.append(0)
+        while (bytes.count % 4) != 0 {
+            bytes.append(0)
+        }
+        return Data(bytes)
+    }
+}
+
+final class BeatBeamLiveAudioBridge {
+    private let queue = DispatchQueue(label: "beatbeam.liveaudio.bridge")
+    private var audioEngine: AVAudioEngine?
+    private var analyzer: LiveAudioFeatureAnalyzer?
+    private var forwarder: OscFloatForwarder?
+    private var lastEmitAt: CFAbsoluteTime = 0
+
+    var onStatus: ((String) -> Void)?
+
+    func start(inputDeviceID: AudioDeviceID?, oscPort: Int = defaultBackendOscPort) throws {
+        stop()
+
+        guard let inputDeviceID else {
+            throw NSError(domain: "BeatBeamDMX", code: 5201, userInfo: [NSLocalizedDescriptionKey: "Geen live audio input geselecteerd."])
+        }
+
+        let forwarder = OscFloatForwarder()
+        try forwarder.start(host: "127.0.0.1", port: oscPort)
+
+        let engine = AVAudioEngine()
+        if !setEngineInputDevice(engine: engine, deviceID: inputDeviceID) {
+            onStatus?("Live audio gebruikt standaard input.")
+        }
+
+        let input = engine.inputNode
+        let format = input.inputFormat(forBus: 0)
+        let analyzer = LiveAudioFeatureAnalyzer(sampleRate: format.sampleRate)
+        self.analyzer = analyzer
+        self.forwarder = forwarder
+        self.lastEmitAt = 0
+
+        input.installTap(onBus: 0, bufferSize: 512, format: format) { [weak self] buffer, _ in
+            guard let self, let analyzer = self.analyzer else { return }
+            guard let frame = analyzer.process(buffer: buffer) else { return }
+            self.emit(frame)
+        }
+
+        do {
+            try engine.start()
+            self.audioEngine = engine
+            onStatus?("Live audio actief op \(audioDeviceName(inputDeviceID)).")
+        } catch {
+            input.removeTap(onBus: 0)
+            self.audioEngine = nil
+            self.analyzer = nil
+            self.forwarder?.stop()
+            self.forwarder = nil
+            throw error
+        }
+    }
+
+    func stop() {
+        queue.sync {
+            audioEngine?.inputNode.removeTap(onBus: 0)
+            audioEngine?.stop()
+            audioEngine = nil
+            analyzer = nil
+            forwarder?.stop()
+            forwarder = nil
+            lastEmitAt = 0
+        }
+    }
+
+    private func emit(_ frame: LiveAudioFeatureFrame) {
+        queue.async { [weak self] in
+            guard let self, let forwarder = self.forwarder else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            if (now - self.lastEmitAt) < 0.04 {
+                return
+            }
+            self.lastEmitAt = now
+
+            forwarder.sendFloat(address: "/master/waveform/energy", value: frame.rms)
+            forwarder.sendFloat(address: "/master/audio/low_energy", value: frame.low)
+            forwarder.sendFloat(address: "/master/audio/mid_energy", value: frame.mid)
+            forwarder.sendFloat(address: "/master/audio/high_energy", value: frame.high)
+            forwarder.sendFloat(address: "/master/waveform/low_energy", value: frame.low)
+            forwarder.sendFloat(address: "/master/waveform/mid_energy", value: frame.mid)
+            forwarder.sendFloat(address: "/master/waveform/high_energy", value: frame.high)
+            forwarder.sendFloat(address: "/master/audio/kick", value: frame.kick)
+            forwarder.sendFloat(address: "/master/audio/snare", value: frame.snare)
+            forwarder.sendFloat(address: "/master/audio/hihat", value: frame.hihat)
+            forwarder.sendFloat(address: "/master/drums/kick", value: frame.kick)
+            forwarder.sendFloat(address: "/master/drums/snare", value: frame.snare)
+            forwarder.sendFloat(address: "/master/drums/hihat", value: frame.hihat)
+        }
+    }
 }
 
 struct PortsResponse: Decodable {
@@ -888,6 +1593,57 @@ struct FixtureProfile: Decodable, Identifiable, Hashable {
 struct FixtureMode: Decodable, Hashable {
     let name: String
     let footprint: Int
+    let channels: [FixtureChannel]?
+
+    var extraControls: [FixtureExtraControl] {
+        (channels ?? []).compactMap { channel in
+            guard channel.type == "custom" else { return nil }
+            let rawID = channel.control ?? channel.id ?? channel.name ?? "custom_\(channel.offset)"
+            let trimmedID = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedID.isEmpty else { return nil }
+            return FixtureExtraControl(
+                id: trimmedID,
+                title: channel.name ?? trimmedID,
+                offset: channel.offset,
+                defaultValue: max(0, min(255, channel.defaultValue ?? 0)),
+                ranges: channel.ranges ?? []
+            )
+        }
+    }
+}
+
+struct FixtureChannel: Decodable, Hashable {
+    let offset: Int
+    let name: String?
+    let type: String
+    let id: String?
+    let control: String?
+    let ranges: [FixtureChannelRange]?
+    let defaultValue: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case offset
+        case name
+        case type
+        case id
+        case control
+        case ranges
+        case defaultValue = "default"
+    }
+}
+
+struct FixtureChannelRange: Decodable, Hashable {
+    let from: Int
+    let to: Int
+    let name: String
+}
+
+struct FixtureExtraControl: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let offset: Int
+    let defaultValue: Int
+    let ranges: [FixtureChannelRange]
 }
 
 struct PortInfo: Decodable, Hashable {
@@ -933,6 +1689,12 @@ struct AutoShowUpdateRequest: Encodable {
 
 struct TriggerCueRequest: Encodable {
     let cueID: String
+}
+
+struct TransportUpdateRequest: Encodable {
+    let mode: String
+    let manualPhrase: String
+    let idleAnimationEnabled: Bool
 }
 
 struct AutoShowUpdateBody: Encodable {
@@ -982,6 +1744,7 @@ struct SlotUpdateBody: Encodable {
     let strobe: Int
     let program: Int
     let speed: Int
+    let extraValues: [String: Int]
     let pan: Int
     let tilt: Int
     let panTiltSpeed: Int
@@ -1046,6 +1809,8 @@ final class SlotEditor: ObservableObject, Identifiable {
     @Published var strobe = 0
     @Published var program = 0
     @Published var speed = 0
+    @Published var extraValues: [String: Int] = [:]
+    @Published var extraControls: [FixtureExtraControl] = []
     @Published var pan = 127
     @Published var tilt = 127
     @Published var panTiltSpeed = 0
@@ -1130,6 +1895,16 @@ final class SlotEditor: ObservableObject, Identifiable {
         strobe = slot.strobe
         program = slot.program
         speed = slot.speed
+        let selectedMode = fixture?.modes.first(where: { $0.name.caseInsensitiveCompare(slot.mode) == .orderedSame })
+        extraControls = selectedMode?.extraControls ?? []
+        extraValues = Dictionary(
+            uniqueKeysWithValues: extraControls.map { control in
+                (
+                    control.id,
+                    max(0, min(255, slot.extraValues?[control.id] ?? control.defaultValue))
+                )
+            }
+        )
         pan = slot.pan
         tilt = slot.tilt
         panTiltSpeed = slot.panTiltSpeed
@@ -1311,7 +2086,7 @@ final class AppModel: ObservableObject {
     }
     @Published var dmxStatus = "DMX niet verbonden"
     @Published var oscStatus = "OSC wacht op data"
-    @Published var oscSourceStatus = "Start Live BPM Trigger en forward OSC naar 127.0.0.1:4461"
+    @Published var oscSourceStatus = "Transport wacht op OSC of interne clock"
     @Published var trackTitle = "(geen track)"
     @Published var trackMeta = "onbekend"
     @Published var deck1Title = "Deck 1"
@@ -1324,6 +2099,31 @@ final class AppModel: ObservableObject {
     @Published var beatValue = "-"
     @Published var timeValue = "-"
     @Published var moodValue = "-"
+    @Published var transportMode = "auto"
+    @Published var transportResolvedMode = "external_osc"
+    @Published var transportManualBpm = 124.0
+    @Published var transportEffectiveBpm: Double?
+    @Published var transportManualPhrase = "verse"
+    @Published var transportManualPhraseLabel = "Verse"
+    @Published var transportIdleAnimationEnabled = true
+    @Published var transportTapCount = 0
+    @Published var transportTapLocked = false
+    @Published var transportExternalAvailable = false
+    @Published var transportStatusText = "External OSC actief"
+    @Published var liveAudioDevices: [AudioInputDevice] = []
+    @Published var selectedLiveAudioDeviceID: UInt32 = 0 {
+        didSet { saveSelectedLiveAudioDeviceID() }
+    }
+    @Published var liveAudioEnabled = false {
+        didSet { saveLiveAudioEnabled() }
+    }
+    @Published var liveAudioStatusText = "Live audio uit"
+    @Published var bridgeScriptPath = defaultRekordboxBridgeScriptPath() {
+        didSet { saveBridgeScriptPath() }
+    }
+    @Published var bridgeRunning = false
+    @Published var bridgePasswordlessEnabled = false
+    @Published var bridgeStatusText = "Rekordbox bridge uit"
     @Published var waveformEnergyValue = "-"
     @Published var waveformStatusText = "Waveform wacht op data"
     @Published var waveformInfluenceText = "Nog geen waveform-feedback"
@@ -1377,7 +2177,9 @@ final class AppModel: ObservableObject {
     @Published var remoteStatusText = "Remote niet beschikbaar"
     @Published var errorText = ""
 
-    private let baseURL = URL(string: "http://127.0.0.1:8780")!
+    private var baseURL: URL {
+        URL(string: "http://127.0.0.1:\(beatBeamBackendPort)")!
+    }
     private var backendProcess: Process?
     private var ownedBackendPID: Int?
     private var ownsBackend = false
@@ -1393,10 +2195,20 @@ final class AppModel: ObservableObject {
     private var slotPushTasks: [String: Task<Void, Never>] = [:]
     private var slotPushTokens: [String: Int] = [:]
     private var nextSlotPushToken = 1
-    private let mapAssignmentsDefaultsKey = "BeatBeamDMX.mapAssignments"
-    private let projectionLayoutsDefaultsKey = "BeatBeamDMX.worldPositions"
-    private let legacyProjectionLayoutsDefaultsKey = "BeatBeamDMX.projectionLayouts"
-    private let selectedPortDefaultsKey = "BeatBeamDMX.selectedPortLabel"
+    private var previewClockAnchorDate = Date()
+    private var previewClockSourceSeconds: TimeInterval?
+    private var previewClockBeatValue: Double?
+    private var previewClockBpm: Double?
+    private let liveAudioBridge = BeatBeamLiveAudioBridge()
+    private var bridgeStateTask: Task<Void, Never>?
+    private var lastBridgeCheckAt = Date.distantPast
+    private let mapAssignmentsDefaultsKey = defaultsKey("mapAssignments")
+    private let projectionLayoutsDefaultsKey = defaultsKey("worldPositions")
+    private let legacyProjectionLayoutsDefaultsKey = defaultsKey("projectionLayouts")
+    private let selectedPortDefaultsKey = defaultsKey("selectedPortLabel")
+    private let liveAudioDeviceDefaultsKey = defaultsKey("liveAudioDeviceID")
+    private let liveAudioEnabledDefaultsKey = defaultsKey("liveAudioEnabled")
+    private let bridgeScriptDefaultsKey = defaultsKey("bridgeScriptPath")
 
     init() {
         loadMapAssignments()
@@ -1404,6 +2216,14 @@ final class AppModel: ObservableObject {
         loadFrontProjectionMirrored()
         loadTopProjectionRotation()
         loadSelectedPortLabel()
+        loadSelectedLiveAudioDeviceID()
+        loadLiveAudioEnabled()
+        loadBridgeScriptPath()
+        liveAudioBridge.onStatus = { [weak self] text in
+            Task { @MainActor in
+                self?.liveAudioStatusText = text
+            }
+        }
     }
 
     func start() {
@@ -1420,6 +2240,12 @@ final class AppModel: ObservableObject {
         stageSimulationTimer?.invalidate()
         stageSimulationTimer = nil
         cancelPendingSlotPushes()
+        liveAudioBridge.stop()
+        bridgeStateTask?.cancel()
+        bridgeStateTask = nil
+        _ = stopRekordboxBridgeSynchronouslyForShutdown()
+        bridgeRunning = false
+        bridgeStatusText = "Rekordbox bridge uit"
         terminateOwnedBackendIfNeeded()
         started = false
     }
@@ -1434,6 +2260,151 @@ final class AppModel: ObservableObject {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(remoteURLText, forType: .string)
+    }
+
+    func refreshAudioInputs() {
+        let devices = listAudioInputDevices()
+        liveAudioDevices = devices
+        if selectedLiveAudioDeviceID == 0 || !devices.contains(where: { $0.id == selectedLiveAudioDeviceID }) {
+            if let blackHole = devices.first(where: { $0.name.localizedCaseInsensitiveContains("blackhole") }) {
+                selectedLiveAudioDeviceID = blackHole.id
+            } else {
+                selectedLiveAudioDeviceID = devices.first?.id ?? 0
+            }
+        }
+        if liveAudioEnabled {
+            restartLiveAudioBridge()
+        } else if let current = selectedLiveAudioDevice() {
+            liveAudioStatusText = "Geselecteerd: \(audioDeviceName(current))"
+        } else {
+            liveAudioStatusText = "Geen live audio input"
+        }
+    }
+
+    func setSelectedLiveAudioDevice(_ deviceID: UInt32) {
+        if deviceID == selectedLiveAudioDeviceID { return }
+        selectedLiveAudioDeviceID = deviceID
+        if liveAudioEnabled {
+            restartLiveAudioBridge()
+        } else if let current = selectedLiveAudioDevice() {
+            liveAudioStatusText = "Geselecteerd: \(audioDeviceName(current))"
+        }
+    }
+
+    func setLiveAudioEnabled(_ enabled: Bool) {
+        if enabled == liveAudioEnabled { return }
+        liveAudioEnabled = enabled
+        if enabled {
+            restartLiveAudioBridge()
+        } else {
+            liveAudioBridge.stop()
+            liveAudioStatusText = "Live audio uit"
+        }
+    }
+
+    func startRekordboxBridge() {
+        let scriptPath = bridgeScriptPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !scriptPath.isEmpty else {
+            bridgeStatusText = "Bridge script pad is leeg"
+            return
+        }
+        guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
+            bridgeStatusText = "Bridge script niet uitvoerbaar"
+            return
+        }
+
+        bridgeStatusText = "Rekordbox bridge start..."
+        let oscDestination = "127.0.0.1:\(defaultBackendOscPort)"
+        let passwordlessReady = bridgeCanUsePasswordlessSudo(scriptPath: scriptPath, oscDestination: oscDestination)
+        bridgePasswordlessEnabled = passwordlessReady
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard self != nil else { return }
+            let result: (ok: Bool, message: String)
+            if passwordlessReady {
+                result = launchSystemProcess("/usr/bin/sudo", ["-n", scriptPath, oscDestination])
+            } else {
+                let command = "\(shellSingleQuote(scriptPath)) \(oscDestination) >/tmp/rkbx_bridge_gui.log 2>&1 &"
+                result = runAdministratorShell(command)
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if result.ok {
+                    self.bridgeStatusText = "Rekordbox bridge actief"
+                    self.refreshBridgeStatus(force: true)
+                } else {
+                    self.bridgeStatusText = "Bridge start mislukt"
+                    if !result.message.isEmpty {
+                        self.errorText = "Bridge start mislukt: \(result.message)"
+                    }
+                }
+            }
+        }
+    }
+
+    func stopRekordboxBridge() {
+        bridgeStatusText = "Rekordbox bridge stopt..."
+        let passwordlessReady = bridgeCanUsePasswordlessSudo(scriptPath: bridgeScriptPath.trimmingCharacters(in: .whitespacesAndNewlines), oscDestination: "127.0.0.1:\(defaultBackendOscPort)")
+        bridgePasswordlessEnabled = passwordlessReady
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard self != nil else { return }
+            let result: (ok: Bool, message: String)
+            if passwordlessReady {
+                result = Self.stopBridgeProcessesSynchronously(passwordlessReady: true)
+            } else {
+                result = runAdministratorShell("/usr/bin/pkill -f rkbx_link || true")
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if !result.ok, self.isBridgeProcessRunning(), !result.message.isEmpty {
+                    self.errorText = "Bridge stop mislukt: \(result.message)"
+                }
+                self.refreshBridgeStatus(force: true)
+            }
+        }
+    }
+
+    private func stopRekordboxBridgeSynchronouslyForShutdown() -> (ok: Bool, message: String) {
+        let scriptPath = bridgeScriptPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let oscDestination = "127.0.0.1:\(defaultBackendOscPort)"
+        let passwordlessReady = bridgeCanUsePasswordlessSudo(scriptPath: scriptPath, oscDestination: oscDestination)
+        return Self.stopBridgeProcessesSynchronously(passwordlessReady: passwordlessReady)
+    }
+
+    nonisolated private static func stopBridgeProcessesSynchronously(passwordlessReady: Bool) -> (ok: Bool, message: String) {
+        if passwordlessReady {
+            return runSystemProcess("/usr/bin/sudo", ["-n", "/usr/bin/pkill", "-f", "rkbx_link"])
+        }
+
+        return runSystemProcess("/usr/bin/pkill", ["-f", "rkbx_link"])
+    }
+
+    func refreshBridgeStatus(force: Bool = false) {
+        let now = Date()
+        if !force, now.timeIntervalSince(lastBridgeCheckAt) < 2.0 {
+            return
+        }
+        lastBridgeCheckAt = now
+        bridgeStateTask?.cancel()
+        let scriptPath = bridgeScriptPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let oscDestination = "127.0.0.1:\(defaultBackendOscPort)"
+        bridgeStateTask = Task {
+            let running = await Task.detached(priority: .utility) {
+                (
+                    self.isBridgeProcessRunning(),
+                    self.bridgeCanUsePasswordlessSudo(scriptPath: scriptPath, oscDestination: oscDestination)
+                )
+            }.value
+            guard !Task.isCancelled else { return }
+            bridgeRunning = running.0
+            bridgePasswordlessEnabled = running.1
+            if running.0 {
+                bridgeStatusText = "Rekordbox bridge actief"
+            } else if running.1 {
+                bridgeStatusText = "Rekordbox bridge uit · zonder prompt klaar"
+            } else {
+                bridgeStatusText = "Rekordbox bridge uit · wachtwoordpad actief"
+            }
+        }
     }
 
     func connectDMX() {
@@ -1451,6 +2422,39 @@ final class AppModel: ObservableObject {
             } catch {
                 errorText = "DMX connectie mislukt: \(error.localizedDescription)"
             }
+        }
+    }
+
+    private func selectedLiveAudioDevice() -> AudioDeviceID? {
+        let rawID = selectedLiveAudioDeviceID
+        guard rawID != 0 else { return nil }
+        return AudioDeviceID(rawID)
+    }
+
+    private func restartLiveAudioBridge() {
+        guard liveAudioEnabled else { return }
+        guard let inputDeviceID = selectedLiveAudioDevice() else {
+            liveAudioStatusText = "Geen live audio input"
+            return
+        }
+        do {
+            try liveAudioBridge.start(inputDeviceID: inputDeviceID, oscPort: defaultBackendOscPort)
+        } catch {
+            liveAudioEnabled = false
+            liveAudioStatusText = "Live audio fout: \(error.localizedDescription)"
+        }
+    }
+
+    nonisolated private func isBridgeProcessRunning() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-f", "rkbx_link|start_bridge\\.sh"]
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
         }
     }
 
@@ -1706,6 +2710,69 @@ final class AppModel: ObservableObject {
         let request = currentAutoShowUpdateBody()
         setPendingAutoShowRequest(request)
         postAutoShow(request)
+    }
+
+    func setTransportMode(_ mode: String) {
+        let normalized = mode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized == transportMode { return }
+        beginLocalMutationHold(seconds: 0.6)
+        transportMode = normalized
+        transportStatusText = "\(transportModeLabel(for: normalized)) wordt toegepast"
+        postTransportUpdate()
+    }
+
+    func setTransportManualPhrase(_ phrase: String) {
+        let normalized = phrase.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized == transportManualPhrase { return }
+        beginLocalMutationHold(seconds: 0.6)
+        transportManualPhrase = normalized
+        transportManualPhraseLabel = transportPhraseLabel(for: normalized)
+        postTransportUpdate()
+    }
+
+    func setTransportIdleAnimationEnabled(_ enabled: Bool) {
+        if enabled == transportIdleAnimationEnabled { return }
+        beginLocalMutationHold(seconds: 0.6)
+        transportIdleAnimationEnabled = enabled
+        postTransportUpdate()
+    }
+
+    func tapTransportTempo() {
+        Task {
+            do {
+                beginLocalMutationHold(seconds: 0.2)
+                let state: AppState = try await post("/api/transport/tap", body: EmptyRequest(), as: AppState.self)
+                apply(state, source: .action)
+                errorText = ""
+            } catch {
+                errorText = "Tap tempo mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func resetTransportClock() {
+        Task {
+            do {
+                beginLocalMutationHold(seconds: 0.2)
+                let state: AppState = try await post("/api/transport/reset", body: EmptyRequest(), as: AppState.self)
+                apply(state, source: .action)
+                errorText = ""
+            } catch {
+                errorText = "Transport reset mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func previewAnimationTime(for date: Date) -> TimeInterval {
+        let elapsed = max(0, date.timeIntervalSince(previewClockAnchorDate))
+        if let sourceSeconds = previewClockSourceSeconds {
+            return sourceSeconds + elapsed
+        }
+        if let beatValue = previewClockBeatValue, let bpm = previewClockBpm, bpm > 0 {
+            let normalizedBeat = max(0, beatValue - 1.0)
+            return (normalizedBeat * 60.0 / bpm) + elapsed
+        }
+        return date.timeIntervalSinceReferenceDate
     }
 
     func triggerOneShotCue(_ cueID: String) {
@@ -1973,6 +3040,11 @@ final class AppModel: ObservableObject {
         rotateProjectionMountPitch(for: selectedSlotID, by: degrees)
     }
 
+    func rotateSelectedProjectionRoll(by degrees: Double) {
+        guard isEditingProjectionLayout, !selectedSlotID.isEmpty else { return }
+        rotateProjectionRoll(for: selectedSlotID, by: degrees)
+    }
+
     func toggleSelectedProjectionPanFlip() {
         guard isEditingProjectionLayout, !selectedSlotID.isEmpty else { return }
         toggleProjectionPanFlip(for: selectedSlotID)
@@ -1997,6 +3069,13 @@ final class AppModel: ObservableObject {
         projectionLayoutDrafts[slotID] = world
     }
 
+    func rotateProjectionRoll(for slotID: String, by degrees: Double) {
+        guard isEditingProjectionLayout else { return }
+        var world = effectiveWorldPosition(for: slotID)
+        world.rollDegrees = snappedRollDegrees(world.rollDegrees + degrees)
+        projectionLayoutDrafts[slotID] = world
+    }
+
     func toggleProjectionPanFlip(for slotID: String) {
         guard isEditingProjectionLayout, let editor = editorsByID[slotID], editor.supportsPan else { return }
         var world = effectiveWorldPosition(for: slotID)
@@ -2017,6 +3096,10 @@ final class AppModel: ObservableObject {
 
     func projectionPitchDegrees(for slotID: String) -> Double {
         effectiveWorldPosition(for: slotID).pitchDegrees
+    }
+
+    func projectionRollDegrees(for slotID: String) -> Double {
+        effectiveWorldPosition(for: slotID).rollDegrees
     }
 
     func projectionPanFlip(for slotID: String) -> Bool {
@@ -2195,6 +3278,7 @@ final class AppModel: ObservableObject {
             strobe: editor.strobe,
             program: editor.program,
             speed: editor.speed,
+            extraValues: editor.extraValues,
             pan: editor.pan,
             tilt: editor.tilt,
             panTiltSpeed: editor.panTiltSpeed,
@@ -2262,6 +3346,70 @@ final class AppModel: ObservableObject {
 
     private func beginLocalMutationHold(seconds: TimeInterval = 0.6) {
         ignorePolledStateUntil = Date().addingTimeInterval(seconds)
+    }
+
+    private func transportModeLabel(for value: String) -> String {
+        switch value {
+        case "manual_tap":
+            return "Tap"
+        case "external_osc":
+            return "OSC"
+        default:
+            return "Auto"
+        }
+    }
+
+    private func transportResolvedLabel(for value: String) -> String {
+        switch value {
+        case "manual_tap":
+            return "Tap tempo actief"
+        case "idle":
+            return "Interne idle-clock actief"
+        case "external_osc":
+            return "Externe OSC actief"
+        default:
+            return "Clock actief"
+        }
+    }
+
+    private func transportPhraseLabel(for value: String) -> String {
+        switch value {
+        case "intro": return "Intro"
+        case "build": return "Build"
+        case "chorus": return "Chorus"
+        case "drop": return "Drop"
+        case "down": return "Down"
+        case "break": return "Break"
+        case "outro": return "Outro"
+        default: return "Verse"
+        }
+    }
+
+    private func currentTransportUpdateBody() -> TransportUpdateRequest {
+        TransportUpdateRequest(
+            mode: transportMode,
+            manualPhrase: transportManualPhrase,
+            idleAnimationEnabled: transportIdleAnimationEnabled
+        )
+    }
+
+    private func postTransportUpdate() {
+        Task {
+            do {
+                let state: AppState = try await post("/api/transport/update", body: currentTransportUpdateBody(), as: AppState.self)
+                apply(state, source: .action)
+                errorText = ""
+            } catch {
+                errorText = "Transport update mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    nonisolated private func bridgeCanUsePasswordlessSudo(scriptPath: String, oscDestination: String) -> Bool {
+        guard !scriptPath.isEmpty else { return false }
+        let canStart = runSystemProcess("/usr/bin/sudo", ["-n", "-l", scriptPath, oscDestination]).ok
+        let canStop = runSystemProcess("/usr/bin/sudo", ["-n", "-l", "/usr/bin/pkill", "-f", "rkbx_link"]).ok
+        return canStart && canStop
     }
 
     private func currentAutoShowUpdateBody(enabled: Bool? = nil, style: String? = nil) -> AutoShowUpdateBody {
@@ -2338,6 +3486,20 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func extraIntBinding(for editor: SlotEditor, controlID: String, range: ClosedRange<Int> = 0...255) -> Binding<Double> {
+        Binding(
+            get: {
+                let fallback = editor.extraControls.first(where: { $0.id == controlID })?.defaultValue ?? 0
+                return Double(editor.extraValues[controlID] ?? fallback)
+            },
+            set: { value in
+                let rounded = Int(value.rounded())
+                editor.extraValues[controlID] = min(range.upperBound, max(range.lowerBound, rounded))
+                self.push(editor)
+            }
+        )
+    }
+
     func stepperBinding(for editor: SlotEditor, _ keyPath: ReferenceWritableKeyPath<SlotEditor, Int>, range: ClosedRange<Int>) -> Binding<Int> {
         Binding(
             get: { editor[keyPath: keyPath] },
@@ -2400,6 +3562,8 @@ final class AppModel: ObservableObject {
             try await loadPorts()
             try await loadFixtures()
             try await refreshState(forceSelectionToActiveSlot: true)
+            refreshAudioInputs()
+            refreshBridgeStatus(force: true)
             startStageSimulation()
             startPolling()
         } catch {
@@ -2414,6 +3578,7 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 do {
                     try await refreshState()
+                    refreshBridgeStatus()
                 } catch {
                     errorText = "Status ophalen mislukt: \(error.localizedDescription)"
                 }
@@ -2469,6 +3634,17 @@ final class AppModel: ObservableObject {
             remoteURLText = "-"
             remoteStatusText = "Remote info niet beschikbaar"
         }
+        transportMode = state.transport.mode
+        transportResolvedMode = state.transport.resolvedMode
+        transportManualBpm = state.transport.manualBpm
+        transportEffectiveBpm = state.transport.effectiveBpm
+        transportManualPhrase = state.transport.manualPhrase
+        transportManualPhraseLabel = state.transport.manualPhraseLabel
+        transportIdleAnimationEnabled = state.transport.idleAnimationEnabled
+        transportTapCount = state.transport.tapCount
+        transportTapLocked = state.transport.tapLocked
+        transportExternalAvailable = state.transport.externalAvailable
+        transportStatusText = transportResolvedLabel(for: state.transport.resolvedMode)
         slotPreviews = state.dmx.slotPreviews
         dmxSlotOrder = state.dmx.slotOrder
         dmxSlotRanges = state.dmx.slotRanges
@@ -2548,7 +3724,9 @@ final class AppModel: ObservableObject {
         }
         oscStatus = oscParts.joined(separator: " | ")
         let liveSource = state.source.lastSource ?? "geen bron"
-        oscSourceStatus = "\(state.source.app) extern | verwacht \(state.source.expectedDestination) | bron \(liveSource)"
+        let sourceLabel = transportModeLabel(for: state.source.mode)
+        let resolvedLabel = transportResolvedLabel(for: state.source.resolvedMode ?? state.transport.resolvedMode)
+        oscSourceStatus = "\(sourceLabel) • \(resolvedLabel) • \(state.source.app) • \(state.source.expectedDestination) • bron \(liveSource)"
 
         let loadedTitle = normalizedDisplay(
             state.osc.trackTitle ?? deckTitleFallback(from: state),
@@ -2594,6 +3772,10 @@ final class AppModel: ObservableObject {
         beatValue = beatText
         timeValue = formatTime(state.osc.timeDisplaySeconds ?? state.osc.timeSeconds)
         moodValue = formatMood(state.osc.mood)
+        previewClockAnchorDate = Date()
+        previewClockSourceSeconds = state.osc.timeDisplaySeconds ?? state.osc.timeSeconds
+        previewClockBeatValue = state.osc.beatDisplay ?? state.osc.beat
+        previewClockBpm = state.osc.bpm
         let hasBandData: (WaveformBandsState?) -> Bool = { bands in
             bands?.low != nil || bands?.mid != nil || bands?.high != nil
         }
@@ -2752,7 +3934,7 @@ final class AppModel: ObservableObject {
 
     private func startStageSimulation() {
         stageSimulationTimer?.invalidate()
-        let timer = Timer(timeInterval: 1.0 / 24.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.advanceStageSimulation(forceSnapIfNeeded: false)
             }
@@ -2796,7 +3978,7 @@ final class AppModel: ObservableObject {
                 ?? tiltDegrees(forDMX: preview.tilt, range: tiltRange)
             let previousPan = previous?.currentPanDegrees ?? currentPanDegrees
             let previousTilt = previous?.currentTiltDegrees ?? currentTiltDegrees
-            let dt = max(1.0 / 60.0, min(0.20, now - (previous?.updatedAt ?? (now - 1.0 / 24.0))))
+            let dt = max(1.0 / 60.0, min(0.20, now - (previous?.updatedAt ?? (now - 1.0 / 30.0))))
             let estimatedSpeed: Double
             if let panSpeed = preview.panSpeedDps, let tiltSpeed = preview.tiltSpeedDps {
                 estimatedSpeed = min(900.0, sqrt(panSpeed * panSpeed + tiltSpeed * tiltSpeed))
@@ -2961,6 +4143,32 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(selectedPortLabel, forKey: selectedPortDefaultsKey)
     }
 
+    private func loadSelectedLiveAudioDeviceID() {
+        let stored = UserDefaults.standard.integer(forKey: liveAudioDeviceDefaultsKey)
+        selectedLiveAudioDeviceID = stored > 0 ? UInt32(stored) : 0
+    }
+
+    private func saveSelectedLiveAudioDeviceID() {
+        UserDefaults.standard.set(Int(selectedLiveAudioDeviceID), forKey: liveAudioDeviceDefaultsKey)
+    }
+
+    private func loadLiveAudioEnabled() {
+        liveAudioEnabled = UserDefaults.standard.bool(forKey: liveAudioEnabledDefaultsKey)
+    }
+
+    private func saveLiveAudioEnabled() {
+        UserDefaults.standard.set(liveAudioEnabled, forKey: liveAudioEnabledDefaultsKey)
+    }
+
+    private func loadBridgeScriptPath() {
+        let stored = UserDefaults.standard.string(forKey: bridgeScriptDefaultsKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        bridgeScriptPath = (stored?.isEmpty == false) ? stored! : defaultRekordboxBridgeScriptPath()
+    }
+
+    private func saveBridgeScriptPath() {
+        UserDefaults.standard.set(bridgeScriptPath, forKey: bridgeScriptDefaultsKey)
+    }
+
     private func reconcileMapAssignments(with editors: [SlotEditor]) {
         let liveIDs = Set(editors.map(\.id))
         mapAssignments = mapAssignments.filter { liveIDs.contains($0.key) }
@@ -2968,6 +4176,13 @@ final class AppModel: ObservableObject {
         projectionLayoutDrafts = projectionLayoutDrafts.filter { liveIDs.contains($0.key) }
 
         var usedAnchors = Set(mapAssignments.values)
+        for editor in editors {
+            if mapAssignments[editor.id] == nil, projectionLayouts[editor.id] == nil {
+                let centered = defaultNewFixtureWorldPosition()
+                projectionLayouts[editor.id] = centered
+                projectionLayoutDrafts[editor.id] = centered
+            }
+        }
         for editor in editors where mapAssignments[editor.id] == nil {
             if let suggested = nextSuggestedAnchor(for: editor, excluding: usedAnchors) {
                 mapAssignments[editor.id] = suggested.rawValue
@@ -2998,10 +4213,19 @@ final class AppModel: ObservableObject {
         return SlotWorldPosition(x: 0, y: 150, z: 200)
     }
 
+    private func defaultNewFixtureWorldPosition() -> SlotWorldPosition {
+        SlotWorldPosition(
+            x: (StageWorld.minX + StageWorld.maxX) * 0.5,
+            y: (StageWorld.minY + StageWorld.maxY) * 0.5,
+            z: (StageWorld.minZ + StageWorld.maxZ) * 0.5
+        )
+    }
+
     private func project(world: SlotWorldPosition, projection: StageProjection) -> CGPoint {
+        let rawPoint: CGPoint
         switch projection {
         case .top:
-            return rotatedTopProjectionPoint(
+            rawPoint = rotatedTopProjectionPoint(
                 CGPoint(
                 x: scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
                 y: scalarNormalized(world.y, lower: StageWorld.minY, upper: StageWorld.maxY)
@@ -3009,28 +4233,30 @@ final class AppModel: ObservableObject {
                 quarterTurns: topProjectionRotationQuarterTurns
             )
         case .front:
-            return CGPoint(
+            rawPoint = CGPoint(
                 x: frontProjectionMirrored
                     ? 1.0 - scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX)
                     : scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
                 y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
             )
         case .back:
-            return CGPoint(
+            rawPoint = CGPoint(
                 x: 1.0 - scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
                 y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
             )
         case .side:
-            return CGPoint(
+            rawPoint = CGPoint(
                 x: scalarNormalized(world.y, lower: StageWorld.minY, upper: StageWorld.maxY),
                 y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
             )
         }
+        return projectionViewportTransform(rawPoint)
     }
 
     private func update(world: inout SlotWorldPosition, from point: CGPoint, projection: StageProjection) {
-        let clampedX = min(max(point.x, 0.04), 0.96)
-        let clampedY = min(max(point.y, 0.06), 0.94)
+        let unzoomed = projectionViewportInverse(point)
+        let clampedX = min(max(unzoomed.x, 0.04), 0.96)
+        let clampedY = min(max(unzoomed.y, 0.06), 0.94)
         switch projection {
         case .top:
             let unrotated = unrotatedTopProjectionPoint(
@@ -3069,6 +4295,12 @@ final class AppModel: ObservableObject {
     }
 
     private func snappedPitchDegrees(_ value: Double) -> Double {
+        let normalized = value.truncatingRemainder(dividingBy: 360)
+        let wrapped = normalized < 0 ? normalized + 360 : normalized
+        return (wrapped / 90.0).rounded() * 90.0
+    }
+
+    private func snappedRollDegrees(_ value: Double) -> Double {
         let normalized = value.truncatingRemainder(dividingBy: 360)
         let wrapped = normalized < 0 ? normalized + 360 : normalized
         return (wrapped / 90.0).rounded() * 90.0
@@ -3185,11 +4417,11 @@ final class AppModel: ObservableObject {
     private func isManagedBackendCommand(_ command: String) -> Bool {
         guard command.contains("beatbeam_app.py") else { return false }
         let root = backendRootURL().path
-        return command.contains(root) || command.contains("BeatBeam DMX.app")
+        return command.contains(root) || command.contains(beatBeamAppBundleFileName)
     }
 
     private func adoptReachableBackendIfNeeded() throws {
-        guard let pid = try listeningBackendPID(on: 8780) else {
+        guard let pid = try listeningBackendPID(on: beatBeamBackendPort) else {
             backendProcess = nil
             ownedBackendPID = nil
             ownsBackend = false
@@ -3200,7 +4432,7 @@ final class AppModel: ObservableObject {
             backendProcess = nil
             ownedBackendPID = nil
             ownsBackend = false
-            nativeLog("reachable backend on 8780 is not managed by this app: \(command)")
+            nativeLog("reachable backend on \(beatBeamBackendPort) is not managed by this app: \(command)")
             return
         }
         backendProcess = nil
@@ -3250,11 +4482,11 @@ final class AppModel: ObservableObject {
     }
 
     private func terminateIncompatibleBackendIfNeeded() async throws {
-        guard let pid = try listeningBackendPID(on: 8780) else { return }
+        guard let pid = try listeningBackendPID(on: beatBeamBackendPort) else { return }
         let command = (try? commandLine(for: pid)) ?? ""
         guard command.contains("beatbeam_app.py") else {
             throw NSError(domain: "BeatBeamDMX", code: 4, userInfo: [
-                NSLocalizedDescriptionKey: "Poort 8780 wordt gebruikt door een ander proces: \(command.isEmpty ? "onbekend" : command)"
+                NSLocalizedDescriptionKey: "Poort \(beatBeamBackendPort) wordt gebruikt door een ander proces: \(command.isEmpty ? "onbekend" : command)"
             ])
         }
         nativeLog("terminating incompatible backend pid \(pid): \(command)")
@@ -3274,7 +4506,7 @@ final class AppModel: ObservableObject {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         throw NSError(domain: "BeatBeamDMX", code: 5, userInfo: [
-            NSLocalizedDescriptionKey: "Oude backend op poort 8780 kon niet worden gestopt"
+            NSLocalizedDescriptionKey: "Oude backend op poort \(beatBeamBackendPort) kon niet worden gestopt"
         ])
     }
 
@@ -3284,7 +4516,9 @@ final class AppModel: ObservableObject {
         let scriptURL = root.appendingPathComponent("beatbeam_app.py")
         let appSupportURL = backendSupportDirectoryURL()
         let configURL = appSupportURL.appendingPathComponent("beatbeam_config.json")
+        let transportConfigURL = appSupportURL.appendingPathComponent("beatbeam_transport.json")
         let remoteAccessURL = appSupportURL.appendingPathComponent("beatbeam_remote.json")
+        let triggerLogURL = appSupportURL.appendingPathComponent("beatbeam-trigger.log")
         let previewCacheURL = appSupportURL.appendingPathComponent("track_preview_cache", isDirectory: true)
         try FileManager.default.createDirectory(at: appSupportURL, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: previewCacheURL, withIntermediateDirectories: true)
@@ -3308,13 +4542,18 @@ final class AppModel: ObservableObject {
         process.arguments = [
             scriptURL.path,
             "--host", "0.0.0.0",
-            "--port", "8780",
-            "--osc-port", "4461",
+            "--port", String(beatBeamBackendPort),
+            "--osc-port", String(defaultBackendOscPort),
         ]
         process.currentDirectoryURL = root
         var environment = ProcessInfo.processInfo.environment
+        environment["BEATBEAM_APP_NAME"] = beatBeamAppDisplayName
+        environment["BEATBEAM_APP_SLUG"] = beatBeamAppSlug
+        environment["BEATBEAM_SERVER_VERSION"] = "\(beatBeamAppSlug)/\(beatBeamAppVersion)"
         environment["BEATBEAM_CONFIG_PATH"] = configURL.path
+        environment["BEATBEAM_TRANSPORT_CONFIG_PATH"] = transportConfigURL.path
         environment["BEATBEAM_REMOTE_ACCESS_PATH"] = remoteAccessURL.path
+        environment["BEATBEAM_TRIGGER_LOG_PATH"] = triggerLogURL.path
         environment["BEATBEAM_TRACK_PREVIEW_CACHE_DIR"] = previewCacheURL.path
         process.environment = environment
         FileManager.default.createFile(atPath: backendLogURL.path, contents: nil)
@@ -3357,9 +4596,9 @@ final class AppModel: ObservableObject {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support", isDirectory: true)
         let candidates = [
-            base.appendingPathComponent("BeatBeamDMX Native", isDirectory: true),
-            URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".beatbeamdmx", isDirectory: true),
-            FileManager.default.temporaryDirectory.appendingPathComponent("BeatBeamDMX", isDirectory: true),
+            base.appendingPathComponent(beatBeamSupportDirectoryName, isDirectory: true),
+            URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".\(beatBeamDefaultsPrefix.lowercased())", isDirectory: true),
+            FileManager.default.temporaryDirectory.appendingPathComponent(beatBeamTemporaryDirectoryName, isDirectory: true),
         ]
         for candidate in candidates {
             do {
@@ -3411,13 +4650,17 @@ final class AppModel: ObservableObject {
     private func legacyConfigCandidateURLs(backendRoot: URL) -> [URL] {
         var candidates: [URL] = []
         let repoConfigURL = repoRootURL().appendingPathComponent("beatbeam_config.json")
-        let oldSupportConfigURL = (
-            FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let applicationSupportBaseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support", isDirectory: true)
+        let stableSupportConfigURL = applicationSupportBaseURL
+            .appendingPathComponent(beatBeamStableSupportDirectoryName, isDirectory: true)
+            .appendingPathComponent("beatbeam_config.json")
+        let oldSupportConfigURL = (
+            applicationSupportBaseURL
         ).appendingPathComponent("BeatBeamDMX/beatbeam_config.json")
         let bundledConfigURL = backendRoot.appendingPathComponent("beatbeam_config.json")
 
-        for url in [repoConfigURL, oldSupportConfigURL, bundledConfigURL] {
+        for url in [repoConfigURL, stableSupportConfigURL, oldSupportConfigURL, bundledConfigURL] {
             if !candidates.contains(url) {
                 candidates.append(url)
             }
@@ -3822,11 +5065,9 @@ struct ContentView: View {
                         .padding(.bottom, 160)
                 }
             } else if workspaceMode == .map {
-                ScrollView {
-                    MapWorkspaceView()
-                        .padding(.trailing, 4)
-                        .padding(.bottom, 160)
-                }
+                MapWorkspaceView()
+                    .padding(.trailing, 4)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     fixtureBankPanel
@@ -3928,7 +5169,6 @@ struct ContentView: View {
 
                 LabeledStatusRow(title: "DMX", text: model.dmxStatus)
                 LabeledStatusRow(title: "OSC", text: model.oscStatus)
-                LabeledStatusRow(title: "Bron", text: model.oscSourceStatus)
             }
         }
     }
@@ -3976,6 +5216,8 @@ struct ContentView: View {
                     CompactMetricTile(title: "Phrase", value: model.phraseCurrentValue)
                     CompactMetricTile(title: "Next", value: model.phraseNextValue)
                 }
+
+                TransportMiniStrip()
             }
         }
     }
@@ -3983,6 +5225,8 @@ struct ContentView: View {
     private var transportDetailPanel: some View {
         PanelSurface(title: "Transport", compact: true) {
             VStack(alignment: .leading, spacing: 8) {
+                TransportControlPanel()
+
                 HStack(spacing: 8) {
                     DeckTransportTile(title: model.deck1Title, meta: model.deck1Meta, time: model.deck1Time)
                     DeckTransportTile(title: model.deck2Title, meta: model.deck2Meta, time: model.deck2Time)
@@ -4048,6 +5292,10 @@ struct ContentView: View {
                 )
 
                 Text(model.phraseSummary)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+
+                Text(model.oscSourceStatus)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
@@ -4368,6 +5616,20 @@ struct SlotPanelView: View {
                                 FaderSpec(title: "Blue", value: model.intBinding(for: editor, \.blue, range: 0...255), display: "\(editor.blue)", enabled: true, tint: .blue),
                                 FaderSpec(title: "White", value: model.intBinding(for: editor, \.white, range: 0...255), display: "\(editor.white)", enabled: editor.supportsWhite, tint: .white),
                             ]
+                        )
+                    }
+
+                    if !editor.extraControls.isEmpty {
+                        FaderBankSection(
+                            title: "Fixture FX",
+                            faders: editor.extraControls.map { control in
+                                let currentValue = editor.extraValues[control.id] ?? control.defaultValue
+                                return FaderSpec(
+                                    title: control.title,
+                                    value: model.extraIntBinding(for: editor, controlID: control.id, range: 0...255),
+                                    display: "\(currentValue)"
+                                )
+                            }
                         )
                     }
 
@@ -4713,6 +5975,378 @@ struct QRCodeCard: View {
     }
 }
 
+struct TransportMiniStrip: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                TransportModePill(title: "Auto", value: "auto", compact: true)
+                TransportModePill(title: "OSC", value: "external_osc", compact: true)
+                TransportModePill(title: "Tap", value: "manual_tap", compact: true)
+            }
+
+            Text(model.transportResolvedMode == "idle" ? "Idle" : model.transportStatusText)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(BeatBeamPalette.secondaryText)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            Text("\(Int((model.transportEffectiveBpm ?? model.transportManualBpm).rounded())) BPM")
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(BeatBeamPalette.mutedBackground)
+                )
+
+            Button {
+                model.tapTransportTempo()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "hand.tap.fill")
+                    Text("Tap")
+                }
+                .font(.system(size: 12, weight: .bold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(BeatBeamPalette.utilityGradient)
+                )
+                .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                model.startRekordboxBridge()
+            } label: {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 34, height: 34)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(model.bridgeRunning ? BeatBeamPalette.mutedBackground : Color.green.opacity(0.85))
+                    )
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .disabled(model.bridgeRunning)
+            .opacity(model.bridgeRunning ? 0.5 : 1.0)
+            .help("Start BPM Trigger / Rekordbox bridge")
+
+            Button {
+                model.stopRekordboxBridge()
+            } label: {
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 34, height: 34)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(model.bridgeRunning ? Color.red.opacity(0.85) : BeatBeamPalette.mutedBackground)
+                    )
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.bridgeRunning)
+            .opacity(model.bridgeRunning ? 1.0 : 0.5)
+            .help("Stop BPM Trigger / Rekordbox bridge")
+        }
+    }
+}
+
+struct TransportControlPanel: View {
+    @EnvironmentObject private var model: AppModel
+
+    private let phraseOptions: [(value: String, label: String)] = [
+        ("intro", "Intro"),
+        ("verse", "Verse"),
+        ("build", "Build"),
+        ("chorus", "Chorus"),
+        ("drop", "Drop"),
+        ("down", "Down"),
+        ("break", "Break"),
+        ("outro", "Outro"),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                TransportModePill(title: "Auto", value: "auto")
+                TransportModePill(title: "OSC", value: "external_osc")
+                TransportModePill(title: "Tap", value: "manual_tap")
+
+                Spacer(minLength: 0)
+
+                Button {
+                    model.tapTransportTempo()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "hand.tap.fill")
+                        Text("Tap Tempo")
+                    }
+                    .font(.system(size: 12, weight: .bold))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(BeatBeamPalette.utilityGradient)
+                    )
+                    .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    model.resetTransportClock()
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 13, weight: .bold))
+                        .frame(width: 34, height: 34)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(BeatBeamPalette.mutedBackground)
+                        )
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack(spacing: 10) {
+                Menu {
+                    ForEach(phraseOptions, id: \.value) { option in
+                        Button(option.label) {
+                            model.setTransportManualPhrase(option.value)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "waveform")
+                        Text(model.transportManualPhraseLabel)
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(BeatBeamPalette.mutedBackground)
+                    )
+                    .foregroundStyle(.white)
+                }
+                .menuStyle(.borderlessButton)
+
+                Button {
+                    model.setTransportIdleAnimationEnabled(!model.transportIdleAnimationEnabled)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: model.transportIdleAnimationEnabled ? "figure.wave.circle.fill" : "figure.wave.circle")
+                        Text("Idle")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(model.transportIdleAnimationEnabled ? AnyShapeStyle(BeatBeamPalette.activeGradient) : AnyShapeStyle(BeatBeamPalette.mutedBackground))
+                    )
+                    .foregroundStyle(model.transportIdleAnimationEnabled ? Color.black : Color.white)
+                }
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 0)
+            }
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(minimum: 90), spacing: 8),
+                    GridItem(.flexible(minimum: 90), spacing: 8),
+                    GridItem(.flexible(minimum: 90), spacing: 8),
+                    GridItem(.flexible(minimum: 90), spacing: 8),
+                ],
+                spacing: 8
+            ) {
+                CompactMetricTile(
+                    title: "Mode",
+                    value: model.transportResolvedMode == "manual_tap"
+                        ? "Tap"
+                        : (model.transportResolvedMode == "idle" ? "Idle" : "OSC")
+                )
+                CompactMetricTile(title: "Manual", value: "\(Int(model.transportManualBpm.rounded()))")
+                CompactMetricTile(title: "Live", value: model.transportEffectiveBpm.map { "\(Int($0.rounded()))" } ?? "-")
+                CompactMetricTile(title: "Taps", value: "\(model.transportTapCount)/4")
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Menu {
+                        ForEach(model.liveAudioDevices) { device in
+                            Button(device.name) {
+                                model.setSelectedLiveAudioDevice(device.id)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "mic.fill")
+                            Text(
+                                model.liveAudioDevices.first(where: { $0.id == model.selectedLiveAudioDeviceID })?.name
+                                ?? "Geen input"
+                            )
+                            .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(BeatBeamPalette.mutedBackground)
+                        )
+                        .foregroundStyle(.white)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .disabled(model.liveAudioDevices.isEmpty)
+
+                    Button {
+                        model.refreshAudioInputs()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 13, weight: .bold))
+                            .frame(width: 34, height: 34)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(BeatBeamPalette.mutedBackground)
+                            )
+                            .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        model.setLiveAudioEnabled(!model.liveAudioEnabled)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: model.liveAudioEnabled ? "waveform.circle.fill" : "waveform.circle")
+                            Text(model.liveAudioEnabled ? "Audio On" : "Audio Off")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(model.liveAudioEnabled ? AnyShapeStyle(BeatBeamPalette.utilityGradient) : AnyShapeStyle(BeatBeamPalette.mutedBackground))
+                        )
+                        .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.liveAudioDevices.isEmpty)
+                }
+
+                Text(model.liveAudioStatusText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(BeatBeamPalette.secondaryText)
+                    .lineLimit(2)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Button {
+                        model.startRekordboxBridge()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "play.fill")
+                            Text("Bridge Start")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(BeatBeamPalette.activeGradient)
+                        )
+                        .foregroundStyle(Color.black)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        model.stopRekordboxBridge()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "stop.fill")
+                            Text("Bridge Stop")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(BeatBeamPalette.mutedBackground)
+                        )
+                        .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        model.refreshBridgeStatus(force: true)
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 13, weight: .bold))
+                            .frame(width: 34, height: 34)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(BeatBeamPalette.mutedBackground)
+                            )
+                            .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
+
+                    CompactMetricTile(title: "Bridge", value: model.bridgeRunning ? "On" : "Off")
+                        .frame(maxWidth: 92)
+                }
+
+                Text(model.bridgeStatusText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(BeatBeamPalette.secondaryText)
+                    .lineLimit(2)
+            }
+        }
+    }
+}
+
+struct TransportModePill: View {
+    @EnvironmentObject private var model: AppModel
+    let title: String
+    let value: String
+    var compact: Bool = false
+
+    private var isActive: Bool {
+        model.transportMode == value
+    }
+
+    var body: some View {
+        Button {
+            model.setTransportMode(value)
+        } label: {
+            Text(title)
+                .font(.system(size: compact ? 11 : 12, weight: .bold))
+                .padding(.horizontal, compact ? 10 : 12)
+                .padding(.vertical, compact ? 7 : 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(isActive ? AnyShapeStyle(BeatBeamPalette.activeGradient) : AnyShapeStyle(BeatBeamPalette.mutedBackground))
+                )
+                .foregroundStyle(isActive ? Color.black : Color.white)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(isActive ? BeatBeamPalette.brandCyan.opacity(0.7) : BeatBeamPalette.border, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct AutoShowControlView: View {
     @EnvironmentObject private var model: AppModel
 
@@ -5038,38 +6672,43 @@ struct FixtureMapAssignmentPanel: View {
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
 
-                ForEach(model.slotEditors) { editor in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(previewColor(for: editor.id))
-                                .frame(width: 10, height: 10)
-                            Text(editor.label)
-                                .font(.system(size: 13, weight: .semibold))
-                            Spacer()
-                            Text(editor.rangeText)
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(model.slotEditors) { editor in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 8) {
+                                    Circle()
+                                        .fill(previewColor(for: editor.id))
+                                        .frame(width: 10, height: 10)
+                                    Text(editor.label)
+                                        .font(.system(size: 13, weight: .semibold))
+                                    Spacer()
+                                    Text(editor.rangeText)
+                                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
 
-                        Picker("Position", selection: Binding(
-                            get: { model.anchorAssignment(for: editor.id) },
-                            set: { model.assignAnchor($0, to: editor.id) }
-                        )) {
-                            Text("Unassigned").tag("")
-                            ForEach(StageAnchor.allCases) { anchor in
-                                Text("\(anchor.title) • \(anchor.placementGroup)").tag(anchor.rawValue)
+                                Picker("Position", selection: Binding(
+                                    get: { model.anchorAssignment(for: editor.id) },
+                                    set: { model.assignAnchor($0, to: editor.id) }
+                                )) {
+                                    Text("Unassigned").tag("")
+                                    ForEach(StageAnchor.allCases) { anchor in
+                                        Text("\(anchor.title) • \(anchor.placementGroup)").tag(anchor.rawValue)
+                                    }
+                                }
+                                .pickerStyle(.menu)
                             }
+                            .padding(10)
+                            .background(BeatBeamPalette.raisedBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
-                        .pickerStyle(.menu)
                     }
-                    .padding(10)
-                    .background(BeatBeamPalette.raisedBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
             }
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private func previewColor(for slotID: String) -> Color {
@@ -5086,6 +6725,8 @@ struct StageProjectionDeckView: View {
     @AppStorage("mapProjectionShowFront") private var showFront = true
     @AppStorage("mapProjectionShowBack") private var showBack = false
     @AppStorage("mapProjectionShowSide") private var showSide = true
+    @AppStorage(mapProjectionShow3DDefaultsKey) private var show3D = true
+    @AppStorage(mapProjection2DZoomDefaultsKey) private var projection2DZoom = 1.0
 
     let showControls: Bool
     let topInteractive: Bool
@@ -5116,6 +6757,25 @@ struct StageProjectionDeckView: View {
                         }
                         .buttonStyle(.plain)
                     }
+
+                    Button(action: { toggle3DVisibility() }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "cube.transparent")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("3D")
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(show3D ? BeatBeamPalette.triggerActive.opacity(0.22) : BeatBeamPalette.raisedBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(show3D ? BeatBeamPalette.triggerActive.opacity(0.78) : BeatBeamPalette.border, lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
                     if showTop {
                         Text("Top \(model.topProjectionRotationDegrees)°")
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -5154,13 +6814,51 @@ struct StageProjectionDeckView: View {
                             }
                         }
                     }
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+
+                        Button {
+                            projection2DZoom = clampedProjection2DZoom(projection2DZoom - 0.10)
+                        } label: {
+                            Image(systemName: "minus")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Text("2D \(Int((clampedProjection2DZoom(projection2DZoom) * 100).rounded()))%")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(minWidth: 66)
+
+                        Button {
+                            projection2DZoom = 1.0
+                        } label: {
+                            Text("Reset")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button {
+                            projection2DZoom = clampedProjection2DZoom(projection2DZoom + 0.10)
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .buttonStyle(.bordered)
+                    }
                     Spacer()
-                    if model.isEditingProjectionLayout {
-                        if let selectedEditor = model.slotEditors.first(where: { $0.id == model.selectedSlotID }) {
-                            let yaw = Int(model.projectionYawDegrees(for: selectedEditor.id).rounded())
-                            let pitch = Int(model.projectionPitchDegrees(for: selectedEditor.id).rounded())
-                            HStack(spacing: 8) {
-                                Text("\(selectedEditor.label) • yaw \(yaw)° • pitch \(pitch)°")
+                        if model.isEditingProjectionLayout {
+                            if let selectedEditor = model.slotEditors.first(where: { $0.id == model.selectedSlotID }) {
+                                let yaw = Int(model.projectionYawDegrees(for: selectedEditor.id).rounded())
+                                let pitch = Int(model.projectionPitchDegrees(for: selectedEditor.id).rounded())
+                                let roll = Int(model.projectionRollDegrees(for: selectedEditor.id).rounded())
+                                let lower = "\(selectedEditor.label) \(selectedEditor.fixtureLabel)".lowercased()
+                                let isWallWashEditor = !(selectedEditor.supportsPan || selectedEditor.supportsTilt) && (lower.contains("wall wash") || lower.contains("light bar") || lower.contains("wallwash") || lower.contains("bar"))
+                                HStack(spacing: 8) {
+                                Text(
+                                    isWallWashEditor
+                                        ? "\(selectedEditor.label) • yaw \(yaw)° • roll \(roll)°"
+                                        : "\(selectedEditor.label) • yaw \(yaw)° • pitch \(pitch)°"
+                                )
                                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
                                     .foregroundStyle(.secondary)
                                 Button {
@@ -5189,6 +6887,20 @@ struct StageProjectionDeckView: View {
                                         model.rotateSelectedProjectionMountPitch(by: 90)
                                     } label: {
                                         Label("Pitch +90°", systemImage: "arrow.up")
+                                    }
+                                    .buttonStyle(.bordered)
+                                } else if isWallWashEditor {
+                                    Button {
+                                        model.rotateSelectedProjectionRoll(by: -90)
+                                    } label: {
+                                        Label("Roll -90°", systemImage: "arrow.clockwise")
+                                    }
+                                    .buttonStyle(.bordered)
+
+                                    Button {
+                                        model.rotateSelectedProjectionRoll(by: 90)
+                                    } label: {
+                                        Label("Roll +90°", systemImage: "arrow.counterclockwise")
                                     }
                                     .buttonStyle(.bordered)
                                 }
@@ -5254,15 +6966,22 @@ struct StageProjectionDeckView: View {
             }
 
             let projections = activeProjections
-            LazyVGrid(
-                columns: projections.count == 1
-                    ? [GridItem(.flexible(minimum: 420), spacing: 12)]
-                    : [GridItem(.flexible(minimum: 320), spacing: 12), GridItem(.flexible(minimum: 320), spacing: 12)],
-                alignment: .leading,
-                spacing: 12
-            ) {
-                ForEach(projections) { projection in
-                    projectionPanel(for: projection)
+            if visiblePanelCount == 1 {
+                singleVisiblePanel(for: projections)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                LazyVGrid(
+                    columns: [GridItem(.flexible(minimum: 320), spacing: 12), GridItem(.flexible(minimum: 320), spacing: 12)],
+                    alignment: .leading,
+                    spacing: 12
+                ) {
+                    ForEach(projections) { projection in
+                        projectionPanel(for: projection)
+                    }
+
+                    if show3D {
+                        threeDPreviewPanel
+                    }
                 }
             }
         }
@@ -5270,7 +6989,14 @@ struct StageProjectionDeckView: View {
 
     private var activeProjections: [StageProjection] {
         let selected = StageProjection.allCases.filter(isActive)
-        return selected.isEmpty ? [.top] : selected
+        if selected.isEmpty {
+            return show3D ? [] : [.top]
+        }
+        return selected
+    }
+
+    private var visiblePanelCount: Int {
+        activeProjections.count + (show3D ? 1 : 0)
     }
 
     private func isActive(_ projection: StageProjection) -> Bool {
@@ -5300,10 +7026,22 @@ struct StageProjectionDeckView: View {
     }
 
     private func toggle(_ projection: StageProjection) {
-        if isActive(projection) && activeProjections.count == 1 {
+        if isActive(projection) && activeProjections.count == 1 && !show3D {
             return
         }
         setActive(projection, !isActive(projection))
+    }
+
+    private func toggle3DVisibility() {
+        if show3D && activeProjections.isEmpty {
+            showTop = true
+            show3D = false
+            return
+        }
+        show3D.toggle()
+        if !show3D && activeProjections.isEmpty {
+            showTop = true
+        }
     }
 
     private func iconName(for projection: StageProjection) -> String {
@@ -5316,6 +7054,26 @@ struct StageProjectionDeckView: View {
             return "rectangle.center.inset.filled"
         case .side:
             return "rectangle.righthalf.inset.filled"
+        }
+    }
+
+    @ViewBuilder
+    private func singleVisiblePanel(for projections: [StageProjection]) -> some View {
+        if let projection = projections.first {
+            projectionPanel(for: projection)
+        } else if show3D {
+            threeDPreviewPanel
+        }
+    }
+
+    private var threeDPreviewPanel: some View {
+        StageThreeDPreviewPanel(
+            title: "3D View",
+            subtitle: "Orbit, pan and zoom the rig in space"
+        ) {
+            Stage3DPreviewView()
+                .aspectRatio(stageMapAspectRatio, contentMode: .fit)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -5399,48 +7157,49 @@ struct StageMapCanvas: View {
                         }
                     }
 
-                    ForEach(Array(groupedEditors.enumerated()), id: \.offset) { _, item in
-                        let editors = item.value
-                        ForEach(Array(editors.enumerated()), id: \.element.id) { _, editor in
-                            let worldOrigin = model.worldPosition(for: editor.id)
-                            let normalizedOrigin = model.projectionPoint(for: editor.id, projection: projection)
-                            let origin = absolutePoint(normalizedOrigin, in: geometry.size)
-                            let preview = model.slotPreviews[editor.id]
-                            let stageMotion = model.stageMotionStates[editor.id]
-                            let beamKind = beamKind(for: editor)
+                    ForEach(model.slotEditors) { editor in
+                        let worldOrigin = model.worldPosition(for: editor.id)
+                        let normalizedOrigin = model.projectionPoint(for: editor.id, projection: projection)
+                        let origin = absolutePoint(normalizedOrigin, in: geometry.size)
+                        let preview = model.slotPreviews[editor.id]
+                        let stageMotion = model.stageMotionStates[editor.id]
+                        let beamKind = beamKind(for: editor)
+                        let previewTime = model.previewAnimationTime(for: timeline.date)
 
-                            if let preview, preview.enabled {
-                                StageFixtureBeam(
-                                    origin: origin,
-                                    worldOrigin: worldOrigin,
-                                    mountYawDegrees: worldOrigin.yawDegrees,
-                                    mountPitchDegrees: worldOrigin.pitchDegrees,
-                                    preview: preview,
-                                    stageMotion: stageMotion,
-                                    beamKind: beamKind,
-                                    color: slotPreviewBaseColor(preview),
-                                    projection: projection,
-                                    size: geometry.size,
-                                    animationTime: timeline.date.timeIntervalSinceReferenceDate
-                                )
-                            }
-
-                            ProjectionFixtureNode(
-                                editor: editor,
+                        if let preview, preview.enabled {
+                            StageFixtureBeam(
+                                origin: origin,
+                                worldOrigin: worldOrigin,
+                                mountYawDegrees: worldOrigin.yawDegrees,
+                                mountPitchDegrees: worldOrigin.pitchDegrees,
                                 preview: preview,
                                 stageMotion: stageMotion,
-                                isSelected: isSelected(editor.id),
-                                showDiagnostics: showDiagnostics,
-                                animationTime: timeline.date.timeIntervalSinceReferenceDate,
+                                beamKind: beamKind,
+                                wallWashEmitters: beamKind == .wallWash
+                                    ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: previewTime)
+                                    : [],
+                                color: slotPreviewBeamColor(preview),
                                 projection: projection,
-                                editMode: editMode,
-                                interactive: interactive,
-                                selectionMode: selectionMode,
-                                normalizedOrigin: normalizedOrigin,
-                                absoluteOrigin: origin,
-                                canvasSize: geometry.size
+                                size: geometry.size,
+                                animationTime: previewTime
                             )
                         }
+
+                        ProjectionFixtureNode(
+                            editor: editor,
+                            preview: preview,
+                            stageMotion: stageMotion,
+                            isSelected: isSelected(editor.id),
+                            showDiagnostics: showDiagnostics,
+                            animationTime: previewTime,
+                            projection: projection,
+                            editMode: editMode,
+                            interactive: interactive,
+                            selectionMode: selectionMode,
+                            normalizedOrigin: normalizedOrigin,
+                            absoluteOrigin: origin,
+                            canvasSize: geometry.size
+                        )
                     }
 
                     if editMode {
@@ -5466,23 +7225,6 @@ struct StageMapCanvas: View {
 
     private var hasAnimatedStrobe: Bool {
         model.slotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
-    }
-
-    private var groupedEditors: [(key: StageAnchor, value: [SlotEditor])] {
-        let groups = Dictionary(grouping: model.slotEditors.compactMap { editor -> (StageAnchor, SlotEditor)? in
-            guard
-                let raw = model.mapAssignments[editor.id],
-                let anchor = StageAnchor(rawValue: raw)
-            else {
-                return nil
-            }
-            return (anchor, editor)
-        }, by: \.0)
-
-        return StageAnchor.allCases.compactMap { anchor in
-            guard let items = groups[anchor]?.map(\.1), !items.isEmpty else { return nil }
-            return (anchor, items)
-        }
     }
 
     private func absolutePoint(_ normalized: CGPoint, in size: CGSize) -> CGPoint {
@@ -5513,48 +7255,49 @@ struct StageFrontCanvas: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !hasAnimatedStrobe)) { timeline in
             GeometryReader { geometry in
                 ZStack {
-                    ForEach(Array(groupedEditors.enumerated()), id: \.offset) { _, item in
-                        let editors = item.value
-                        ForEach(Array(editors.enumerated()), id: \.element.id) { _, editor in
-                            let worldOrigin = model.worldPosition(for: editor.id)
-                            let normalizedOrigin = model.projectionPoint(for: editor.id, projection: projection)
-                            let origin = absolutePoint(normalizedOrigin, in: geometry.size)
-                            let preview = model.slotPreviews[editor.id]
-                            let stageMotion = model.stageMotionStates[editor.id]
-                            let beamKind = beamKind(for: editor)
+                    ForEach(model.slotEditors) { editor in
+                        let worldOrigin = model.worldPosition(for: editor.id)
+                        let normalizedOrigin = model.projectionPoint(for: editor.id, projection: projection)
+                        let origin = absolutePoint(normalizedOrigin, in: geometry.size)
+                        let preview = model.slotPreviews[editor.id]
+                        let stageMotion = model.stageMotionStates[editor.id]
+                        let beamKind = beamKind(for: editor)
+                        let previewTime = model.previewAnimationTime(for: timeline.date)
 
-                            if let preview, preview.enabled {
-                                StageFixtureBeam(
-                                    origin: origin,
-                                    worldOrigin: worldOrigin,
-                                    mountYawDegrees: worldOrigin.yawDegrees,
-                                    mountPitchDegrees: worldOrigin.pitchDegrees,
-                                    preview: preview,
-                                    stageMotion: stageMotion,
-                                    beamKind: beamKind,
-                                    color: slotPreviewBaseColor(preview),
-                                    projection: projection,
-                                    size: geometry.size,
-                                    animationTime: timeline.date.timeIntervalSinceReferenceDate
-                                )
-                            }
-
-                            ProjectionFixtureNode(
-                                editor: editor,
+                        if let preview, preview.enabled {
+                            StageFixtureBeam(
+                                origin: origin,
+                                worldOrigin: worldOrigin,
+                                mountYawDegrees: worldOrigin.yawDegrees,
+                                mountPitchDegrees: worldOrigin.pitchDegrees,
                                 preview: preview,
                                 stageMotion: stageMotion,
-                                isSelected: isSelected(editor.id),
-                                showDiagnostics: showDiagnostics,
-                                animationTime: timeline.date.timeIntervalSinceReferenceDate,
+                                beamKind: beamKind,
+                                wallWashEmitters: beamKind == .wallWash
+                                    ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: previewTime)
+                                    : [],
+                                color: slotPreviewBeamColor(preview),
                                 projection: projection,
-                                editMode: editMode,
-                                interactive: false,
-                                selectionMode: selectionMode,
-                                normalizedOrigin: normalizedOrigin,
-                                absoluteOrigin: origin,
-                                canvasSize: geometry.size
+                                size: geometry.size,
+                                animationTime: previewTime
                             )
                         }
+
+                        ProjectionFixtureNode(
+                            editor: editor,
+                            preview: preview,
+                            stageMotion: stageMotion,
+                            isSelected: isSelected(editor.id),
+                            showDiagnostics: showDiagnostics,
+                            animationTime: previewTime,
+                            projection: projection,
+                            editMode: editMode,
+                            interactive: false,
+                            selectionMode: selectionMode,
+                            normalizedOrigin: normalizedOrigin,
+                            absoluteOrigin: origin,
+                            canvasSize: geometry.size
+                        )
                     }
 
                     if editMode {
@@ -5580,23 +7323,6 @@ struct StageFrontCanvas: View {
 
     private var hasAnimatedStrobe: Bool {
         model.slotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
-    }
-
-    private var groupedEditors: [(key: StageAnchor, value: [SlotEditor])] {
-        let groups = Dictionary(grouping: model.slotEditors.compactMap { editor -> (StageAnchor, SlotEditor)? in
-            guard
-                let raw = model.mapAssignments[editor.id],
-                let anchor = StageAnchor(rawValue: raw)
-            else {
-                return nil
-            }
-            return (anchor, editor)
-        }, by: \.0)
-
-        return StageAnchor.allCases.compactMap { anchor in
-            guard let items = groups[anchor]?.map(\.1), !items.isEmpty else { return nil }
-            return (anchor, items)
-        }
     }
 
     private func absolutePoint(_ normalized: CGPoint, in size: CGSize) -> CGPoint {
@@ -5625,48 +7351,49 @@ struct StageSideCanvas: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !hasAnimatedStrobe)) { timeline in
             GeometryReader { geometry in
                 ZStack {
-                    ForEach(Array(groupedEditors.enumerated()), id: \.offset) { _, item in
-                        let editors = item.value
-                        ForEach(Array(editors.enumerated()), id: \.element.id) { _, editor in
-                            let worldOrigin = model.worldPosition(for: editor.id)
-                            let normalizedOrigin = model.projectionPoint(for: editor.id, projection: .side)
-                            let origin = absolutePoint(normalizedOrigin, in: geometry.size)
-                            let preview = model.slotPreviews[editor.id]
-                            let stageMotion = model.stageMotionStates[editor.id]
-                            let beamKind = beamKind(for: editor)
+                    ForEach(model.slotEditors) { editor in
+                        let worldOrigin = model.worldPosition(for: editor.id)
+                        let normalizedOrigin = model.projectionPoint(for: editor.id, projection: .side)
+                        let origin = absolutePoint(normalizedOrigin, in: geometry.size)
+                        let preview = model.slotPreviews[editor.id]
+                        let stageMotion = model.stageMotionStates[editor.id]
+                        let beamKind = beamKind(for: editor)
+                        let previewTime = model.previewAnimationTime(for: timeline.date)
 
-                            if let preview, preview.enabled {
-                                StageFixtureBeam(
-                                    origin: origin,
-                                    worldOrigin: worldOrigin,
-                                    mountYawDegrees: worldOrigin.yawDegrees,
-                                    mountPitchDegrees: worldOrigin.pitchDegrees,
-                                    preview: preview,
-                                    stageMotion: stageMotion,
-                                    beamKind: beamKind,
-                                    color: slotPreviewBaseColor(preview),
-                                    projection: .side,
-                                    size: geometry.size,
-                                    animationTime: timeline.date.timeIntervalSinceReferenceDate
-                                )
-                            }
-
-                            ProjectionFixtureNode(
-                                editor: editor,
+                        if let preview, preview.enabled {
+                            StageFixtureBeam(
+                                origin: origin,
+                                worldOrigin: worldOrigin,
+                                mountYawDegrees: worldOrigin.yawDegrees,
+                                mountPitchDegrees: worldOrigin.pitchDegrees,
                                 preview: preview,
                                 stageMotion: stageMotion,
-                                isSelected: isSelected(editor.id),
-                                showDiagnostics: showDiagnostics,
-                                animationTime: timeline.date.timeIntervalSinceReferenceDate,
+                                beamKind: beamKind,
+                                wallWashEmitters: beamKind == .wallWash
+                                    ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: previewTime)
+                                    : [],
+                                color: slotPreviewBeamColor(preview),
                                 projection: .side,
-                                editMode: editMode,
-                                interactive: false,
-                                selectionMode: selectionMode,
-                                normalizedOrigin: normalizedOrigin,
-                                absoluteOrigin: origin,
-                                canvasSize: geometry.size
+                                size: geometry.size,
+                                animationTime: previewTime
                             )
                         }
+
+                        ProjectionFixtureNode(
+                            editor: editor,
+                            preview: preview,
+                            stageMotion: stageMotion,
+                            isSelected: isSelected(editor.id),
+                            showDiagnostics: showDiagnostics,
+                            animationTime: previewTime,
+                            projection: .side,
+                            editMode: editMode,
+                            interactive: false,
+                            selectionMode: selectionMode,
+                            normalizedOrigin: normalizedOrigin,
+                            absoluteOrigin: origin,
+                            canvasSize: geometry.size
+                        )
                     }
 
                     if editMode {
@@ -5692,23 +7419,6 @@ struct StageSideCanvas: View {
 
     private var hasAnimatedStrobe: Bool {
         model.slotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
-    }
-
-    private var groupedEditors: [(key: StageAnchor, value: [SlotEditor])] {
-        let groups = Dictionary(grouping: model.slotEditors.compactMap { editor -> (StageAnchor, SlotEditor)? in
-            guard
-                let raw = model.mapAssignments[editor.id],
-                let anchor = StageAnchor(rawValue: raw)
-            else {
-                return nil
-            }
-            return (anchor, editor)
-        }, by: \.0)
-
-        return StageAnchor.allCases.compactMap { anchor in
-            guard let items = groups[anchor]?.map(\.1), !items.isEmpty else { return nil }
-            return (anchor, items)
-        }
     }
 
     private func absolutePoint(_ normalized: CGPoint, in size: CGSize) -> CGPoint {
@@ -5911,12 +7621,14 @@ struct StageFixtureNode: View {
     @EnvironmentObject private var model: AppModel
     let editor: SlotEditor
     let anchor: StageAnchor?
+    let worldOrigin: SlotWorldPosition
     let preview: SlotPreview?
     let stageMotion: StageMotionState?
     let isSelected: Bool
     let showDiagnostics: Bool
     let animationTime: TimeInterval
     let projection: StageProjection
+    let canvasSize: CGSize
     let action: (() -> Void)?
 
     var body: some View {
@@ -5936,49 +7648,14 @@ struct StageFixtureNode: View {
         let strobeFactor = slotPreviewStrobeFactor(preview, at: animationTime)
         let brightness = effectivePreviewBrightness(preview, at: animationTime)
         let strobeHighlighted = (preview?.strobeActive ?? false) && strobeFactor > 0.65
+        let wallMetrics = wallWashMetrics
         return ZStack {
             if isWallWash {
                 wallWashBody(brightness: brightness, strobeHighlighted: strobeHighlighted)
+            } else if isBeeEyeFixture {
+                beeEyeBody(brightness: brightness)
             } else {
-                Circle()
-                    .fill(displayColor.opacity(max(0.14, 0.24 + brightness * 0.30)))
-                    .frame(width: fixtureSize + 12 + brightness * 22, height: fixtureSize + 12 + brightness * 22)
-                    .blur(radius: 6 + brightness * 7)
-
-                Circle()
-                    .fill(Color.black.opacity(0.74))
-                    .overlay(
-                        Circle()
-                            .stroke(isSelected ? Color.white : Color.white.opacity(0.82), lineWidth: isSelected ? 3 : 2)
-                    )
-                    .frame(width: fixtureSize, height: fixtureSize)
-
-                Circle()
-                    .stroke(displayColor.opacity(0.85), lineWidth: 2)
-                    .frame(width: fixtureSize - 10, height: fixtureSize - 10)
-
-                Circle()
-                    .trim(from: 0, to: max(0.02, brightness))
-                    .stroke(
-                        displayColor.opacity(0.95),
-                        style: StrokeStyle(lineWidth: 3, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(-90))
-                    .frame(width: fixtureSize + 10, height: fixtureSize + 10)
-
-                Text(shortLabel)
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundStyle(Color.white)
-
-                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .fill(Color.white.opacity(0.10))
-                    .frame(width: fixtureSize - 12, height: 5)
-                    .overlay(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(displayColor.opacity(0.96))
-                            .frame(width: max(4, (fixtureSize - 12) * brightness), height: 5)
-                    }
-                    .offset(y: fixtureSize * 0.36)
+                genericMovingHeadBody(brightness: brightness)
             }
 
             if let preview, preview.strobeActive {
@@ -5989,7 +7666,7 @@ struct StageFixtureNode: View {
                                 BeatBeamPalette.triggerActive.opacity(strobeHighlighted ? 0.95 : 0.36),
                                 style: StrokeStyle(lineWidth: strobeHighlighted ? 3.2 : 1.8, dash: [4, 4])
                             )
-                            .frame(width: wallWashNodeSize.width + 16, height: wallWashNodeSize.height + 16)
+                            .frame(width: wallMetrics.envelope, height: wallMetrics.envelope)
                     } else {
                         Circle()
                             .stroke(
@@ -6016,7 +7693,10 @@ struct StageFixtureNode: View {
                         Circle()
                             .stroke(BeatBeamPalette.triggerActive.opacity(strobeHighlighted ? 0.88 : 0.26), lineWidth: 1)
                     )
-                    .offset(x: isWallWash ? -wallWashNodeSize.width * 0.28 : -fixtureSize * 0.32, y: isWallWash ? -wallWashNodeSize.height * 0.30 : -fixtureSize * 0.34)
+                    .offset(
+                        x: isWallWash ? -wallMetrics.size.width * 0.30 : -fixtureSize * 0.32,
+                        y: isWallWash ? -wallMetrics.size.height * 0.95 : -fixtureSize * 0.34
+                    )
             }
 
             if let preview, preview.motionActive, editor.supportsPan || editor.supportsTilt {
@@ -6056,18 +7736,184 @@ struct StageFixtureNode: View {
         return !(editor.supportsPan || editor.supportsTilt) && (lower.contains("wall wash") || lower.contains("light bar") || lower.contains("wallwash"))
     }
 
+    private var isBeeEyeFixture: Bool {
+        slotPreviewIsBeeEye(preview) || editor.fixtureID == "generic_smart_bee_eye_pattern_moving_head"
+    }
+
     private var fixtureSize: CGFloat {
         (editor.supportsPan || editor.supportsTilt) ? 42 : 28
     }
 
-    private var wallWashNodeSize: CGSize {
-        let verticalMount = anchor == .b1 || anchor == .b2
+    private var wallWashMetrics: WallWashNodeMetrics {
+        let endpoints = wallWashBarWorldEndpoints(worldOrigin, halfLength: 45.0)
+        let start = endpoints.start
+        let end = endpoints.end
+        let startPoint = worldProjectedAbsolutePoint(start, projection: projection, size: canvasSize)
+        let endPoint = worldProjectedAbsolutePoint(end, projection: projection, size: canvasSize)
+        let rawLength = hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y)
+        let thickness: CGFloat
         switch projection {
         case .top:
-            return verticalMount ? CGSize(width: 20, height: 124) : CGSize(width: 124, height: 20)
-        case .front, .back, .side:
-            return verticalMount ? CGSize(width: 24, height: 156) : CGSize(width: 156, height: 24)
+            thickness = 18
+        case .front, .back:
+            thickness = 22
+        case .side:
+            thickness = 20
         }
+        let length = max(thickness * 1.45, rawLength)
+        let angle = atan2(endPoint.y - startPoint.y, endPoint.x - startPoint.x)
+        let envelope = hypot(length, thickness) + 22
+        let labelVisible = length >= 92
+        let ledDiameter = min(thickness * 0.56, max(4.2, length / 18.0))
+        return WallWashNodeMetrics(
+            size: CGSize(width: length, height: thickness),
+            angleRadians: angle,
+            envelope: envelope,
+            ledDiameter: ledDiameter,
+            labelVisible: labelVisible
+        )
+    }
+
+    @ViewBuilder
+    private func genericMovingHeadBody(brightness: CGFloat) -> some View {
+        Circle()
+            .fill(displayColor.opacity(max(0.14, 0.24 + brightness * 0.30)))
+            .frame(width: fixtureSize + 12 + brightness * 22, height: fixtureSize + 12 + brightness * 22)
+            .blur(radius: 6 + brightness * 7)
+
+        Circle()
+            .fill(Color.black.opacity(0.74))
+            .overlay(
+                Circle()
+                    .stroke(isSelected ? Color.white : Color.white.opacity(0.82), lineWidth: isSelected ? 3 : 2)
+            )
+            .frame(width: fixtureSize, height: fixtureSize)
+
+        Circle()
+            .stroke(displayColor.opacity(0.85), lineWidth: 2)
+            .frame(width: fixtureSize - 10, height: fixtureSize - 10)
+
+        if spotBrightness > 0.06 {
+            Circle()
+                .fill(spotDisplayColor.opacity(max(0.22, spotBrightness * 0.88)))
+                .frame(
+                    width: fixtureSize * 0.34 + spotBrightness * 8,
+                    height: fixtureSize * 0.34 + spotBrightness * 8
+                )
+                .blur(radius: 1.2 + spotBrightness * 1.8)
+
+            Circle()
+                .stroke(spotDisplayColor.opacity(0.92), lineWidth: 1.6)
+                .frame(
+                    width: fixtureSize * 0.24 + spotBrightness * 5,
+                    height: fixtureSize * 0.24 + spotBrightness * 5
+                )
+        }
+
+        Circle()
+            .trim(from: 0, to: max(0.02, brightness))
+            .stroke(
+                displayColor.opacity(0.95),
+                style: StrokeStyle(lineWidth: 3, lineCap: .round)
+            )
+            .rotationEffect(.degrees(-90))
+            .frame(width: fixtureSize + 10, height: fixtureSize + 10)
+
+        Text(shortLabel)
+            .font(.system(size: 11, weight: .bold, design: .monospaced))
+            .foregroundStyle(Color.white)
+
+        RoundedRectangle(cornerRadius: 3, style: .continuous)
+            .fill(Color.white.opacity(0.10))
+            .frame(width: fixtureSize - 12, height: 5)
+            .overlay(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(displayColor.opacity(0.96))
+                    .frame(width: max(4, (fixtureSize - 12) * brightness), height: 5)
+            }
+            .offset(y: fixtureSize * 0.36)
+    }
+
+    @ViewBuilder
+    private func beeEyeBody(brightness: CGFloat) -> some View {
+        Circle()
+            .fill(displayColor.opacity(0.18 + brightness * 0.22))
+            .frame(width: fixtureSize + 18 + brightness * 24, height: fixtureSize + 18 + brightness * 24)
+            .blur(radius: 7 + brightness * 8)
+
+        Circle()
+            .fill(Color.black.opacity(0.82))
+            .overlay(
+                Circle()
+                    .stroke(isSelected ? Color.white : Color.white.opacity(0.84), lineWidth: isSelected ? 3 : 2)
+            )
+            .frame(width: fixtureSize + 6, height: fixtureSize + 6)
+
+        Circle()
+            .stroke(displayColor.opacity(0.84), lineWidth: 2)
+            .frame(width: fixtureSize - 2, height: fixtureSize - 2)
+
+        ForEach(0..<6, id: \.self) { index in
+            let angle = Angle.degrees(Double(index) * 60.0 - 90.0)
+            Circle()
+                .fill(displayColor.opacity(0.30 + brightness * 0.58))
+                .frame(width: fixtureSize * 0.22, height: fixtureSize * 0.22)
+                .overlay(
+                    Circle()
+                        .stroke(Color.white.opacity(0.16), lineWidth: 0.8)
+                )
+                .offset(
+                    x: cos(angle.radians) * fixtureSize * 0.26,
+                    y: sin(angle.radians) * fixtureSize * 0.26
+                )
+                .blur(radius: brightness > 0.5 ? 0.3 : 0)
+        }
+
+        if spotBrightness > 0.05 {
+            Circle()
+                .fill(spotDisplayColor.opacity(max(0.24, spotBrightness * 0.92)))
+                .frame(
+                    width: fixtureSize * 0.40 + spotBrightness * 8,
+                    height: fixtureSize * 0.40 + spotBrightness * 8
+                )
+                .blur(radius: 1.4 + spotBrightness * 2.1)
+        }
+
+        Circle()
+            .fill(Color.black.opacity(0.50))
+            .overlay(
+                Circle()
+                    .stroke(spotDisplayColor.opacity(0.94), lineWidth: 1.8)
+            )
+            .frame(width: fixtureSize * 0.36, height: fixtureSize * 0.36)
+
+        if let preview, spotBrightness > 0.05 {
+            let patternID = slotPreviewResolvedPatternID(preview, at: animationTime)
+            if patternID != "open" && !(preview.spotPatternOpen ?? false) {
+                BeeEyePatternGlyph(
+                    patternID: patternID,
+                    color: Color.white,
+                    rotationDegrees: slotPreviewResolvedPatternRotation(preview, at: animationTime),
+                    opacity: max(0.64, Double(spotBrightness))
+                )
+                .frame(width: fixtureSize * 0.28, height: fixtureSize * 0.28)
+                .blendMode(.screen)
+            }
+        }
+
+        Circle()
+            .trim(from: 0, to: max(0.04, brightness))
+            .stroke(
+                displayColor.opacity(0.95),
+                style: StrokeStyle(lineWidth: 3, lineCap: .round)
+            )
+            .rotationEffect(.degrees(-90))
+            .frame(width: fixtureSize + 12, height: fixtureSize + 12)
+
+        Text(shortLabel)
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            .foregroundStyle(Color.white)
+            .offset(y: fixtureSize * 0.48)
     }
 
     private var displayColor: Color {
@@ -6081,176 +7927,506 @@ struct StageFixtureNode: View {
         return base.opacity(max(0.24, brightness))
     }
 
+    private var spotDisplayColor: Color {
+        guard let preview, preview.enabled else { return Color.white.opacity(0.18) }
+        return slotPreviewResolvedSpotColor(preview, at: animationTime)
+    }
+
+    private var spotBrightness: CGFloat {
+        guard let preview, preview.enabled else { return 0 }
+        let base = slotPreviewSpotBrightnessFraction(preview)
+        if preview.strobeActive {
+            return base * CGFloat(slotPreviewStrobeFactor(preview, at: animationTime))
+        }
+        return base
+    }
+
     @ViewBuilder
     private func wallWashBody(brightness: CGFloat, strobeHighlighted: Bool) -> some View {
-        let size = wallWashNodeSize
-        let vertical = size.height > size.width
+        let metrics = wallWashMetrics
+        let size = metrics.size
         let emitters = wallWashEmitters
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(displayColor.opacity(0.10 + brightness * 0.12))
-                .frame(width: size.width + 12, height: size.height + 16)
-                .blur(radius: 4 + brightness * 3)
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.black.opacity(0.18 + brightness * 0.06))
+                    .frame(width: size.width + 16, height: size.height + 18)
+                    .blur(radius: 3 + brightness * 2)
 
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(Color.black.opacity(0.76))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .stroke(isSelected ? Color.white : Color.white.opacity(0.78), lineWidth: isSelected ? 2.4 : 1.4)
-                )
-                .frame(width: size.width, height: size.height)
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.black.opacity(0.94))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(isSelected ? Color.white : Color.white.opacity(0.42), lineWidth: isSelected ? 2.2 : 1.0)
+                    )
+                    .frame(width: size.width, height: size.height)
 
-            Group {
-                if vertical {
-                    VStack(spacing: 1.4) {
-                        ledCells(emitters: emitters)
-                    }
-                } else {
-                    HStack(spacing: 1.4) {
-                        ledCells(emitters: emitters)
+                ZStack {
+                    ForEach(Array(emitters.enumerated()), id: \.offset) { index, emitter in
+                        let t = emitters.count <= 1 ? 0.5 : CGFloat(index) / CGFloat(emitters.count - 1)
+                        ZStack {
+                            Capsule(style: .continuous)
+                                .fill(emitter.color.opacity(0.34 + emitter.intensity * 0.66))
+                                .frame(width: metrics.ledDiameter * 0.76, height: metrics.ledDiameter * 1.62)
+                                .blur(radius: 1.1)
+
+                            Capsule(style: .continuous)
+                                .fill(emitter.color.opacity(0.42 + emitter.intensity * 0.48))
+                                .frame(width: metrics.ledDiameter * 0.44, height: metrics.ledDiameter * 1.02)
+                                .blur(radius: 0.45)
+
+                            Capsule(style: .continuous)
+                                .fill(Color.white.opacity(0.08 + emitter.intensity * 0.16))
+                                .frame(width: metrics.ledDiameter * 0.18, height: metrics.ledDiameter * 0.48)
+                                .blur(radius: 0.18)
+                        }
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .stroke(Color.white.opacity(0.08 + emitter.intensity * 0.10), lineWidth: 0.4)
+                                .frame(width: metrics.ledDiameter * 0.76, height: metrics.ledDiameter * 1.62)
+                        )
+                        .shadow(color: emitter.color.opacity(0.36 + emitter.intensity * 0.42), radius: 4.6, x: 0, y: 0)
+                            .position(
+                                x: 6 + t * max(1, size.width - 12),
+                                y: size.height * 0.5
+                            )
                     }
                 }
-            }
-            .frame(width: size.width - 8, height: size.height - 8)
+                .frame(width: size.width, height: size.height)
 
-            if !vertical {
-                Text("WASH")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.74))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-                    .background(Color.black.opacity(0.28))
-                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                    .offset(y: size.height * 0.68)
-            }
+                if metrics.labelVisible {
+                    Text("WASH")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.74))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(Color.black.opacity(0.28))
+                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .offset(y: size.height * 0.90)
+                }
 
-            if strobeHighlighted {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(BeatBeamPalette.triggerActive.opacity(0.82), lineWidth: 1.5)
-                    .frame(width: size.width + 6, height: size.height + 6)
+                if strobeHighlighted {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(BeatBeamPalette.triggerActive.opacity(0.82), lineWidth: 1.5)
+                        .frame(width: size.width + 8, height: size.height + 8)
+                }
             }
+            .rotationEffect(.radians(metrics.angleRadians))
+            .frame(width: metrics.envelope, height: metrics.envelope)
         }
     }
 
-    @ViewBuilder
-    private func ledCells(emitters: [WallWashEmitter]) -> some View {
-        ForEach(Array(emitters.enumerated()), id: \.offset) { _, emitter in
-            Circle()
-                .fill(emitter.color.opacity(0.16 + emitter.intensity * 0.84))
-                .frame(width: 3.8, height: 3.8)
-                .overlay(
+    private var wallWashEmitters: [WallWashEmitterPreview] {
+        wallWashEmitterPreviews(
+            editor: editor,
+            model: model,
+            preview: preview,
+            animationTime: animationTime
+        )
+    }
+
+    private struct WallWashNodeMetrics {
+        let size: CGSize
+        let angleRadians: CGFloat
+        let envelope: CGFloat
+        let ledDiameter: CGFloat
+        let labelVisible: Bool
+    }
+}
+
+private let beePatternAssetBaseNames: [String: String] = [
+    "open": "bee__Open",
+    "spoke_star": "bee__Spoke-star",
+    "flower": "bee__Flower",
+    "swirl": "bee__Swirl",
+    "dot_star": "bee__Dot-star",
+    "dot_cluster": "bee__Hearts",
+    "triskelion": "bee__trisklion",
+    "pinwheel_flower": "bee__ice",
+]
+
+private final class BeePatternAssetStore {
+    static let shared = BeePatternAssetStore()
+
+    private var baseCache: [String: NSImage] = [:]
+    private var templateCache: [String: NSImage] = [:]
+    private let lock = NSLock()
+
+    func baseImage(patternID: String) -> NSImage? {
+        lock.lock()
+        if let cached = baseCache[patternID] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        guard
+            let url = beePatternAssetURL(patternID: patternID),
+            let image = NSImage(contentsOf: url)
+        else {
+            return nil
+        }
+
+        lock.lock()
+        baseCache[patternID] = image
+        lock.unlock()
+        return image
+    }
+
+    func templateImage(patternID: String) -> NSImage? {
+        lock.lock()
+        if let cached = templateCache[patternID] {
+            let copy = cached.copy() as? NSImage
+            lock.unlock()
+            return copy ?? cached
+        }
+        lock.unlock()
+
+        guard
+            let base = baseImage(patternID: patternID),
+            let template = base.copy() as? NSImage
+        else {
+            return nil
+        }
+
+        template.isTemplate = true
+        lock.lock()
+        templateCache[patternID] = template
+        let copy = template.copy() as? NSImage
+        lock.unlock()
+        return copy ?? template
+    }
+}
+
+private func beatBeamResourceSearchRoots() -> [URL] {
+    var roots: [URL] = []
+
+    if let resourceURL = Bundle.main.resourceURL {
+        roots.append(resourceURL)
+    }
+
+    roots.append(URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+
+    if let executable = Bundle.main.executableURL {
+        roots.append(
+            executable
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+        )
+    }
+
+    var uniqueRoots: [URL] = []
+    for root in roots {
+        let normalized = root.standardizedFileURL
+        if !uniqueRoots.contains(normalized) {
+            uniqueRoots.append(normalized)
+        }
+    }
+    return uniqueRoots
+}
+
+private func beePatternAssetURL(patternID: String) -> URL? {
+    guard let baseName = beePatternAssetBaseNames[patternID] else { return nil }
+    for root in beatBeamResourceSearchRoots() {
+        let candidate = root.appendingPathComponent("assets/\(baseName).png")
+        if FileManager.default.fileExists(atPath: candidate.path) {
+            return candidate
+        }
+    }
+    return nil
+}
+
+private func beePatternBaseImage(patternID: String) -> NSImage? {
+    BeePatternAssetStore.shared.baseImage(patternID: patternID)
+}
+
+private func beePatternTemplateImage(patternID: String) -> NSImage? {
+    BeePatternAssetStore.shared.templateImage(patternID: patternID)
+}
+
+private func aspectFitRect(for imageSize: CGSize, inside bounds: CGRect) -> CGRect {
+    guard imageSize.width > 0, imageSize.height > 0, bounds.width > 0, bounds.height > 0 else {
+        return bounds
+    }
+
+    let scale = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
+    let fittedSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+    return CGRect(
+        x: bounds.midX - fittedSize.width * 0.5,
+        y: bounds.midY - fittedSize.height * 0.5,
+        width: fittedSize.width,
+        height: fittedSize.height
+    )
+}
+
+@MainActor
+private func beePatternTintedRasterImage(patternID: String, color: NSColor, size: Int) -> NSImage? {
+    let safeSize = max(64, size)
+    let canvasSize = NSSize(width: safeSize, height: safeSize)
+
+    if let baseImage = beePatternBaseImage(patternID: patternID) {
+        let canvas = NSImage(size: canvasSize)
+        canvas.lockFocus()
+        defer { canvas.unlockFocus() }
+
+        NSGraphicsContext.current?.imageInterpolation = .high
+        let bounds = CGRect(origin: .zero, size: canvasSize)
+        let drawRect = aspectFitRect(for: baseImage.size, inside: bounds)
+        baseImage.draw(in: drawRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        (color.usingColorSpace(.deviceRGB) ?? color).setFill()
+        drawRect.fill(using: .sourceIn)
+        return canvas
+    }
+
+    let renderer = ImageRenderer(
+        content: BeeEyeProceduralPatternGlyph(
+            patternID: patternID,
+            color: Color(nsColor: color),
+            rotationDegrees: 0,
+            opacity: 1.0
+        )
+        .frame(width: CGFloat(safeSize), height: CGFloat(safeSize))
+        .background(Color.clear)
+    )
+    renderer.scale = 2.0
+    renderer.isOpaque = false
+    return renderer.nsImage
+}
+
+@MainActor
+private func beePatternMaskRasterImage(patternID: String, size: Int) -> NSImage? {
+    let safeSize = max(64, size)
+    let canvasSize = NSSize(width: safeSize, height: safeSize)
+
+    if let baseImage = beePatternBaseImage(patternID: patternID) {
+        let canvas = NSImage(size: canvasSize)
+        canvas.lockFocus()
+        defer { canvas.unlockFocus() }
+
+        NSGraphicsContext.current?.imageInterpolation = .high
+        let bounds = CGRect(origin: .zero, size: canvasSize)
+        let drawRect = aspectFitRect(for: baseImage.size, inside: bounds)
+        baseImage.draw(in: drawRect, from: .zero, operation: .copy, fraction: 1.0)
+        return canvas
+    }
+
+    let renderer = ImageRenderer(
+        content: BeeEyeProceduralPatternGlyph(
+            patternID: patternID,
+            color: .white,
+            rotationDegrees: 0,
+            opacity: 1.0
+        )
+        .frame(width: CGFloat(safeSize), height: CGFloat(safeSize))
+        .background(Color.clear)
+    )
+    renderer.scale = 2.0
+    renderer.isOpaque = false
+    return renderer.nsImage
+}
+
+struct BeeEyePatternGlyph: View {
+    let patternID: String
+    let color: Color
+    let rotationDegrees: Double
+    let opacity: Double
+
+    var body: some View {
+        if let assetImage = beePatternTemplateImage(patternID: patternID) {
+            Image(nsImage: assetImage)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(color.opacity(opacity))
+                .rotationEffect(Angle.degrees(rotationDegrees))
+        } else {
+            BeeEyeProceduralPatternGlyph(
+                patternID: patternID,
+                color: color,
+                rotationDegrees: rotationDegrees,
+                opacity: opacity
+            )
+        }
+    }
+}
+
+private struct BeeEyeProceduralPatternGlyph: View {
+    let patternID: String
+    let color: Color
+    let rotationDegrees: Double
+    let opacity: Double
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = min(geometry.size.width, geometry.size.height)
+            let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
+            let fill = color.opacity(opacity)
+
+            ZStack {
+                switch patternID {
+                case "spoke_star":
+                    ForEach(0..<5, id: \.self) { index in
+                        let armRotation = Double(index) * 72.0 + 18.0
+                        ZStack {
+                            Capsule(style: .continuous)
+                                .fill(fill)
+                                .frame(width: size * 0.08, height: size * 0.48)
+                                .offset(x: -size * 0.05, y: -size * 0.11)
+                            Capsule(style: .continuous)
+                                .fill(fill)
+                                .frame(width: size * 0.08, height: size * 0.48)
+                                .offset(x: size * 0.05, y: -size * 0.11)
+                        }
+                        .rotationEffect(.degrees(armRotation))
+                    }
+                case "flower":
+                    ForEach(0..<5, id: \.self) { index in
+                        BeePetalShape()
+                            .fill(fill)
+                            .frame(width: size * 0.27, height: size * 0.38)
+                            .offset(y: -size * 0.21)
+                            .rotationEffect(.degrees(Double(index) * 72.0))
+                    }
                     Circle()
-                        .stroke(Color.white.opacity(0.14 + emitter.intensity * 0.10), lineWidth: 0.45)
-                )
-                .shadow(color: emitter.color.opacity(0.12 + emitter.intensity * 0.24), radius: 1.6, x: 0, y: 0)
-        }
-    }
-
-    private var wallWashEmitters: [WallWashEmitter] {
-        guard let preview, preview.enabled else {
-            return Array(repeating: WallWashEmitter(color: Color.white, intensity: 0.12), count: 24)
-        }
-
-        let fallback = Array(
-            repeating: wallWashEmitter(
-                red: preview.red,
-                green: preview.green,
-                blue: preview.blue,
-                white: preview.white,
-                flashScale: wallWashFlashScale
-            ),
-            count: 24
-        )
-
-        guard let range = model.dmxSlotRanges[editor.id] else {
-            return fallback
-        }
-
-        let channelValues = (range.address...range.lastChannel).map { model.dmxValues[$0] ?? 0 }
-        let mode = editor.mode.lowercased()
-
-        switch mode {
-        case "p001":
-            return wallWashZoneEmitters(channelValues: channelValues, zoneCount: 8, totalEmitters: 24)
-        case "l001":
-            return wallWashZoneEmitters(channelValues: channelValues, zoneCount: 4, totalEmitters: 24)
-        case "e001":
-            return wallWashZoneEmitters(channelValues: channelValues, zoneCount: 2, totalEmitters: 24)
-        case "c001":
-            guard channelValues.count >= 3 else { return fallback }
-            return Array(
-                repeating: wallWashEmitter(
-                    red: channelValues[0],
-                    green: channelValues[1],
-                    blue: channelValues[2],
-                    flashScale: wallWashFlashScale
-                ),
-                count: 24
-            )
-        case "d001", "h001":
-            guard channelValues.count >= 4 else { return fallback }
-            return Array(
-                repeating: wallWashEmitter(
-                    red: channelValues[1],
-                    green: channelValues[2],
-                    blue: channelValues[3],
-                    flashScale: wallWashFlashScale
-                ),
-                count: 24
-            )
-        default:
-            return fallback
-        }
-    }
-
-    private func wallWashZoneEmitters(channelValues: [Int], zoneCount: Int, totalEmitters: Int) -> [WallWashEmitter] {
-        guard zoneCount > 0, totalEmitters > 0 else { return [] }
-        let emittersPerZone = max(1, totalEmitters / zoneCount)
-        var emitters: [WallWashEmitter] = []
-        emitters.reserveCapacity(totalEmitters)
-
-        for zoneIndex in 0..<zoneCount {
-            let offset = zoneIndex * 3
-            guard channelValues.count >= offset + 3 else {
-                break
+                        .fill(Color.black.opacity(0.55))
+                        .frame(width: size * 0.15, height: size * 0.15)
+                case "swirl":
+                    ForEach(0..<5, id: \.self) { index in
+                        BeePetalShape()
+                            .fill(fill)
+                            .frame(width: size * 0.24, height: size * 0.40)
+                            .offset(x: size * 0.12, y: -size * 0.11)
+                            .rotationEffect(.degrees(Double(index) * 72.0 + 24.0))
+                    }
+                case "dot_star":
+                    ForEach(dotStarPoints(size: size).indices, id: \.self) { index in
+                        let point = dotStarPoints(size: size)[index]
+                        Circle()
+                            .fill(fill)
+                            .frame(width: point.size, height: point.size)
+                            .position(x: center.x + point.x, y: center.y + point.y)
+                    }
+                case "dot_cluster":
+                    ForEach(clusterOffsets(size: size).indices, id: \.self) { index in
+                        let point = clusterOffsets(size: size)[index]
+                        BeePetalShape()
+                            .fill(fill)
+                            .frame(width: point.size * 0.92, height: point.size * 1.18)
+                            .rotationEffect(.degrees(point.rotation))
+                            .position(x: center.x + point.x, y: center.y + point.y)
+                    }
+                case "triskelion":
+                    ForEach(0..<3, id: \.self) { index in
+                        Circle()
+                            .trim(from: 0.10, to: 0.72)
+                            .stroke(fill, style: StrokeStyle(lineWidth: size * 0.10, lineCap: .round))
+                            .frame(width: size * 0.44, height: size * 0.44)
+                            .offset(x: size * 0.14, y: -size * 0.08)
+                            .rotationEffect(.degrees(Double(index) * 120.0 + 14.0))
+                    }
+                    Circle()
+                        .fill(Color.black.opacity(0.70))
+                        .frame(width: size * 0.14, height: size * 0.14)
+                case "pinwheel_flower":
+                    ForEach(0..<5, id: \.self) { index in
+                        BeePetalShape()
+                            .fill(fill)
+                            .frame(width: size * 0.25, height: size * 0.40)
+                            .offset(x: size * 0.10, y: -size * 0.13)
+                            .rotationEffect(.degrees(Double(index) * 72.0 + 34.0))
+                        Ellipse()
+                            .fill(Color.black.opacity(0.62))
+                            .frame(width: size * 0.07, height: size * 0.15)
+                            .offset(x: size * 0.03, y: -size * 0.07)
+                            .rotationEffect(.degrees(Double(index) * 72.0 + 34.0))
+                    }
+                default:
+                    EmptyView()
+                }
             }
-            let emitter = wallWashEmitter(
-                red: channelValues[offset],
-                green: channelValues[offset + 1],
-                blue: channelValues[offset + 2],
-                flashScale: wallWashFlashScale
-            )
-            for _ in 0..<emittersPerZone {
-                emitters.append(emitter)
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .rotationEffect(.degrees(rotationDegrees))
+        }
+    }
+
+    private func dotStarPoints(size: CGFloat) -> [(x: CGFloat, y: CGFloat, size: CGFloat)] {
+        let armCount = 8
+        let radii: [CGFloat] = [0.14, 0.28, 0.42, 0.56]
+        let sizes: [CGFloat] = [0.07, 0.08, 0.09, 0.10]
+        var points: [(x: CGFloat, y: CGFloat, size: CGFloat)] = []
+        for arm in 0..<armCount {
+            let angle = CGFloat(arm) * (.pi / 4.0)
+            for (index, radius) in radii.enumerated() {
+                points.append((
+                    x: cos(angle) * size * radius,
+                    y: sin(angle) * size * radius,
+                    size: size * sizes[index]
+                ))
             }
         }
-
-        while emitters.count < totalEmitters {
-            emitters.append(emitters.last ?? WallWashEmitter(color: displayColor, intensity: 0.18))
-        }
-        if emitters.count > totalEmitters {
-            emitters.removeLast(emitters.count - totalEmitters)
-        }
-        return emitters
+        return points
     }
 
-    private func wallWashEmitter(red: Int, green: Int, blue: Int, white: Int = 0, flashScale: CGFloat) -> WallWashEmitter {
-        let baseIntensity = CGFloat(max(red, green, blue, white)) / 255.0
-        return WallWashEmitter(
-            color: dmxPreviewColor(red: red, green: green, blue: blue, white: white),
-            intensity: max(0.08, min(1.0, baseIntensity * flashScale))
+    private func clusterOffsets(size: CGFloat) -> [(x: CGFloat, y: CGFloat, size: CGFloat, rotation: Double)] {
+        [
+            (-size * 0.22, -size * 0.20, size * 0.12, -30),
+            (-size * 0.08, -size * 0.24, size * 0.11, -22),
+            (size * 0.07, -size * 0.23, size * 0.11, -12),
+            (size * 0.20, -size * 0.18, size * 0.10, -6),
+            (-size * 0.25, -size * 0.04, size * 0.10, -34),
+            (-size * 0.11, -size * 0.06, size * 0.11, -24),
+            (size * 0.03, -size * 0.05, size * 0.11, -16),
+            (size * 0.16, -size * 0.02, size * 0.10, -8),
+            (size * 0.28, 0, size * 0.09, 0),
+            (-size * 0.19, size * 0.12, size * 0.10, -28),
+            (-size * 0.05, size * 0.11, size * 0.11, -18),
+            (size * 0.09, size * 0.12, size * 0.10, -8),
+            (size * 0.22, size * 0.14, size * 0.09, 0),
+            (-size * 0.09, size * 0.24, size * 0.10, -18),
+            (size * 0.06, size * 0.24, size * 0.09, -10),
+            (size * 0.20, size * 0.22, size * 0.08, -2),
+        ]
+    }
+}
+
+private struct BeePetalShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let top = CGPoint(x: rect.midX, y: rect.minY)
+        let left = CGPoint(x: rect.minX + rect.width * 0.16, y: rect.midY)
+        let right = CGPoint(x: rect.maxX - rect.width * 0.16, y: rect.midY)
+        let bottom = CGPoint(x: rect.midX, y: rect.maxY)
+
+        var path = Path()
+        path.move(to: top)
+        path.addCurve(
+            to: left,
+            control1: CGPoint(x: rect.minX + rect.width * 0.40, y: rect.minY + rect.height * 0.06),
+            control2: CGPoint(x: rect.minX + rect.width * 0.02, y: rect.minY + rect.height * 0.34)
         )
+        path.addQuadCurve(
+            to: bottom,
+            control: CGPoint(x: rect.minX + rect.width * 0.26, y: rect.maxY - rect.height * 0.02)
+        )
+        path.addQuadCurve(
+            to: right,
+            control: CGPoint(x: rect.maxX - rect.width * 0.26, y: rect.maxY - rect.height * 0.02)
+        )
+        path.addCurve(
+            to: top,
+            control1: CGPoint(x: rect.maxX - rect.width * 0.02, y: rect.minY + rect.height * 0.34),
+            control2: CGPoint(x: rect.maxX - rect.width * 0.40, y: rect.minY + rect.height * 0.06)
+        )
+        path.closeSubpath()
+        return path
     }
+}
 
-    private var wallWashFlashScale: CGFloat {
-        guard let preview, preview.strobeActive else { return 1.0 }
-        return 0.08 + CGFloat(slotPreviewStrobeFactor(preview, at: animationTime)) * 0.92
-    }
-
-    private struct WallWashEmitter {
-        let color: Color
-        let intensity: CGFloat
-    }
+@MainActor
+private func renderBeePatternTextureImage(patternID: String, size: Int) -> NSImage? {
+    beePatternTintedRasterImage(patternID: patternID, color: .white, size: size)
 }
 
 struct ProjectionFixtureNode: View {
@@ -6276,12 +8452,14 @@ struct ProjectionFixtureNode: View {
         let node = StageFixtureNode(
             editor: editor,
             anchor: currentAnchor,
+            worldOrigin: worldOrigin,
             preview: preview,
             stageMotion: stageMotion,
             isSelected: isSelected,
             showDiagnostics: showDiagnostics,
             animationTime: animationTime,
             projection: projection,
+            canvasSize: canvasSize,
             action: editMode ? nil : tapAction
         )
         .position(absoluteOrigin)
@@ -6642,6 +8820,7 @@ struct StageFixtureBeam: View {
     let preview: SlotPreview
     let stageMotion: StageMotionState?
     let beamKind: BeamKind
+    let wallWashEmitters: [WallWashEmitterPreview]
     let color: Color
     let projection: StageProjection
     let size: CGSize
@@ -6650,13 +8829,23 @@ struct StageFixtureBeam: View {
     var body: some View {
         let state = stageMotion
         let strobeFactor = slotPreviewStrobeFactor(preview, at: animationTime)
-        let brightness = effectivePreviewBrightness(preview, at: animationTime)
-        let pulseBoost = preview.strobeActive ? CGFloat(strobeFactor) : 0
         let isMovingHead = beamKind == .movingHead
         let isWallWash = beamKind == .wallWash
-        let wideBeam = (isMovingHead ? 26.0 : isWallWash ? 16.0 : 9.0) + brightness * (isMovingHead ? 18.0 : isWallWash ? 8.0 : 4.0)
-        let coreBeam = (isMovingHead ? 6.0 : isWallWash ? 5.0 : 3.0) + brightness * (isMovingHead ? 6.0 : isWallWash ? 2.5 : 1.5)
-        let spotSize = (isMovingHead ? 22.0 : isWallWash ? 22.0 : 14.0) + brightness * (isMovingHead ? 20.0 : isWallWash ? 12.0 : 8.0) + pulseBoost * (isMovingHead ? 8.0 : isWallWash ? 4.0 : 2.0)
+        let isBeeEye = isMovingHead && slotPreviewIsBeeEye(preview)
+        let washColor = slotPreviewBaseColor(preview)
+        let spotColor = slotPreviewResolvedSpotColor(preview, at: animationTime)
+        let washBrightness = effectivePreviewBrightness(preview, at: animationTime)
+        let spotBrightness = effectiveSpotPreviewBrightness(preview, at: animationTime)
+        let brightness = (
+            isBeeEye
+                ? max(washBrightness, spotBrightness)
+                : (beamKind == .movingHead && (preview.spotBrightness ?? 0) > 10 ? spotBrightness : washBrightness)
+        )
+        let pulseBoost = preview.strobeActive ? CGFloat(strobeFactor) : 0
+        let activeColor = isBeeEye ? spotColor : color
+        let wideBeam: CGFloat = isMovingHead ? 34.0 : isWallWash ? 20.0 : 11.0
+        let coreBeam: CGFloat = isMovingHead ? 8.0 : isWallWash ? 6.0 : 3.8
+        let spotSize: CGFloat = isMovingHead ? 34.0 : isWallWash ? 24.0 : 14.0
         let currentTarget = currentBeamTarget(from: state)
         let targetPoint = targetBeamTarget(from: state)
         let trailTargets = trailBeamTargets(from: state)
@@ -6670,21 +8859,21 @@ struct StageFixtureBeam: View {
                     path.move(to: origin)
                     path.addLine(to: target)
                 }
-                .stroke(color.opacity((isMovingHead ? 0.10 : isWallWash ? 0.06 : 0.04 + brightness * 0.06) * ghostOpacity), style: StrokeStyle(lineWidth: wideBeam * CGFloat(ghostOpacity), lineCap: .round))
-                .blur(radius: isMovingHead ? 6 + brightness * 4 : isWallWash ? 4 + brightness * 2.5 : 2 + brightness * 1.5)
+                .stroke(activeColor.opacity((isMovingHead ? 0.10 : isWallWash ? 0.06 : 0.04 + brightness * 0.06) * ghostOpacity), style: StrokeStyle(lineWidth: wideBeam * CGFloat(ghostOpacity), lineCap: .round))
+                .blur(radius: isMovingHead ? 8 : isWallWash ? 5 : 2.5)
                 .blendMode(.screen)
 
                 Circle()
-                    .fill(color.opacity((isMovingHead ? 0.16 : isWallWash ? 0.12 : 0.08 + brightness * 0.10) * ghostOpacity))
+                    .fill(activeColor.opacity((isMovingHead ? 0.16 : isWallWash ? 0.12 : 0.08 + brightness * 0.10) * ghostOpacity))
                     .frame(width: spotSize * CGFloat(0.24 + trailFactor * (isMovingHead ? 0.34 : isWallWash ? 0.26 : 0.18)), height: spotSize * CGFloat(0.24 + trailFactor * (isMovingHead ? 0.34 : isWallWash ? 0.26 : 0.18)))
                     .position(target)
-                    .blur(radius: isMovingHead ? 2 + brightness * 2 : isWallWash ? 2 + brightness * 1.6 : 1 + brightness)
+                    .blur(radius: isMovingHead ? 3.2 : isWallWash ? 2.4 : 1.4)
                     .blendMode(.screen)
             }
 
             if lagDistance > 10 {
                 Circle()
-                    .stroke(color.opacity(0.55), style: StrokeStyle(lineWidth: 2, dash: [4, 4]))
+                    .stroke(activeColor.opacity(0.55), style: StrokeStyle(lineWidth: 2, dash: [4, 4]))
                     .frame(width: 18, height: 18)
                     .position(targetPoint)
 
@@ -6692,10 +8881,46 @@ struct StageFixtureBeam: View {
                     path.move(to: currentTarget)
                     path.addLine(to: targetPoint)
                 }
-                .stroke(color.opacity(0.18), style: StrokeStyle(lineWidth: 1.6, lineCap: .round, dash: [5, 4]))
+                .stroke(activeColor.opacity(0.18), style: StrokeStyle(lineWidth: 1.6, lineCap: .round, dash: [5, 4]))
             }
 
-            if isMovingHead {
+            if isBeeEye {
+                movingHeadConeLayer(
+                    target: currentTarget,
+                    brightness: washBrightness,
+                    pulseBoost: pulseBoost * 0.45,
+                    outer: true,
+                    beamColor: washColor,
+                    widthScale: 1.45
+                )
+
+                movingHeadConeLayer(
+                    target: currentTarget,
+                    brightness: washBrightness * 0.86,
+                    pulseBoost: pulseBoost * 0.35,
+                    outer: false,
+                    beamColor: washColor,
+                    widthScale: 1.12
+                )
+
+                movingHeadConeLayer(
+                    target: currentTarget,
+                    brightness: spotBrightness,
+                    pulseBoost: pulseBoost,
+                    outer: true,
+                    beamColor: spotColor,
+                    widthScale: 0.62
+                )
+
+                movingHeadConeLayer(
+                    target: currentTarget,
+                    brightness: spotBrightness,
+                    pulseBoost: pulseBoost,
+                    outer: false,
+                    beamColor: spotColor,
+                    widthScale: 0.42
+                )
+            } else if isMovingHead {
                 movingHeadConeLayer(
                     target: currentTarget,
                     brightness: brightness,
@@ -6709,76 +8934,256 @@ struct StageFixtureBeam: View {
                     pulseBoost: pulseBoost,
                     outer: false
                 )
-            } else {
+            } else if !isWallWash {
                 Path { path in
                     path.move(to: origin)
                     path.addLine(to: currentTarget)
                 }
                 .stroke(
-                    color.opacity((isMovingHead ? 0.12 : isWallWash ? 0.10 : 0.04) + brightness * (isMovingHead ? 0.24 : isWallWash ? 0.16 : 0.08) + pulseBoost * (isMovingHead ? 0.18 : isWallWash ? 0.10 : 0.05)),
-                    style: StrokeStyle(lineWidth: wideBeam + pulseBoost * (isMovingHead ? 6.0 : isWallWash ? 3.0 : 2.0), lineCap: .round)
+                    activeColor.opacity((isMovingHead ? 0.12 : isWallWash ? 0.10 : 0.04) + brightness * (isMovingHead ? 0.24 : isWallWash ? 0.16 : 0.08) + pulseBoost * (isMovingHead ? 0.18 : isWallWash ? 0.10 : 0.05)),
+                    style: StrokeStyle(lineWidth: wideBeam, lineCap: .round)
                 )
-                .blur(radius: (isMovingHead ? 7 : isWallWash ? 5.0 : 2.5) + brightness * (isMovingHead ? 5 : isWallWash ? 3.0 : 1.5) + pulseBoost * (isMovingHead ? 3.0 : isWallWash ? 1.5 : 0.8))
+                .blur(radius: isMovingHead ? 10 : isWallWash ? 6 : 3)
                 .blendMode(.screen)
             }
 
-            Path { path in
-                path.move(to: origin)
-                path.addLine(to: currentTarget)
-            }
-            .stroke(
-                color.opacity(
-                    isMovingHead
-                        ? (0.08 + brightness * 0.10 + pulseBoost * 0.05)
-                        : (isWallWash ? 0.30 : 0.20) + brightness * (isWallWash ? 0.18 : 0.14) + pulseBoost * (isWallWash ? 0.08 : 0.05)
-                ),
-                style: StrokeStyle(
-                    lineWidth: isMovingHead
-                        ? (1.2 + brightness * 1.4 + pulseBoost * 0.8)
-                        : (coreBeam + pulseBoost * (isWallWash ? 1.0 : 0.6)),
-                    lineCap: .round
+            if !isWallWash {
+                Path { path in
+                    path.move(to: origin)
+                    path.addLine(to: currentTarget)
+                }
+                .stroke(
+                    activeColor.opacity(
+                        isMovingHead
+                            ? (0.08 + brightness * 0.10 + pulseBoost * 0.05)
+                            : 0.20 + brightness * 0.14 + pulseBoost * 0.05
+                    ),
+                    style: StrokeStyle(
+                        lineWidth: isMovingHead
+                            ? 1.6
+                            : coreBeam,
+                        lineCap: .round
+                    )
                 )
-            )
-            .blendMode(.plusLighter)
+                .blendMode(.plusLighter)
+            }
 
-            Circle()
-                .fill(color.opacity((isMovingHead ? 0.28 : isWallWash ? 0.18 : 0.12) + brightness * (isMovingHead ? 0.54 : isWallWash ? 0.24 : 0.18) + pulseBoost * (isMovingHead ? 0.16 : isWallWash ? 0.08 : 0.05)))
-                .frame(width: spotSize, height: spotSize)
-                .position(currentTarget)
-                .blur(radius: (isMovingHead ? 3 : isWallWash ? 2.0 : 1.2) + brightness * (isMovingHead ? 3 : isWallWash ? 1.6 : 1.0) + pulseBoost * (isMovingHead ? 1.5 : isWallWash ? 0.8 : 0.4))
-                .blendMode(.screen)
+            if isBeeEye {
+                beeEyeBeamHit(
+                    target: currentTarget,
+                    washColor: washColor,
+                    spotColor: spotColor,
+                    washBrightness: washBrightness,
+                    spotBrightness: spotBrightness,
+                    pulseBoost: pulseBoost,
+                    spotSize: spotSize
+                )
+            } else {
+                Circle()
+                    .fill(activeColor.opacity((isMovingHead ? 0.28 : isWallWash ? 0.18 : 0.12) + brightness * (isMovingHead ? 0.54 : isWallWash ? 0.24 : 0.18) + pulseBoost * (isMovingHead ? 0.16 : isWallWash ? 0.08 : 0.05)))
+                    .frame(width: spotSize, height: spotSize)
+                    .position(currentTarget)
+                    .blur(radius: isMovingHead ? 4 : isWallWash ? 2.6 : 1.4)
+                    .blendMode(.screen)
+            }
 
             if preview.strobeActive && pulseBoost > 0.5 {
                 Circle()
                     .fill(Color.white.opacity(0.18 + pulseBoost * 0.22))
                     .frame(width: spotSize * 1.45, height: spotSize * 1.45)
                     .position(currentTarget)
-                    .blur(radius: 5 + pulseBoost * 4)
+                    .blur(radius: 5.5)
                     .blendMode(.plusLighter)
-            }
-
-            if isWallWash {
-                washSpreadLayer(target: currentTarget, brightness: brightness, pulseBoost: pulseBoost)
             }
         }
         .drawingGroup(opaque: false, colorMode: .linear)
     }
 
     @ViewBuilder
-    private func movingHeadConeLayer(target: CGPoint, brightness: CGFloat, pulseBoost: CGFloat, outer: Bool) -> some View {
-        conePath(to: target, outer: outer, brightness: brightness, pulseBoost: pulseBoost)
+    private func beeEyeBeamHit(target: CGPoint, washColor: Color, spotColor: Color, washBrightness: CGFloat, spotBrightness: CGFloat, pulseBoost: CGFloat, spotSize: CGFloat) -> some View {
+        if projection == .top {
+            let patternID = slotPreviewResolvedPatternID(preview, at: animationTime)
+            let patternRotation = slotPreviewResolvedPatternRotation(preview, at: animationTime)
+            let isOpenPattern = patternID == "open" || (preview.spotPatternOpen ?? false)
+            let beeMode = slotPreviewResolvedBeeEffectMode(preview)
+            let spread = slotPreviewBeeSpread(preview)
+            let backgroundLevel = slotPreviewBeeBackgroundLevel(preview)
+            let softness = slotPreviewBeeSoftness(preview)
+            let shapeTransition = slotPreviewBeeShapeTransition(preview)
+            let clusterSpacing = spotSize * 1.72 * spread
+            let cellSize = spotSize * (isOpenPattern ? 1.52 : 1.84) * (0.94 + softness * 0.16 + (beeMode == .wash ? 0.06 : 0.0))
+            ZStack {
+                Circle()
+                    .fill(washColor.opacity((0.04 + washBrightness * 0.10) * (0.44 + backgroundLevel * 0.72)))
+                    .frame(
+                        width: spotSize * (1.90 + backgroundLevel * 0.62 + softness * 0.18),
+                        height: spotSize * (1.90 + backgroundLevel * 0.62 + softness * 0.18)
+                    )
+                    .blur(radius: 4.0 + softness * 3.4)
+
+                ZStack {
+                    ForEach(0..<3, id: \.self) { index in
+                        let offset = beeEyeTripletOffset(index, spacing: clusterSpacing)
+                        let washGhostOpacityRaw: CGFloat = (0.06 + spotBrightness * 0.12) * (0.20 + shapeTransition * 0.60)
+                        let washGhostOpacity = Double(washGhostOpacityRaw)
+                        let washGhostSize: CGFloat = cellSize * (1.26 + shapeTransition * 0.16)
+                        let spotOuterSize: CGFloat = cellSize * (1.08 + shapeTransition * 0.10)
+                        let spotOuterBlur: CGFloat = 1.2 + softness * 1.8 + shapeTransition * 1.2
+                        let patternContainerBlur: CGFloat = 0.08 + softness * 0.18
+                        let washPatternOpacityRaw: CGFloat = (0.06 + washBrightness * 0.10) * (0.18 + backgroundLevel * 0.42)
+                        let washPatternOpacity = Double(washPatternOpacityRaw)
+                        let washPatternSize: CGFloat = cellSize * (1.24 + backgroundLevel * 0.10)
+                        let washPatternBlur: CGFloat = 2.2 + softness * 2.0
+                        Circle()
+                            .fill(washColor.opacity((0.08 + washBrightness * 0.18) * (0.34 + backgroundLevel * 0.84)))
+                            .frame(width: cellSize * (1.00 + backgroundLevel * 0.18), height: cellSize * (1.00 + backgroundLevel * 0.18))
+                            .offset(x: offset.width, y: offset.height)
+                            .blur(radius: 2.2 + softness * 2.6)
+
+                        if isOpenPattern {
+                            Circle()
+                                .fill(spotColor.opacity(0.22 + spotBrightness * 0.72 + pulseBoost * 0.12))
+                                .frame(width: cellSize * (beeMode == .beam ? 0.92 : 1.0), height: cellSize * (beeMode == .beam ? 0.92 : 1.0))
+                                .offset(x: offset.width, y: offset.height)
+                                .blur(radius: 1.2 + softness * 1.2)
+                        } else {
+                            ZStack {
+                                BeeEyePatternGlyph(
+                                    patternID: patternID,
+                                    color: washColor,
+                                    rotationDegrees: 0,
+                                    opacity: washGhostOpacity
+                                )
+                                .frame(width: washGhostSize, height: washGhostSize)
+                                .blur(radius: 3.0 + shapeTransition * 2.8)
+
+                                BeeEyePatternGlyph(
+                                    patternID: patternID,
+                                    color: spotColor,
+                                    rotationDegrees: 0,
+                                    opacity: Double(0.34 + spotBrightness * 0.40 + pulseBoost * 0.08)
+                                )
+                                .frame(width: spotOuterSize, height: spotOuterSize)
+                                .blur(radius: spotOuterBlur)
+
+                                BeeEyePatternGlyph(
+                                    patternID: patternID,
+                                    color: spotColor,
+                                    rotationDegrees: 0,
+                                    opacity: Double(0.22 + spotBrightness * 0.24)
+                                )
+                                .frame(width: cellSize * 1.02, height: cellSize * 1.02)
+
+                                BeeEyePatternGlyph(
+                                    patternID: patternID,
+                                    color: Color.white,
+                                    rotationDegrees: 0,
+                                    opacity: max(0.52, Double(spotBrightness))
+                                )
+                                .frame(width: cellSize * 0.96, height: cellSize * 0.96)
+                            }
+                            .frame(width: cellSize * 1.16, height: cellSize * 1.16)
+                            .offset(x: offset.width, y: offset.height)
+                            .blur(radius: patternContainerBlur)
+                            .blendMode(.screen)
+
+                            BeeEyePatternGlyph(
+                                patternID: patternID,
+                                color: washColor,
+                                rotationDegrees: 0,
+                                opacity: washPatternOpacity
+                            )
+                            .frame(width: washPatternSize, height: washPatternSize)
+                            .offset(x: offset.width, y: offset.height)
+                            .blur(radius: washPatternBlur)
+                            .blendMode(.screen)
+                        }
+                    }
+                }
+                .rotationEffect(.degrees(patternRotation))
+            }
+            .position(target)
+            .blendMode(.screen)
+        } else {
+            Circle()
+                .fill(washColor.opacity(0.10 + washBrightness * 0.26))
+                .frame(width: spotSize * 1.55, height: spotSize * 1.55)
+                .position(target)
+                .blur(radius: 4)
+                .blendMode(.screen)
+
+            Circle()
+                .fill(spotColor.opacity(0.20 + spotBrightness * 0.68 + pulseBoost * 0.12))
+                .frame(width: spotSize * 0.78, height: spotSize * 0.78)
+                .position(target)
+                .blur(radius: 2.4)
+                .blendMode(.screen)
+        }
+    }
+
+    private func beeEyeTripletOffset(_ index: Int, spacing: CGFloat, rotationDegrees: Double = 0) -> CGSize {
+        let baseOffset: CGSize
+        switch index {
+        case 0:
+            baseOffset = CGSize(width: 0, height: -spacing * 0.70)
+        case 1:
+            baseOffset = CGSize(width: -spacing * 0.68, height: spacing * 0.42)
+        default:
+            baseOffset = CGSize(width: spacing * 0.68, height: spacing * 0.42)
+        }
+
+        guard abs(rotationDegrees) > 0.0001 else { return baseOffset }
+        let radians = CGFloat(rotationDegrees * .pi / 180.0)
+        let cosine = cos(radians)
+        let sine = sin(radians)
+        return CGSize(
+            width: baseOffset.width * cosine - baseOffset.height * sine,
+            height: baseOffset.width * sine + baseOffset.height * cosine
+        )
+    }
+
+    @ViewBuilder
+    private func beeEyePatternHit(color: Color, brightness: CGFloat, size: CGFloat, target: CGPoint? = nil) -> some View {
+        let patternID = slotPreviewResolvedPatternID(preview, at: animationTime)
+        if patternID != "open" && !(preview.spotPatternOpen ?? false) && brightness > 0.04 {
+            let glyph = BeeEyePatternGlyph(
+                patternID: patternID,
+                color: Color.white,
+                rotationDegrees: slotPreviewResolvedPatternRotation(preview, at: animationTime),
+                opacity: max(0.52, Double(brightness))
+            )
+            .frame(width: size, height: size)
+            .background(
+                Circle()
+                    .fill(color.opacity(0.08 + brightness * 0.14))
+            )
+            .blur(radius: 0.2 + brightness * 0.5)
+            .blendMode(.screen)
+
+            if let target {
+                glyph.position(target)
+            } else {
+                glyph
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func movingHeadConeLayer(target: CGPoint, brightness: CGFloat, pulseBoost: CGFloat, outer: Bool, beamColor: Color? = nil, widthScale: CGFloat = 1.0) -> some View {
+        let activeBeamColor = beamColor ?? color
+        conePath(to: target, outer: outer, brightness: brightness, pulseBoost: pulseBoost, widthScale: widthScale)
             .fill(
-                color.opacity(
+                activeBeamColor.opacity(
                     outer
                         ? (0.14 + brightness * 0.12 + pulseBoost * 0.05)
                         : (0.22 + brightness * 0.18 + pulseBoost * 0.08)
                 )
             )
-            .blur(radius: (outer ? 12 : 6) + brightness * (outer ? 6 : 3.5) + pulseBoost * (outer ? 3.0 : 1.6))
+            .blur(radius: outer ? 12 : 6)
             .blendMode(.screen)
     }
 
-    private func conePath(to target: CGPoint, outer: Bool, brightness: CGFloat, pulseBoost: CGFloat) -> Path {
+    private func conePath(to target: CGPoint, outer: Bool, brightness: CGFloat, pulseBoost: CGFloat, widthScale: CGFloat = 1.0) -> Path {
         let dx = target.x - origin.x
         let dy = target.y - origin.y
         let length = max(1, hypot(dx, dy))
@@ -6787,10 +9192,10 @@ struct StageFixtureBeam: View {
         let px = -ny
         let py = nx
 
-        let nearWidth: CGFloat = outer ? (2.4 + brightness * 1.3) : (1.1 + brightness * 0.7)
+        let nearWidth: CGFloat = (outer ? 2.4 : 1.1) * widthScale
         let farWidth: CGFloat = outer
-            ? (40 + brightness * 30 + pulseBoost * 12)
-            : (22 + brightness * 16 + pulseBoost * 6)
+            ? 40 * widthScale
+            : 22 * widthScale
 
         let nearLeft = CGPoint(x: origin.x + px * nearWidth, y: origin.y + py * nearWidth)
         let nearRight = CGPoint(x: origin.x - px * nearWidth, y: origin.y - py * nearWidth)
@@ -6806,29 +9211,52 @@ struct StageFixtureBeam: View {
         return path
     }
 
-    @ViewBuilder
-    private func washSpreadLayer(target: CGPoint, brightness: CGFloat, pulseBoost: CGFloat) -> some View {
-        let angle = atan2(target.y - origin.y, target.x - origin.x)
-        let spreadLength: CGFloat = 60 + brightness * 70 + pulseBoost * 24
-        let spreadWidth: CGFloat = 26 + brightness * 34 + pulseBoost * 10
-
-        Capsule(style: .continuous)
-            .fill(
-                LinearGradient(
-                    colors: [
-                        color.opacity(0.08 + brightness * 0.10),
-                        color.opacity(0.24 + brightness * 0.18),
-                        color.opacity(0.06 + brightness * 0.08)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
+    private func wallWashProjectionPixels(targetCenter: CGPoint) -> [WallWashProjectionPixel] {
+        let endpoints = wallWashBarWorldEndpoints(worldOrigin, halfLength: 45.0)
+        let start = worldProjectedAbsolutePoint(endpoints.start, projection: projection, size: size)
+        let end = worldProjectedAbsolutePoint(endpoints.end, projection: projection, size: size)
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let length = max(1, hypot(dx, dy))
+        let axisX = dx / length
+        let axisY = dy / length
+        let spreadLength = min(max(28.0, length * 0.74), 100.0)
+        return wallWashProjectionPoints(from: wallWashEmitters, count: 8).map { sample in
+            let lateral = (sample.t - 0.5) * spreadLength
+            return WallWashProjectionPixel(
+                target: CGPoint(
+                    x: targetCenter.x + axisX * lateral,
+                    y: targetCenter.y + axisY * lateral
+                ),
+                color: sample.payload.color,
+                intensity: sample.payload.intensity
             )
-            .frame(width: spreadLength, height: spreadWidth)
-            .position(CGPoint(x: (origin.x + target.x) / 2, y: (origin.y + target.y) / 2))
-            .rotationEffect(.radians(angle))
-            .blur(radius: 8 + brightness * 4)
-            .blendMode(.screen)
+        }
+    }
+
+    @ViewBuilder
+    private func wallWashPixelLayer(pixels: [WallWashProjectionPixel], brightness: CGFloat, pulseBoost: CGFloat) -> some View {
+        ForEach(Array(pixels.enumerated()), id: \.offset) { _, pixel in
+            Circle()
+                .fill(pixel.color.opacity(0.16 + pixel.intensity * 0.30 + pulseBoost * 0.07))
+                .frame(width: 38 + pixel.intensity * 18, height: 38 + pixel.intensity * 18)
+                .position(pixel.target)
+                .blur(radius: 10.0)
+                .blendMode(.screen)
+
+            Circle()
+                .fill(pixel.color.opacity(0.28 + pixel.intensity * 0.34 + brightness * 0.10 + pulseBoost * 0.08))
+                .frame(width: 16 + pixel.intensity * 8, height: 16 + pixel.intensity * 8)
+                .position(pixel.target)
+                .blur(radius: 3.2)
+                .blendMode(.plusLighter)
+        }
+    }
+
+    private struct WallWashProjectionPixel {
+        let target: CGPoint
+        let color: Color
+        let intensity: CGFloat
     }
 
     private func currentBeamTarget(from state: StageMotionState?) -> CGPoint {
@@ -6958,6 +9386,3910 @@ struct StageStandFrontShape: Shape {
     }
 }
 
+@MainActor
+private func stageBeamKindFor3D(_ editor: SlotEditor) -> StageFixtureBeam.BeamKind {
+    if editor.supportsPan || editor.supportsTilt {
+        return .movingHead
+    }
+    let lower = "\(editor.label) \(editor.fixtureLabel)".lowercased()
+    if lower.contains("wall wash") || lower.contains("light bar") || lower.contains("wallwash") || lower.contains("bar") {
+        return .wallWash
+    }
+    return .staticWash
+}
+
+struct StageThreeDPreviewPanel<Content: View>: View {
+    let title: String
+    let subtitle: String
+    let content: Content
+
+    init(title: String, subtitle: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.subtitle = subtitle
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                Text(subtitle)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.06, green: 0.07, blue: 0.10),
+                                Color(red: 0.04, green: 0.05, blue: 0.08)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                content
+                    .padding(12)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+enum Stage3DCameraPreset: String, CaseIterable, Identifiable {
+    case audience
+    case front
+    case dj
+    case top
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .audience:
+            return "Audience"
+        case .front:
+            return "Front"
+        case .dj:
+            return "DJ"
+        case .top:
+            return "Top"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .audience:
+            return "person.3.sequence.fill"
+        case .front:
+            return "rectangle.center.inset.filled"
+        case .dj:
+            return "music.mic"
+        case .top:
+            return "square.split.2x1"
+        }
+    }
+
+    var cameraPosition: SCNVector3 {
+        switch self {
+        case .audience:
+            return SCNVector3(0.0, 2.4, -10.0)
+        case .front:
+            return SCNVector3(0.0, 1.9, -7.4)
+        case .dj:
+            return SCNVector3(0.0, 2.2, 3.0)
+        case .top:
+            return SCNVector3(0.0, 11.5, -2.5)
+        }
+    }
+
+    var targetPosition: SCNVector3 {
+        switch self {
+        case .audience:
+            return SCNVector3(0.0, 1.8, -1.2)
+        case .front:
+            return SCNVector3(0.0, 1.7, -2.0)
+        case .dj:
+            return SCNVector3(0.0, 1.6, -4.6)
+        case .top:
+            return SCNVector3(0.0, 1.4, -2.5)
+        }
+    }
+}
+
+private struct Stage3DBeamRenderState {
+    let beamKind: StageFixtureBeam.BeamKind
+    let end: SCNVector3
+    let direction: SCNVector3
+    let wallWashSpreadAxis: SCNVector3?
+    let wallWashProjectionPixels: [WallWash3DProjectionPixel]
+    let washColor: NSColor
+    let spotColor: NSColor
+    let brightness: CGFloat
+    let washBrightness: CGFloat
+    let spotBrightness: CGFloat
+    let isBeeEye: Bool
+    let strobeActive: Bool
+    let beeEffectMode: BeeEffectMode
+    let beeSpread: CGFloat
+    let beeBackgroundLevel: CGFloat
+    let beeSoftness: CGFloat
+    let beeShapeTransition: CGFloat
+    let spotPatternID: String?
+    let spotPatternRotationDegrees: Double
+    let spotPatternOpen: Bool
+}
+
+private struct WallWash3DProjectionPixel {
+    let end: SCNVector3
+    let color: NSColor
+    let intensity: CGFloat
+    let up: SCNVector3
+}
+
+@MainActor
+final class Stage3DSceneController: ObservableObject {
+    let scene = SCNScene()
+    let cameraNode = SCNNode()
+
+    private let cameraTargetNode = SCNNode()
+    private let fixtureRootNode = SCNNode()
+    private var beePatternTextureCache: [String: NSImage] = [:]
+    private var beamSpriteTextureCache: [String: NSImage] = [:]
+    private var didConfigure = false
+
+    init() {
+        configureSceneIfNeeded()
+    }
+
+    func applyCameraPreset(_ preset: Stage3DCameraPreset) {
+        configureSceneIfNeeded()
+        cameraNode.position = preset.cameraPosition
+        cameraTargetNode.position = preset.targetPosition
+    }
+
+    func sync(from model: AppModel, animationTime: TimeInterval) {
+        configureSceneIfNeeded()
+        fixtureRootNode.childNodes.forEach { $0.removeFromParentNode() }
+
+        for editor in model.slotEditors.sorted(by: { $0.id < $1.id }) {
+            let world = model.worldPosition(for: editor.id)
+            let preview = model.slotPreviews[editor.id]
+            let stageMotion = model.stageMotionStates[editor.id]
+            let wallWashEmitters = stageBeamKindFor3D(editor) == .wallWash
+                ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: animationTime)
+                : []
+            let isPrimarySelected = model.selectedSlotID == editor.id
+            let isPreviewSelected = model.previewSelectionContains(editor.id)
+            let node = makeFixtureNode(
+                editor: editor,
+                world: world,
+                preview: preview,
+                stageMotion: stageMotion,
+                wallWashEmitters: wallWashEmitters,
+                animationTime: animationTime,
+                isPrimarySelected: isPrimarySelected,
+                isPreviewSelected: isPreviewSelected
+            )
+            fixtureRootNode.addChildNode(node)
+        }
+    }
+
+    private func configureSceneIfNeeded() {
+        guard !didConfigure else { return }
+        didConfigure = true
+
+        scene.background.contents = NSColor(calibratedRed: 0.03, green: 0.04, blue: 0.06, alpha: 1.0)
+        scene.rootNode.addChildNode(fixtureRootNode)
+        scene.rootNode.addChildNode(cameraTargetNode)
+        scene.rootNode.addChildNode(cameraNode)
+
+        let camera = SCNCamera()
+        camera.fieldOfView = 48
+        camera.zNear = 0.02
+        camera.zFar = 60
+        camera.wantsHDR = true
+        camera.wantsExposureAdaptation = true
+        camera.bloomIntensity = 1.25
+        camera.bloomThreshold = 0.18
+        camera.bloomBlurRadius = 24
+        camera.saturation = 1.06
+        camera.contrast = 1.08
+        cameraNode.camera = camera
+
+        let lookAt = SCNLookAtConstraint(target: cameraTargetNode)
+        lookAt.isGimbalLockEnabled = true
+        cameraNode.constraints = [lookAt]
+
+        let ambient = SCNNode()
+        ambient.light = SCNLight()
+        ambient.light?.type = .ambient
+        ambient.light?.color = NSColor(calibratedWhite: 0.65, alpha: 1.0)
+        ambient.light?.intensity = 280
+        scene.rootNode.addChildNode(ambient)
+
+        let key = SCNNode()
+        key.light = SCNLight()
+        key.light?.type = .omni
+        key.light?.color = NSColor(calibratedWhite: 0.92, alpha: 1.0)
+        key.light?.intensity = 820
+        key.position = SCNVector3(0.0, 6.5, -8.0)
+        scene.rootNode.addChildNode(key)
+
+        let fill = SCNNode()
+        fill.light = SCNLight()
+        fill.light?.type = .omni
+        fill.light?.color = NSColor(calibratedRed: 0.40, green: 0.55, blue: 0.80, alpha: 1.0)
+        fill.light?.intensity = 340
+        fill.position = SCNVector3(-5.5, 3.0, 2.0)
+        scene.rootNode.addChildNode(fill)
+
+        buildStageEnvironment()
+        applyCameraPreset(.audience)
+    }
+
+    private func buildStageEnvironment() {
+        let stageWidth = CGFloat((StageWorld.maxX - StageWorld.minX) / 100.0)
+        let stageDepth = CGFloat((StageWorld.maxY - StageWorld.minY) / 100.0)
+        let stageCenterZ = CGFloat(-(StageWorld.minY + StageWorld.maxY) / 200.0)
+
+        let floor = SCNPlane(width: stageWidth, height: stageDepth)
+        let floorMaterial = SCNMaterial()
+        floorMaterial.diffuse.contents = NSColor(calibratedRed: 0.11, green: 0.12, blue: 0.15, alpha: 1.0)
+        floorMaterial.emission.contents = NSColor(calibratedRed: 0.02, green: 0.03, blue: 0.05, alpha: 1.0)
+        floorMaterial.roughness.contents = 0.95
+        floorMaterial.metalness.contents = 0.04
+        floorMaterial.isDoubleSided = true
+        floor.materials = [floorMaterial]
+
+        let floorNode = SCNNode(geometry: floor)
+        floorNode.eulerAngles.x = -.pi / 2
+        floorNode.position = SCNVector3(0.0, 0.0, stageCenterZ)
+        scene.rootNode.addChildNode(floorNode)
+
+        let rearTruss = makeSceneSegmentNode(
+            from: SCNVector3(CGFloat(StageWorld.minX / 100.0), CGFloat(StageWorld.maxZ / 100.0 - 0.45), 0.0),
+            to: SCNVector3(CGFloat(StageWorld.maxX / 100.0), CGFloat(StageWorld.maxZ / 100.0 - 0.45), 0.0),
+            radius: 0.028,
+            color: NSColor(calibratedWhite: 0.46, alpha: 1.0),
+            opacity: 0.95
+        )
+        scene.rootNode.addChildNode(rearTruss)
+
+        let stageFront = makeSceneSegmentNode(
+            from: SCNVector3(CGFloat(StageWorld.minX / 100.0), 0.01, CGFloat(-StageWorld.maxY / 100.0)),
+            to: SCNVector3(CGFloat(StageWorld.maxX / 100.0), 0.01, CGFloat(-StageWorld.maxY / 100.0)),
+            radius: 0.02,
+            color: NSColor(calibratedRed: 0.10, green: 0.76, blue: 0.90, alpha: 1.0),
+            opacity: 0.55
+        )
+        scene.rootNode.addChildNode(stageFront)
+
+        let centerLine = makeSceneSegmentNode(
+            from: SCNVector3(0.0, 0.012, 0.0),
+            to: SCNVector3(0.0, 0.012, CGFloat(-StageWorld.maxY / 100.0)),
+            radius: 0.008,
+            color: NSColor(calibratedWhite: 0.72, alpha: 1.0),
+            opacity: 0.28
+        )
+        scene.rootNode.addChildNode(centerLine)
+
+        for value in stride(from: StageWorld.minX, through: StageWorld.maxX, by: StageWorld.gridStepCm) {
+            let x = CGFloat(value / 100.0)
+            let line = makeSceneSegmentNode(
+                from: SCNVector3(x, 0.002, 0.0),
+                to: SCNVector3(x, 0.002, CGFloat(-StageWorld.maxY / 100.0)),
+                radius: 0.004,
+                color: NSColor(calibratedWhite: 0.34, alpha: 1.0),
+                opacity: value == 0 ? 0.26 : 0.12
+            )
+            scene.rootNode.addChildNode(line)
+        }
+
+        for value in stride(from: StageWorld.minY, through: StageWorld.maxY, by: StageWorld.gridStepCm) {
+            let z = CGFloat(-value / 100.0)
+            let line = makeSceneSegmentNode(
+                from: SCNVector3(CGFloat(StageWorld.minX / 100.0), 0.002, z),
+                to: SCNVector3(CGFloat(StageWorld.maxX / 100.0), 0.002, z),
+                radius: 0.004,
+                color: NSColor(calibratedWhite: 0.34, alpha: 1.0),
+                opacity: value == 0 ? 0.20 : 0.12
+            )
+            scene.rootNode.addChildNode(line)
+        }
+    }
+
+    private func makeFixtureNode(
+        editor: SlotEditor,
+        world: SlotWorldPosition,
+        preview: SlotPreview?,
+        stageMotion: StageMotionState?,
+        wallWashEmitters: [WallWashEmitterPreview],
+        animationTime: TimeInterval,
+        isPrimarySelected: Bool,
+        isPreviewSelected: Bool
+    ) -> SCNNode {
+        let root = SCNNode()
+        let beamKind = stageBeamKindFor3D(editor)
+        let isBeeEye = slotPreviewIsBeeEye(preview) || editor.fixtureID == "generic_smart_bee_eye_pattern_moving_head"
+        let baseColor = fixtureSceneColor(preview)
+        let spotColor = fixtureSceneSpotColor(preview)
+        let isEnabled = preview?.enabled == true
+        let bodyOpacity: CGFloat = isEnabled ? 1.0 : 0.42
+        let selectionStrength: CGFloat = isPrimarySelected ? 1.0 : isPreviewSelected ? 0.78 : 0.0
+        let selectionColor = isPrimarySelected
+            ? NSColor(calibratedRed: 0.20, green: 0.92, blue: 1.00, alpha: 1.0)
+            : NSColor(calibratedRed: 1.00, green: 0.48, blue: 0.18, alpha: 1.0)
+
+        root.name = editor.id
+        root.position = stageSceneVector(for: world)
+
+        if world.z > 110 {
+            let hangEnd = SCNVector3(0.0, CGFloat(StageWorld.maxZ / 100.0 - world.z / 100.0), 0.0)
+            let hangLine = makeSceneSegmentNode(
+                from: SCNVector3(0.0, 0.0, 0.0),
+                to: hangEnd,
+                radius: 0.007,
+                color: NSColor(calibratedWhite: 0.56, alpha: 1.0),
+                opacity: 0.42
+            )
+            root.addChildNode(hangLine)
+        }
+
+        let beamState: Stage3DBeamRenderState?
+        if let preview, preview.enabled {
+            beamState = makeBeamRenderState(
+                editor: editor,
+                world: world,
+                preview: preview,
+                stageMotion: stageMotion,
+                wallWashEmitters: wallWashEmitters,
+                beamKind: beamKind,
+                animationTime: animationTime,
+                isBeeEye: isBeeEye
+            )
+        } else {
+            beamState = nil
+        }
+
+        let bodyNode: SCNNode
+        if isBeeEye {
+            bodyNode = makeBeeEyeBodyNode(
+                baseColor: baseColor,
+                spotColor: spotColor,
+                opacity: bodyOpacity,
+                selectionStrength: selectionStrength,
+                aimEndpoint: beamState?.end
+            )
+        } else {
+            switch beamKind {
+            case .movingHead:
+                bodyNode = makeMovingHeadBodyNode(
+                    baseColor: baseColor,
+                    spotColor: spotColor,
+                    opacity: bodyOpacity,
+                    selectionStrength: selectionStrength,
+                    aimEndpoint: beamState?.end
+                )
+            case .wallWash:
+                bodyNode = makeWallWashBodyNode(
+                    color: baseColor,
+                    emitters: wallWashEmitters,
+                    opacity: bodyOpacity,
+                    selectionStrength: selectionStrength,
+                    yawDegrees: world.yawDegrees,
+                    pitchDegrees: world.pitchDegrees,
+                    rollDegrees: world.rollDegrees
+                )
+            case .staticWash:
+                bodyNode = makeParBodyNode(
+                    color: baseColor,
+                    opacity: bodyOpacity,
+                    selectionStrength: selectionStrength
+                )
+            }
+        }
+        root.addChildNode(bodyNode)
+
+        if selectionStrength > 0.01 {
+            root.addChildNode(
+                makeSelectionIndicatorNode(
+                    beamKind: beamKind,
+                    color: selectionColor,
+                    intensity: selectionStrength
+                )
+            )
+        }
+
+        if let beamState {
+            root.addChildNode(makeBeamVolumeNode(state: beamState))
+        }
+
+        return root
+    }
+
+    private func makeBeamRenderState(
+        editor: SlotEditor,
+        world: SlotWorldPosition,
+        preview: SlotPreview,
+        stageMotion: StageMotionState?,
+        wallWashEmitters: [WallWashEmitterPreview],
+        beamKind: StageFixtureBeam.BeamKind,
+        animationTime: TimeInterval,
+        isBeeEye: Bool
+    ) -> Stage3DBeamRenderState {
+        let isMovingHead = beamKind == .movingHead
+        let panRange = stageMotion?.panRange ?? (preview.panRange ?? (isMovingHead ? 540.0 : 180.0))
+        let tiltRange = stageMotion?.tiltRange ?? (preview.tiltRange ?? (isMovingHead ? 180.0 : 90.0))
+
+        let pose: StageBeamPose
+        if let stageMotion, isMovingHead {
+            pose = StageBeamPose(
+                panDegrees: stageMotion.currentPanDegrees,
+                tiltDegrees: stageMotion.currentTiltDegrees
+            )
+        } else {
+            pose = StageBeamPose(
+                panDegrees: preview.logicalPanDegrees
+                    ?? preview.panDegrees
+                    ?? panDegrees(forDMX: preview.pan, range: panRange),
+                tiltDegrees: preview.logicalTiltDegrees
+                    ?? preview.tiltDegrees
+                    ?? tiltDegrees(forDMX: preview.tilt, range: tiltRange)
+            )
+        }
+
+        let endpoint = beamWorldEndpoint(
+            worldOrigin: world,
+            mountYawDegrees: world.yawDegrees,
+            mountPitchDegrees: world.pitchDegrees,
+            pose: pose,
+            panRange: panRange,
+            tiltRange: tiltRange,
+            beamKind: beamKind
+        )
+
+        let washBrightness = max(0.02, effectivePreviewBrightness(preview, at: animationTime))
+        let spotBrightness = max(0.02, effectiveSpotPreviewBrightness(preview, at: animationTime))
+        let beeEffectMode = slotPreviewResolvedBeeEffectMode(preview)
+        let beeSpread = slotPreviewBeeSpread(preview)
+        let beeBackgroundLevel = slotPreviewBeeBackgroundLevel(preview)
+        let beeSoftness = slotPreviewBeeSoftness(preview)
+        let beeShapeTransition = slotPreviewBeeShapeTransition(preview)
+        let brightness = isBeeEye
+            ? max(washBrightness * 0.78, spotBrightness)
+            : (beamKind == .movingHead && (preview.spotBrightness ?? 0) > 10 ? spotBrightness : washBrightness)
+        let wallWashSpreadAxis: SCNVector3? = beamKind == .wallWash
+            ? sceneWallWashSpreadAxis(world)
+            : nil
+        let wallWashProjectionPixels: [WallWash3DProjectionPixel] = []
+
+        return Stage3DBeamRenderState(
+            beamKind: beamKind,
+            end: sceneVectorSubtract(stageSceneVector(for: endpoint), stageSceneVector(for: world)),
+            direction: sceneVectorNormalize(sceneVectorSubtract(stageSceneVector(for: endpoint), stageSceneVector(for: world))),
+            wallWashSpreadAxis: wallWashSpreadAxis,
+            wallWashProjectionPixels: wallWashProjectionPixels,
+            washColor: fixtureSceneColor(preview),
+            spotColor: fixtureSceneSpotColor(preview),
+            brightness: brightness,
+            washBrightness: washBrightness,
+            spotBrightness: spotBrightness,
+            isBeeEye: isBeeEye,
+            strobeActive: preview.strobeActive,
+            beeEffectMode: beeEffectMode,
+            beeSpread: beeSpread,
+            beeBackgroundLevel: beeBackgroundLevel,
+            beeSoftness: beeSoftness,
+            beeShapeTransition: beeShapeTransition,
+            spotPatternID: isBeeEye ? slotPreviewResolvedPatternID(preview, at: animationTime) : nil,
+            spotPatternRotationDegrees: isBeeEye ? slotPreviewResolvedPatternRotation(preview, at: animationTime) : 0,
+            spotPatternOpen: isBeeEye ? ((slotPreviewResolvedPatternID(preview, at: animationTime) == "open") || (preview.spotPatternOpen ?? false)) : true
+        )
+    }
+
+    private func makeMovingHeadBodyNode(
+        baseColor: NSColor,
+        spotColor: NSColor,
+        opacity: CGFloat,
+        selectionStrength: CGFloat,
+        aimEndpoint: SCNVector3?
+    ) -> SCNNode {
+        let root = SCNNode()
+        let armColor = NSColor(calibratedWhite: 0.12, alpha: 1.0)
+        let base = makeRoundedBoxNode(
+            width: 0.26,
+            height: 0.08,
+            length: 0.18,
+            chamfer: 0.02,
+            color: armColor,
+            emission: baseColor,
+            emissionStrength: 0.10 + selectionStrength * 0.24,
+            opacity: opacity
+        )
+        base.position = SCNVector3(0.0, -0.02, 0.0)
+        root.addChildNode(base)
+
+        for x in [-0.10, 0.10] {
+            let arm = makeRoundedBoxNode(
+                width: 0.04,
+                height: 0.17,
+                length: 0.05,
+                chamfer: 0.012,
+                color: armColor,
+                emission: baseColor,
+                emissionStrength: 0.05 + selectionStrength * 0.16,
+                opacity: opacity
+            )
+            arm.position = SCNVector3(CGFloat(x), 0.06, 0.0)
+            root.addChildNode(arm)
+        }
+
+        let headGroup = SCNNode()
+        headGroup.position = SCNVector3(0.0, 0.11, 0.0)
+        if let aimEndpoint {
+            headGroup.look(at: aimEndpoint, up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
+        }
+        root.addChildNode(headGroup)
+
+        let head = makeRoundedBoxNode(
+            width: 0.19,
+            height: 0.11,
+            length: 0.17,
+            chamfer: 0.026,
+            color: armColor,
+            emission: baseColor,
+            emissionStrength: 0.16 + selectionStrength * 0.20,
+            opacity: opacity
+        )
+        headGroup.addChildNode(head)
+
+        let bezel = SCNTorus(ringRadius: 0.042, pipeRadius: 0.009)
+        let bezelMaterial = makeEmissiveMaterial(
+            color: baseColor,
+            emission: baseColor,
+            emissionStrength: 0.18 + selectionStrength * 0.26,
+            opacity: opacity
+        )
+        bezel.materials = [bezelMaterial]
+        let bezelNode = SCNNode(geometry: bezel)
+        bezelNode.eulerAngles.x = .pi / 2
+        bezelNode.position = SCNVector3(0.0, 0.0, -0.088)
+        headGroup.addChildNode(bezelNode)
+
+        let lens = SCNSphere(radius: 0.034)
+        lens.materials = [makeEmissiveMaterial(
+            color: NSColor.white,
+            emission: spotColor,
+            emissionStrength: 0.92 + selectionStrength * 0.22,
+            opacity: opacity
+        )]
+        let lensNode = SCNNode(geometry: lens)
+        lensNode.position = SCNVector3(0.0, 0.0, -0.092)
+        headGroup.addChildNode(lensNode)
+
+        return root
+    }
+
+    private func makeBeeEyeBodyNode(
+        baseColor: NSColor,
+        spotColor: NSColor,
+        opacity: CGFloat,
+        selectionStrength: CGFloat,
+        aimEndpoint: SCNVector3?
+    ) -> SCNNode {
+        let root = SCNNode()
+        let armColor = NSColor(calibratedWhite: 0.10, alpha: 1.0)
+        let base = makeRoundedBoxNode(
+            width: 0.28,
+            height: 0.08,
+            length: 0.20,
+            chamfer: 0.022,
+            color: armColor,
+            emission: baseColor,
+            emissionStrength: 0.12 + selectionStrength * 0.22,
+            opacity: opacity
+        )
+        base.position = SCNVector3(0.0, -0.02, 0.0)
+        root.addChildNode(base)
+
+        for x in [-0.10, 0.10] {
+            let arm = makeRoundedBoxNode(
+                width: 0.04,
+                height: 0.16,
+                length: 0.05,
+                chamfer: 0.012,
+                color: armColor,
+                emission: baseColor,
+                emissionStrength: 0.06 + selectionStrength * 0.14,
+                opacity: opacity
+            )
+            arm.position = SCNVector3(CGFloat(x), 0.05, 0.0)
+            root.addChildNode(arm)
+        }
+
+        let headGroup = SCNNode()
+        headGroup.position = SCNVector3(0.0, 0.11, 0.0)
+        if let aimEndpoint {
+            headGroup.look(at: aimEndpoint, up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
+        }
+        root.addChildNode(headGroup)
+
+        let head = makeRoundedBoxNode(
+            width: 0.22,
+            height: 0.12,
+            length: 0.18,
+            chamfer: 0.028,
+            color: armColor,
+            emission: baseColor,
+            emissionStrength: 0.16 + selectionStrength * 0.18,
+            opacity: opacity
+        )
+        headGroup.addChildNode(head)
+
+        let frontPlate = SCNCylinder(radius: 0.082, height: 0.020)
+        frontPlate.materials = [makeEmissiveMaterial(
+            color: NSColor(calibratedWhite: 0.08, alpha: 1.0),
+            emission: baseColor,
+            emissionStrength: 0.08 + selectionStrength * 0.12,
+            opacity: opacity
+        )]
+        let frontPlateNode = SCNNode(geometry: frontPlate)
+        frontPlateNode.eulerAngles.x = .pi / 2
+        frontPlateNode.position = SCNVector3(0.0, 0.0, -0.092)
+        headGroup.addChildNode(frontPlateNode)
+
+        let lensOffsets: [(CGFloat, CGFloat)] = [
+            (0.0, 0.0),
+            (0.0, -0.040),
+            (0.034, -0.020),
+            (0.034, 0.020),
+            (0.0, 0.040),
+            (-0.034, 0.020),
+            (-0.034, -0.020),
+        ]
+        for (index, offset) in lensOffsets.enumerated() {
+            let radius: CGFloat = index == 0 ? 0.019 : 0.015
+            let lens = SCNSphere(radius: radius)
+            let lensColor = index == 0 ? spotColor : baseColor
+            lens.materials = [makeEmissiveMaterial(
+                color: NSColor.white,
+                emission: lensColor,
+                emissionStrength: index == 0 ? 1.08 + selectionStrength * 0.18 : 0.62 + selectionStrength * 0.12,
+                opacity: opacity
+            )]
+            let lensNode = SCNNode(geometry: lens)
+            lensNode.position = SCNVector3(offset.0, offset.1, -0.102)
+            headGroup.addChildNode(lensNode)
+        }
+
+        return root
+    }
+
+    private func makeWallWashBodyNode(color: NSColor, emitters: [WallWashEmitterPreview], opacity: CGFloat, selectionStrength: CGFloat, yawDegrees: Double, pitchDegrees: Double, rollDegrees: Double) -> SCNNode {
+        let root = SCNNode()
+        root.eulerAngles = SCNVector3(
+            CGFloat(pitchDegrees * .pi / 180.0),
+            CGFloat(-yawDegrees * .pi / 180.0),
+            CGFloat(rollDegrees * .pi / 180.0)
+        )
+        let body = makeRoundedBoxNode(
+            width: 0.90,
+            height: 0.06,
+            length: 0.10,
+            chamfer: 0.016,
+            color: NSColor(calibratedWhite: 0.05, alpha: 1.0),
+            emission: NSColor(calibratedWhite: 0.02, alpha: 1.0),
+            emissionStrength: 0.02 + selectionStrength * 0.06,
+            opacity: opacity
+        )
+        root.addChildNode(body)
+
+        for index in 0..<24 {
+            let t = CGFloat(index) / 23.0
+            let x = -0.41 + t * 0.82
+            let emitter = emitters.indices.contains(index)
+                ? emitters[index]
+                : WallWashEmitterPreview(red: 255, green: 255, blue: 255, white: 0, intensity: 0.12)
+            let lens = SCNCapsule(capRadius: 0.010, height: 0.028)
+            lens.materials = [makeEmissiveMaterial(
+                color: NSColor.white,
+                emission: emitter.nsColor,
+                emissionStrength: 0.48 + emitter.intensity * 1.64 + selectionStrength * 0.20,
+                opacity: opacity
+            )]
+            let lensNode = SCNNode(geometry: lens)
+            lensNode.eulerAngles.x = .pi / 2
+            lensNode.position = SCNVector3(x, 0.0, -0.056)
+            root.addChildNode(lensNode)
+
+            let glow = SCNPlane(width: 0.018, height: 0.030)
+            let glowMaterial = makeEmissiveMaterial(
+                color: NSColor.white,
+                emission: emitter.nsColor,
+                emissionStrength: 0.56 + emitter.intensity * 1.92 + selectionStrength * 0.24,
+                opacity: opacity * (0.28 + emitter.intensity * 0.62)
+            )
+            glowMaterial.lightingModel = .constant
+            glowMaterial.blendMode = .add
+            glowMaterial.isDoubleSided = true
+            glowMaterial.readsFromDepthBuffer = false
+            glowMaterial.writesToDepthBuffer = false
+            glow.materials = [glowMaterial]
+            let glowNode = SCNNode(geometry: glow)
+            glowNode.position = SCNVector3(x, 0.0, -0.062)
+            root.addChildNode(glowNode)
+        }
+
+        for x in [-0.46, 0.46] {
+            let bracket = makeRoundedBoxNode(
+                width: 0.03,
+                height: 0.12,
+                length: 0.03,
+                chamfer: 0.008,
+                color: NSColor(calibratedWhite: 0.18, alpha: 1.0),
+                emission: NSColor(calibratedWhite: 0.03, alpha: 1.0),
+                emissionStrength: 0.01,
+                opacity: opacity
+            )
+            bracket.position = SCNVector3(CGFloat(x), -0.03, 0.0)
+            root.addChildNode(bracket)
+        }
+
+        return root
+    }
+
+    private func makeParBodyNode(color: NSColor, opacity: CGFloat, selectionStrength: CGFloat) -> SCNNode {
+        let root = SCNNode()
+
+        let can = SCNCylinder(radius: 0.092, height: 0.09)
+        can.materials = [makeEmissiveMaterial(
+            color: NSColor(calibratedWhite: 0.10, alpha: 1.0),
+            emission: color,
+            emissionStrength: 0.15 + selectionStrength * 0.18,
+            opacity: opacity
+        )]
+        let canNode = SCNNode(geometry: can)
+        canNode.eulerAngles.x = .pi / 2
+        root.addChildNode(canNode)
+
+        let lens = SCNSphere(radius: 0.05)
+        lens.materials = [makeEmissiveMaterial(
+            color: NSColor.white,
+            emission: color,
+            emissionStrength: 0.82 + selectionStrength * 0.16,
+            opacity: opacity
+        )]
+        let lensNode = SCNNode(geometry: lens)
+        lensNode.position = SCNVector3(0.0, 0.0, -0.048)
+        root.addChildNode(lensNode)
+
+        for x in [-0.095, 0.095] {
+            let arm = makeRoundedBoxNode(
+                width: 0.02,
+                height: 0.12,
+                length: 0.02,
+                chamfer: 0.006,
+                color: NSColor(calibratedWhite: 0.16, alpha: 1.0),
+                emission: color,
+                emissionStrength: 0.04,
+                opacity: opacity
+            )
+            arm.position = SCNVector3(CGFloat(x), 0.0, 0.0)
+            root.addChildNode(arm)
+        }
+
+        return root
+    }
+
+    private func makeSelectionIndicatorNode(beamKind: StageFixtureBeam.BeamKind, color: NSColor, intensity: CGFloat) -> SCNNode {
+        let root = SCNNode()
+
+        if beamKind == .wallWash {
+            let plate = SCNPlane(width: 0.86, height: 0.15)
+            let material = makeEmissiveMaterial(
+                color: color,
+                emission: color,
+                emissionStrength: 0.26 + intensity * 0.30,
+                opacity: 0.08 + intensity * 0.14
+            )
+            material.isDoubleSided = true
+            plate.materials = [material]
+            let plateNode = SCNNode(geometry: plate)
+            plateNode.eulerAngles.x = -.pi / 2
+            plateNode.position = SCNVector3(0.0, -0.05, 0.0)
+            root.addChildNode(plateNode)
+        } else {
+            let ring = SCNTorus(ringRadius: beamKind == .movingHead ? 0.18 : 0.15, pipeRadius: 0.010)
+            ring.materials = [makeEmissiveMaterial(
+                color: color,
+                emission: color,
+                emissionStrength: 0.44 + intensity * 0.24,
+                opacity: 0.42 + intensity * 0.26
+            )]
+            let ringNode = SCNNode(geometry: ring)
+            ringNode.eulerAngles.x = .pi / 2
+            ringNode.position = SCNVector3(0.0, -0.05, 0.0)
+            root.addChildNode(ringNode)
+        }
+
+        let aura = SCNSphere(radius: beamKind == .movingHead ? 0.19 : 0.13)
+        aura.materials = [makeEmissiveMaterial(
+            color: color,
+            emission: color,
+            emissionStrength: 0.14 + intensity * 0.20,
+            opacity: 0.04 + intensity * 0.08
+        )]
+        let auraNode = SCNNode(geometry: aura)
+        auraNode.scale = SCNVector3(1.0, beamKind == .wallWash ? 0.35 : 0.7, 1.0)
+        auraNode.position = SCNVector3(0.0, 0.02, 0.0)
+        root.addChildNode(auraNode)
+
+        return root
+    }
+
+    private func makeBeamVolumeNode(state: Stage3DBeamRenderState) -> SCNNode {
+        let root = SCNNode()
+        let direction = state.direction
+        guard sceneVectorLength(direction) > 0.0001 else { return root }
+        let basis = beamBasis(for: direction)
+
+        switch state.beamKind {
+        case .movingHead:
+            if state.isBeeEye {
+                let washWidth = 0.28 + state.beeBackgroundLevel * 0.18 + state.beeSoftness * 0.06
+                let washOuterWidth = 0.18 + state.beeBackgroundLevel * 0.10 + state.beeSoftness * 0.04
+                let washFarRadius = 0.14 + state.beeBackgroundLevel * 0.07 + state.beeSoftness * 0.03
+                let washInnerFarRadius = 0.09 + state.beeBackgroundLevel * 0.05
+                let spotFarRadius = 0.055 + state.beeSpread * 0.020 + state.beeSoftness * 0.012
+                let spotOuterRadius = 0.072 + state.beeSpread * 0.024 + state.beeShapeTransition * 0.010
+                root.addChildNode(makeBeamFogNode(
+                    from: SCNVector3(0, 0, 0),
+                    to: state.end,
+                    width: washWidth,
+                    color: state.washColor,
+                    opacity: (0.06 + state.washBrightness * 0.10) * (0.38 + state.beeBackgroundLevel * 0.74),
+                    planeCount: 4,
+                    taper: 0.28 + state.beeSoftness * 0.10
+                ))
+                root.addChildNode(makeBeamFogNode(
+                    from: SCNVector3(0, 0, 0),
+                    to: state.end,
+                    width: washOuterWidth,
+                    color: state.spotColor,
+                    opacity: 0.08 + state.spotBrightness * 0.12,
+                    planeCount: 3,
+                    taper: 0.18 + state.beeSoftness * 0.08
+                ))
+                root.addChildNode(makeBeamConeNode(
+                    from: SCNVector3(0, 0, 0),
+                    to: state.end,
+                    nearRadius: 0.024,
+                    farRadius: washFarRadius,
+                    color: state.washColor,
+                    opacity: (0.04 + state.washBrightness * 0.12) * (0.34 + state.beeBackgroundLevel * 0.76),
+                    emissionStrength: 0.42
+                ))
+                root.addChildNode(makeBeamConeNode(
+                    from: SCNVector3(0, 0, 0),
+                    to: state.end,
+                    nearRadius: 0.018,
+                    farRadius: washInnerFarRadius,
+                    color: state.washColor,
+                    opacity: (0.08 + state.washBrightness * 0.14) * (0.40 + state.beeBackgroundLevel * 0.58),
+                    emissionStrength: 0.54
+                ))
+                root.addChildNode(makeBeamConeNode(
+                    from: SCNVector3(0, 0, 0),
+                    to: state.end,
+                    nearRadius: 0.012,
+                    farRadius: spotFarRadius,
+                    color: state.spotColor,
+                    opacity: 0.12 + state.spotBrightness * 0.20,
+                    emissionStrength: 0.72
+                ))
+
+                for offset in beeEyeTripletOffsets3D(
+                    side: basis.side,
+                    up: basis.up,
+                    spread: state.beeSpread,
+                    rotationDegrees: state.spotPatternRotationDegrees
+                ) {
+                    let startOffset = offset * 0.46
+                    let end = state.end + offset * (1.56 + state.beeSpread * 0.62)
+                    let throwDistance = Float(sceneVectorLength(sceneVectorSubtract(end, startOffset)))
+                    root.addChildNode(makeBeamFogNode(
+                        from: startOffset,
+                        to: end,
+                        width: 0.09 + state.beeSpread * 0.03 + state.beeSoftness * 0.02,
+                        color: state.spotColor,
+                        opacity: 0.06 + state.spotBrightness * 0.08 + state.beeShapeTransition * 0.06,
+                        planeCount: 2,
+                        taper: 0.16 + state.beeSoftness * 0.08
+                    ))
+                    root.addChildNode(makeBeamConeNode(
+                        from: startOffset,
+                        to: end,
+                        nearRadius: 0.014,
+                        farRadius: spotOuterRadius,
+                        color: state.spotColor,
+                        opacity: 0.08 + state.spotBrightness * 0.16,
+                        emissionStrength: 0.64
+                    ))
+                    root.addChildNode(makeBeamConeNode(
+                        from: startOffset,
+                        to: end,
+                        nearRadius: 0.010,
+                        farRadius: spotFarRadius,
+                        color: state.spotColor,
+                        opacity: 0.14 + state.spotBrightness * 0.18,
+                        emissionStrength: 0.96
+                    ))
+                    root.addChildNode(
+                        makeEndpointGlowNode(
+                            at: end + offset * 0.02,
+                            color: state.spotColor,
+                            radius: 0.034 + state.spotBrightness * 0.028 + state.beeSpread * 0.012,
+                            opacity: 0.12 + state.spotBrightness * 0.22
+                        )
+                    )
+                    if let patternID = state.spotPatternID, !state.spotPatternOpen {
+                        root.addChildNode(
+                            makeBeeEyePatternHitNode(
+                                at: end + offset * 0.04,
+                                direction: direction,
+                                up: basis.up,
+                                patternID: patternID,
+                                rotationDegrees: state.spotPatternRotationDegrees,
+                                color: state.spotColor,
+                                size: CGFloat(beePatternProjectedSize(distance: throwDistance)) * (0.92 + state.beeSpread * 0.20),
+                                opacity: 0.18 + state.spotBrightness * (0.26 + state.beeShapeTransition * 0.16)
+                            )
+                        )
+                    } else {
+                        root.addChildNode(
+                            makeProjectedHitNode(
+                                at: end + offset * 0.04,
+                                direction: direction,
+                                up: basis.up,
+                                color: state.spotColor,
+                                size: CGSize(
+                                    width: 0.14 + state.spotBrightness * 0.05 + state.beeSpread * 0.03,
+                                    height: 0.14 + state.spotBrightness * 0.05 + state.beeSpread * 0.03
+                                ),
+                                opacity: 0.14 + state.spotBrightness * 0.20
+                            )
+                        )
+                    }
+                }
+            } else {
+                root.addChildNode(makeBeamFogNode(
+                    from: SCNVector3(0, 0, 0),
+                    to: state.end,
+                    width: 0.34,
+                    color: state.washColor,
+                    opacity: 0.08 + state.brightness * 0.12,
+                    planeCount: 4,
+                    taper: 0.26
+                ))
+                root.addChildNode(makeBeamConeNode(
+                    from: SCNVector3(0, 0, 0),
+                    to: state.end,
+                    nearRadius: 0.020,
+                    farRadius: 0.16,
+                    color: state.washColor,
+                    opacity: 0.05 + state.brightness * 0.14,
+                    emissionStrength: 0.44
+                ))
+                root.addChildNode(makeBeamConeNode(
+                    from: SCNVector3(0, 0, 0),
+                    to: state.end,
+                    nearRadius: 0.015,
+                    farRadius: 0.11,
+                    color: state.washColor,
+                    opacity: 0.10 + state.brightness * 0.14,
+                    emissionStrength: 0.62
+                ))
+                root.addChildNode(makeBeamConeNode(
+                    from: SCNVector3(0, 0, 0),
+                    to: state.end,
+                    nearRadius: 0.010,
+                    farRadius: 0.072,
+                    color: state.washColor,
+                    opacity: 0.16 + state.brightness * 0.24,
+                    emissionStrength: 0.98
+                ))
+                root.addChildNode(
+                    makeEndpointGlowNode(
+                        at: state.end,
+                        color: state.washColor,
+                        radius: 0.060 + state.brightness * 0.04,
+                        opacity: 0.12 + state.brightness * 0.20
+                    )
+                )
+                root.addChildNode(
+                    makeProjectedHitNode(
+                        at: state.end + direction * 0.02,
+                        direction: direction,
+                        up: basis.up,
+                        color: state.washColor,
+                        size: CGSize(width: 0.18 + state.brightness * 0.05, height: 0.18 + state.brightness * 0.05),
+                        opacity: 0.18 + state.brightness * 0.22
+                    )
+                )
+            }
+        case .wallWash:
+            break
+        case .staticWash:
+            root.addChildNode(makeBeamFogNode(
+                from: SCNVector3(0, 0, 0),
+                to: state.end,
+                width: 0.42,
+                color: state.washColor,
+                opacity: 0.08 + state.brightness * 0.12,
+                planeCount: 4,
+                taper: 0.28
+            ))
+            root.addChildNode(makeBeamConeNode(
+                from: SCNVector3(0, 0, 0),
+                to: state.end,
+                nearRadius: 0.026,
+                farRadius: 0.19,
+                color: state.washColor,
+                opacity: 0.06 + state.brightness * 0.14,
+                emissionStrength: 0.48
+            ))
+            root.addChildNode(makeBeamConeNode(
+                from: SCNVector3(0, 0, 0),
+                to: state.end,
+                nearRadius: 0.014,
+                farRadius: 0.095,
+                color: state.washColor,
+                opacity: 0.16 + state.brightness * 0.20,
+                emissionStrength: 0.92
+            ))
+            root.addChildNode(
+                makeEndpointGlowNode(
+                    at: state.end,
+                    color: state.washColor,
+                    radius: 0.056 + state.brightness * 0.04,
+                    opacity: 0.12 + state.brightness * 0.18
+                )
+            )
+            root.addChildNode(
+                makeProjectedHitNode(
+                    at: state.end + direction * 0.02,
+                    direction: direction,
+                    up: basis.up,
+                    color: state.washColor,
+                    size: CGSize(width: 0.22 + state.brightness * 0.05, height: 0.22 + state.brightness * 0.05),
+                    opacity: 0.12 + state.brightness * 0.18
+                )
+            )
+        }
+
+        if state.strobeActive {
+            root.addChildNode(makeBeamConeNode(
+                from: SCNVector3(0, 0, 0),
+                to: state.end,
+                nearRadius: 0.012,
+                farRadius: 0.05,
+                color: NSColor.white,
+                opacity: 0.06 + state.brightness * 0.12,
+                emissionStrength: 1.05
+            ))
+            root.addChildNode(
+                makeProjectedHitNode(
+                    at: state.end + direction * 0.03,
+                    direction: direction,
+                    up: basis.up,
+                    color: NSColor.white,
+                    size: CGSize(width: 0.18 + state.brightness * 0.04, height: 0.18 + state.brightness * 0.04),
+                    opacity: 0.10 + state.brightness * 0.16
+                )
+            )
+        }
+
+        return root
+    }
+
+    private func makeBeamFogNode(
+        from start: SCNVector3,
+        to end: SCNVector3,
+        width: CGFloat,
+        color: NSColor,
+        opacity: CGFloat,
+        planeCount: Int,
+        taper: CGFloat
+    ) -> SCNNode {
+        let direction = sceneVectorSubtract(end, start)
+        let length = sceneVectorLength(direction)
+        guard length > 0.0001 else { return SCNNode() }
+
+        let root = SCNNode()
+        root.position = sceneVectorMidpoint(start, end)
+        root.look(at: end, up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 1, 0))
+        root.addParticleSystem(
+            makeBeamParticleSystem(
+                length: length,
+                width: width,
+                color: color,
+                opacity: opacity,
+                density: planeCount,
+                taper: taper,
+                outer: false
+            )
+        )
+        root.addParticleSystem(
+            makeBeamParticleSystem(
+                length: length,
+                width: width * 1.35,
+                color: color,
+                opacity: opacity * 0.82,
+                density: max(planeCount + 1, 3),
+                taper: taper * 1.15,
+                outer: true
+            )
+        )
+
+        return root
+    }
+
+    private func makeBeamParticleSystem(
+        length: CGFloat,
+        width: CGFloat,
+        color: NSColor,
+        opacity: CGFloat,
+        density: Int,
+        taper: CGFloat,
+        outer: Bool
+    ) -> SCNParticleSystem {
+        let system = SCNParticleSystem()
+        let radiusScale = outer ? 0.16 : 0.09
+        let velocityScale = outer ? 0.022 : 0.014
+        let imageSize = outer ? 256 : 160
+
+        system.loops = true
+        system.warmupDuration = outer ? 1.6 : 1.2
+        system.birthRate = CGFloat(max(140, density * (outer ? 180 : 130)))
+        system.particleLifeSpan = outer ? 2.2 : 1.6
+        system.particleLifeSpanVariation = outer ? 0.55 : 0.35
+        system.emitterShape = SCNCylinder(
+            radius: max(0.02, width * max(radiusScale, taper * 0.24)),
+            height: length
+        )
+        system.birthLocation = .volume
+        system.birthDirection = .constant
+        system.emittingDirection = SCNVector3(0, 1, 0)
+        system.spreadingAngle = outer ? 14 : 8
+        system.particleVelocity = max(0.04, length * velocityScale)
+        system.particleVelocityVariation = max(0.02, length * velocityScale * 0.75)
+        system.acceleration = SCNVector3(0, length * (outer ? 0.020 : 0.012), 0)
+        system.particleSize = max(0.045, width * (outer ? 0.30 : 0.18))
+        system.particleSizeVariation = system.particleSize * (outer ? 0.60 : 0.46)
+        system.stretchFactor = outer ? 2.2 : 1.55
+        system.blendMode = .additive
+        system.isLightingEnabled = false
+        system.isLocal = true
+        system.particleColor = color.withAlphaComponent(opacity * (outer ? 0.32 : 0.44))
+        system.particleColorVariation = SCNVector4(0.04, 0.04, 0.04, outer ? 0.14 : 0.10)
+        system.particleImage = beamSpriteTexture(size: imageSize)
+        return system
+    }
+
+    private func makeBeamScatterNode(
+        length: CGFloat,
+        width: CGFloat,
+        color: NSColor,
+        opacity: CGFloat,
+        density: Int
+    ) -> SCNNode {
+        let root = SCNNode()
+        guard let texture = beamSpriteTexture(size: 192) else { return root }
+
+        let spriteCount = max(4, density * 3)
+        for index in 0..<spriteCount {
+            let progress = CGFloat(index + 1) / CGFloat(spriteCount + 1)
+            let spriteWidth = max(0.08, width * (0.22 + progress * 0.34))
+            let spriteHeight = spriteWidth * (1.15 + progress * 0.65)
+            let plane = SCNPlane(width: spriteWidth, height: spriteHeight)
+            let material = makeEmissiveMaterial(
+                color: color,
+                emission: color,
+                emissionStrength: 1.0,
+                opacity: opacity * (0.24 + progress * 0.34)
+            )
+            material.lightingModel = .constant
+            material.diffuse.contents = color
+            material.emission.contents = color
+            material.transparent.contents = texture
+            material.blendMode = .add
+            material.isDoubleSided = true
+            material.readsFromDepthBuffer = false
+            material.writesToDepthBuffer = false
+            plane.materials = [material]
+
+            let node = SCNNode(geometry: plane)
+            let spiral = progress * .pi * 4.0
+            let offsetRadius = width * (0.03 + progress * 0.14)
+            node.position = SCNVector3(
+                cos(spiral) * offsetRadius,
+                (-length * 0.5) + progress * length,
+                sin(spiral * 1.35) * offsetRadius * 0.72
+            )
+            let billboard = SCNBillboardConstraint()
+            billboard.freeAxes = []
+            node.constraints = [billboard]
+            root.addChildNode(node)
+        }
+
+        return root
+    }
+
+    private func makeBeamConeNode(
+        from start: SCNVector3,
+        to end: SCNVector3,
+        nearRadius: CGFloat,
+        farRadius: CGFloat,
+        color: NSColor,
+        opacity: CGFloat,
+        emissionStrength: CGFloat
+    ) -> SCNNode {
+        let direction = sceneVectorSubtract(end, start)
+        let length = sceneVectorLength(direction)
+        guard length > 0.0001 else { return SCNNode() }
+
+        let geometry = SCNCone(topRadius: farRadius, bottomRadius: nearRadius, height: length)
+        let material = makeEmissiveMaterial(
+            color: color,
+            emission: color,
+            emissionStrength: emissionStrength * 1.10,
+            opacity: opacity * 0.62
+        )
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        material.blendMode = .add
+        material.readsFromDepthBuffer = false
+        material.writesToDepthBuffer = false
+        material.transparent.contents = beamFogTexture(
+            width: 320,
+            height: 960,
+            taper: max(0.12, min(0.36, (nearRadius / max(farRadius, 0.0001)) * 0.70 + 0.12))
+        )
+        material.shaderModifiers = beamConeShaderModifiers
+        let radiusRatio = max(1.0, farRadius / max(nearRadius, 0.0001))
+        let falloffExponent = min(3.6, max(1.2, 1.55 + farRadius * 2.2))
+        let sourceLift = min(0.78, max(0.18, 0.22 + opacity * 0.42))
+        let viewExponent = min(2.2, max(0.8, 1.65 - farRadius * 1.1))
+        let noiseAmount = min(0.22, max(0.04, 0.05 + farRadius * 0.22))
+        let noiseScale = min(16.0, max(5.5, 8.0 + radiusRatio * 0.6))
+        let minimumAlpha = min(0.42, max(0.06, opacity * 0.18))
+        let glowBoost = min(0.9, max(0.28, 0.34 + emissionStrength * 0.28))
+        material.setValue(NSNumber(value: Double(falloffExponent)), forKey: "beamFalloffExponent")
+        material.setValue(NSNumber(value: Double(sourceLift)), forKey: "beamSourceLift")
+        material.setValue(NSNumber(value: Double(viewExponent)), forKey: "beamViewExponent")
+        material.setValue(NSNumber(value: Double(noiseAmount)), forKey: "beamNoiseAmount")
+        material.setValue(NSNumber(value: Double(noiseScale)), forKey: "beamNoiseScale")
+        material.setValue(NSNumber(value: Double(minimumAlpha)), forKey: "beamMinimumAlpha")
+        material.setValue(NSNumber(value: Double(glowBoost)), forKey: "beamGlowBoost")
+        geometry.radialSegmentCount = 28
+        geometry.materials = [material]
+
+        let node = SCNNode(geometry: geometry)
+        node.position = sceneVectorMidpoint(start, end)
+        node.look(at: end, up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 1, 0))
+        return node
+    }
+
+    private func makeEndpointGlowNode(
+        at position: SCNVector3,
+        color: NSColor,
+        radius: CGFloat,
+        opacity: CGFloat,
+        scale: SCNVector3 = SCNVector3(1.0, 0.75, 1.0)
+    ) -> SCNNode {
+        let sphere = SCNSphere(radius: radius)
+        let material = makeEmissiveMaterial(
+            color: NSColor.white,
+            emission: color,
+            emissionStrength: 1.02,
+            opacity: opacity
+        )
+        material.lightingModel = .constant
+        material.blendMode = .add
+        material.readsFromDepthBuffer = false
+        material.writesToDepthBuffer = false
+        sphere.materials = [material]
+        let node = SCNNode(geometry: sphere)
+        node.position = position
+        node.scale = scale
+        return node
+    }
+
+    private func makeProjectedHitNode(
+        at position: SCNVector3,
+        direction: SCNVector3,
+        up: SCNVector3,
+        color: NSColor,
+        size: CGSize,
+        opacity: CGFloat
+    ) -> SCNNode {
+        let plane = SCNPlane(width: size.width, height: size.height)
+        let material = makeEmissiveMaterial(
+            color: NSColor.white,
+            emission: color,
+            emissionStrength: 0.98,
+            opacity: opacity
+        )
+        material.lightingModel = .constant
+        material.blendMode = .add
+        material.isDoubleSided = true
+        material.diffuse.contents = color
+        material.emission.contents = color
+        material.transparent.contents = projectedHitTexture(size: 256)
+        material.readsFromDepthBuffer = false
+        material.writesToDepthBuffer = false
+        plane.materials = [material]
+
+        let node = SCNNode(geometry: plane)
+        node.position = position
+        node.look(at: position + direction, up: up, localFront: SCNVector3(0, 0, 1))
+        return node
+    }
+
+    private func makeBeeEyePatternHitNode(
+        at position: SCNVector3,
+        direction: SCNVector3,
+        up: SCNVector3,
+        patternID: String,
+        rotationDegrees: Double,
+        color: NSColor,
+        size: CGFloat,
+        opacity: CGFloat
+    ) -> SCNNode {
+        let root = SCNNode()
+        root.position = position
+        root.look(at: position + direction, up: up, localFront: SCNVector3(0, 0, 1))
+        root.eulerAngles.z += CGFloat(rotationDegrees * .pi / 180.0)
+
+        root.addChildNode(
+            makeProjectedHitNode(
+                at: SCNVector3(0, 0, 0),
+                direction: SCNVector3(0, 0, 1),
+                up: SCNVector3(0, 1, 0),
+                color: color,
+                size: CGSize(width: size * 1.02, height: size * 1.02),
+                opacity: opacity * 0.44
+            )
+        )
+
+        if let maskImage = beePatternMaskRasterImage(patternID: patternID, size: max(96, Int((size * 520).rounded()))) {
+            let plane = SCNPlane(width: size, height: size)
+            let material = makeEmissiveMaterial(
+                color: color,
+                emission: color,
+                emissionStrength: 1.0,
+                opacity: opacity
+            )
+            material.lightingModel = .constant
+            material.diffuse.contents = color
+            material.emission.contents = color
+            material.blendMode = .add
+            material.isDoubleSided = true
+            material.transparent.contents = maskImage
+            material.readsFromDepthBuffer = false
+            material.writesToDepthBuffer = false
+            plane.materials = [material]
+            let planeNode = SCNNode(geometry: plane)
+            root.addChildNode(planeNode)
+        }
+
+        return root
+    }
+
+    private func makeRoundedBoxNode(
+        width: CGFloat,
+        height: CGFloat,
+        length: CGFloat,
+        chamfer: CGFloat,
+        color: NSColor,
+        emission: NSColor,
+        emissionStrength: CGFloat,
+        opacity: CGFloat
+    ) -> SCNNode {
+        let geometry = SCNBox(width: width, height: height, length: length, chamferRadius: chamfer)
+        geometry.materials = [makeEmissiveMaterial(
+            color: color,
+            emission: emission,
+            emissionStrength: emissionStrength,
+            opacity: opacity
+        )]
+        return SCNNode(geometry: geometry)
+    }
+
+    private func makeEmissiveMaterial(
+        color: NSColor,
+        emission: NSColor,
+        emissionStrength: CGFloat,
+        opacity: CGFloat
+    ) -> SCNMaterial {
+        let material = SCNMaterial()
+        material.diffuse.contents = color
+        material.emission.contents = emission
+        material.emission.intensity = emissionStrength
+        material.roughness.contents = 0.42
+        material.metalness.contents = 0.08
+        material.transparency = opacity
+        return material
+    }
+
+    private func beamFogTexture(width: Int, height: Int, taper: CGFloat) -> NSImage? {
+        let key = "\(width)x\(height)-\(Int((taper * 1000).rounded()))"
+        if let cached = beamSpriteTextureCache[key] {
+            return cached
+        }
+
+        let image = NSImage(size: NSSize(width: width, height: height))
+        image.lockFocus()
+        defer { image.unlockFocus() }
+        guard let context = NSGraphicsContext.current?.cgContext else { return nil }
+
+        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        context.setAllowsAntialiasing(true)
+        context.setShouldAntialias(true)
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        let beamPath = CGMutablePath()
+        beamPath.addRect(rect)
+
+        context.saveGState()
+        context.addPath(beamPath)
+        context.clip()
+
+        let w = CGFloat(width)
+        let h = CGFloat(height)
+        let centerX = w * 0.5
+        let startRadius = w * max(0.03, min(0.10, taper * 0.30))
+        let endRadius = w * max(0.30, min(0.58, 0.22 + taper * 1.18))
+        let coreGradient = CGGradient(
+            colorsSpace: colorSpace,
+            colors: [
+                NSColor.clear.cgColor,
+                NSColor.white.withAlphaComponent(0.18).cgColor,
+                NSColor.white.withAlphaComponent(0.86).cgColor,
+                NSColor.white.withAlphaComponent(0.18).cgColor,
+                NSColor.clear.cgColor,
+            ] as CFArray,
+            locations: [0.0, 0.16, 0.50, 0.84, 1.0]
+        )
+        let hazeGradient = CGGradient(
+            colorsSpace: colorSpace,
+            colors: [
+                NSColor.clear.cgColor,
+                NSColor.white.withAlphaComponent(0.08).cgColor,
+                NSColor.white.withAlphaComponent(0.34).cgColor,
+                NSColor.white.withAlphaComponent(0.08).cgColor,
+                NSColor.clear.cgColor,
+            ] as CFArray,
+            locations: [0.0, 0.22, 0.50, 0.78, 1.0]
+        )
+
+        if let hazeGradient {
+            context.saveGState()
+            context.scaleBy(x: 1.18, y: 1.0)
+            context.drawRadialGradient(
+                hazeGradient,
+                startCenter: CGPoint(x: centerX / 1.18, y: h * 0.08),
+                startRadius: startRadius * 1.4,
+                endCenter: CGPoint(x: centerX / 1.18, y: h * 0.68),
+                endRadius: endRadius * 1.22,
+                options: [.drawsAfterEndLocation]
+            )
+            context.restoreGState()
+        }
+        if let coreGradient {
+            context.drawRadialGradient(
+                coreGradient,
+                startCenter: CGPoint(x: centerX, y: h * 0.05),
+                startRadius: startRadius,
+                endCenter: CGPoint(x: centerX, y: h * 0.74),
+                endRadius: endRadius,
+                options: [.drawsAfterEndLocation]
+            )
+        }
+        context.restoreGState()
+
+        beamSpriteTextureCache[key] = image
+        return image
+    }
+
+    private func beamSpriteTexture(size: Int) -> NSImage? {
+        let key = "sprite-\(size)"
+        if let cached = beamSpriteTextureCache[key] {
+            return cached
+        }
+
+        let image = NSImage(size: NSSize(width: size, height: size))
+        image.lockFocus()
+        defer { image.unlockFocus() }
+        guard let context = NSGraphicsContext.current?.cgContext else { return nil }
+
+        context.clear(CGRect(x: 0, y: 0, width: size, height: size))
+        context.setAllowsAntialiasing(true)
+        context.setShouldAntialias(true)
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let gradient = CGGradient(
+            colorsSpace: colorSpace,
+            colors: [
+                NSColor.clear.cgColor,
+                NSColor.white.withAlphaComponent(0.10).cgColor,
+                NSColor.white.withAlphaComponent(0.74).cgColor,
+                NSColor.white.withAlphaComponent(0.18).cgColor,
+                NSColor.clear.cgColor,
+            ] as CFArray,
+            locations: [0.0, 0.22, 0.46, 0.72, 1.0]
+        )
+
+        context.saveGState()
+        context.translateBy(x: CGFloat(size) * 0.5, y: CGFloat(size) * 0.5)
+        context.scaleBy(x: 1.24, y: 0.88)
+        if let gradient {
+            context.drawRadialGradient(
+                gradient,
+                startCenter: .zero,
+                startRadius: 0,
+                endCenter: .zero,
+                endRadius: CGFloat(size) * 0.42,
+                options: [.drawsAfterEndLocation]
+            )
+        }
+        context.restoreGState()
+
+        beamSpriteTextureCache[key] = image
+        return image
+    }
+
+    private func projectedHitTexture(size: Int) -> NSImage? {
+        let key = "hit-\(size)"
+        if let cached = beamSpriteTextureCache[key] {
+            return cached
+        }
+
+        let image = NSImage(size: NSSize(width: size, height: size))
+        image.lockFocus()
+        defer { image.unlockFocus() }
+        guard let context = NSGraphicsContext.current?.cgContext else { return nil }
+
+        context.clear(CGRect(x: 0, y: 0, width: size, height: size))
+        context.setAllowsAntialiasing(true)
+        context.setShouldAntialias(true)
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let gradient = CGGradient(
+            colorsSpace: colorSpace,
+            colors: [
+                NSColor.clear.cgColor,
+                NSColor.white.withAlphaComponent(0.28).cgColor,
+                NSColor.white.withAlphaComponent(0.92).cgColor,
+                NSColor.white.withAlphaComponent(0.26).cgColor,
+                NSColor.clear.cgColor,
+            ] as CFArray,
+            locations: [0.0, 0.18, 0.46, 0.72, 1.0]
+        )
+
+        context.saveGState()
+        context.translateBy(x: CGFloat(size) * 0.5, y: CGFloat(size) * 0.5)
+        context.scaleBy(x: 1.10, y: 0.86)
+        if let gradient {
+            context.drawRadialGradient(
+                gradient,
+                startCenter: .zero,
+                startRadius: 0,
+                endCenter: .zero,
+                endRadius: CGFloat(size) * 0.44,
+                options: [.drawsAfterEndLocation]
+            )
+        }
+        context.restoreGState()
+
+        beamSpriteTextureCache[key] = image
+        return image
+    }
+
+    private func beePatternTexture(patternID: String, color: NSColor, size: Int) -> NSImage? {
+        let deviceColor = color.usingColorSpace(.deviceRGB) ?? color
+        let red = Int((deviceColor.redComponent * 255.0).rounded())
+        let green = Int((deviceColor.greenComponent * 255.0).rounded())
+        let blue = Int((deviceColor.blueComponent * 255.0).rounded())
+        let key = "\(patternID)-\(red)-\(green)-\(blue)-\(size)"
+        if let cached = beePatternTextureCache[key] {
+            return cached
+        }
+
+        guard let image = beePatternTintedRasterImage(patternID: patternID, color: color, size: size) else {
+            return nil
+        }
+        beePatternTextureCache[key] = image
+        return image
+    }
+}
+
+private let stageMetalShaderSource = """
+#include <metal_stdlib>
+using namespace metal;
+
+struct MetalUniforms {
+    float4x4 viewProjection;
+};
+
+struct ColorVertex {
+    float3 position;
+    float4 color;
+};
+
+struct BeamVertex {
+    float3 position;
+    float4 color;
+    float axial;
+    float lateral;
+    float mode;
+};
+
+struct SpriteVertex {
+    float3 position;
+    float2 uv;
+    float4 color;
+    float patternKind;
+    float textureBlend;
+};
+
+struct ColorOut {
+    float4 position [[position]];
+    float4 color;
+};
+
+struct BeamOut {
+    float4 position [[position]];
+    float4 color;
+    float axial;
+    float lateral;
+    float mode;
+};
+
+struct SpriteOut {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+    float patternKind;
+    float textureBlend;
+};
+
+vertex ColorOut stageColorVertex(
+    uint vertexID [[vertex_id]],
+    constant ColorVertex *vertices [[buffer(0)]],
+    constant MetalUniforms &uniforms [[buffer(1)]]
+) {
+    ColorOut out;
+    float4 world = float4(vertices[vertexID].position, 1.0);
+    out.position = uniforms.viewProjection * world;
+    out.color = vertices[vertexID].color;
+    return out;
+}
+
+fragment half4 stageColorFragment(ColorOut in [[stage_in]]) {
+    return half4(half3(in.color.rgb), half(in.color.a));
+}
+
+vertex BeamOut stageBeamVertex(
+    uint vertexID [[vertex_id]],
+    constant BeamVertex *vertices [[buffer(0)]],
+    constant MetalUniforms &uniforms [[buffer(1)]]
+) {
+    BeamOut out;
+    float4 world = float4(vertices[vertexID].position, 1.0);
+    out.position = uniforms.viewProjection * world;
+    out.color = vertices[vertexID].color;
+    out.axial = vertices[vertexID].axial;
+    out.lateral = vertices[vertexID].lateral;
+    out.mode = vertices[vertexID].mode;
+    return out;
+}
+
+fragment half4 stageBeamFragment(BeamOut in [[stage_in]]) {
+    if (in.mode > 0.85) {
+        float x = in.lateral;
+        float y = in.axial;
+        float r2 = x * x + y * y;
+        float core = exp(-r2 * 6.2);
+        float haze = exp(-r2 * 1.55);
+        float edgeFade = 1.0 - smoothstep(0.82, 1.12, sqrt(r2));
+        float alpha = in.color.a * (core * 0.52 + haze * 0.78) * edgeFade;
+        float3 rgb = in.color.rgb * alpha * (1.02 + core * 0.38);
+        return half4(half3(rgb), half(alpha));
+    }
+    float t = saturate(in.axial);
+    float side = abs(in.lateral);
+    float sideSquared = side * side;
+    float d = mix(0.22, 1.0, t);
+    float inverseSquare = (0.22 * 0.22) / (d * d);
+    float softenedDistance = mix(inverseSquare, 1.0 / (1.0 + 0.85 * t + 1.85 * t * t), 0.68);
+    float sourceHot = 0.82 + 0.18 * pow(max(0.0, 1.0 - t), 0.9);
+    float breakup = 0.97 + 0.03 * sin(t * 9.0 + side * 2.8);
+    float alpha;
+    float3 rgb;
+
+    if (in.mode < 0.15) {
+        float beamCore = exp(-0.693147 * sideSquared); // 50% at beam-angle edge
+        float beamFill = exp(-1.55 * sideSquared) * 0.22;
+        float tailFade = 1.0 - smoothstep(0.90, 1.0, t) * 0.18;
+        alpha = in.color.a * (beamCore + beamFill) * softenedDistance * sourceHot * tailFade * breakup;
+        rgb = in.color.rgb * alpha * (1.02 + beamCore * 0.34);
+    } else if (in.mode < 0.4) {
+        float fieldShell = exp(-2.302585 * sideSquared); // 10% at field-angle edge
+        float hazeShell = exp(-0.92 * sideSquared) * 0.30;
+        float tailFade = 1.0 - smoothstep(0.94, 1.0, t) * 0.22;
+        alpha = in.color.a * (fieldShell + hazeShell) * softenedDistance * tailFade * breakup;
+        rgb = in.color.rgb * alpha * (0.94 + hazeShell * 0.18);
+    } else {
+        float structure = exp(-1.35 * sideSquared);
+        float tailFade = 1.0 - smoothstep(0.86, 1.0, t) * 0.28;
+        alpha = in.color.a * structure * softenedDistance * tailFade * 0.72;
+        rgb = in.color.rgb * alpha * 0.92;
+    }
+    return half4(half3(rgb), half(alpha));
+}
+
+vertex SpriteOut stageSpriteVertex(
+    uint vertexID [[vertex_id]],
+    constant SpriteVertex *vertices [[buffer(0)]],
+    constant MetalUniforms &uniforms [[buffer(1)]]
+) {
+    SpriteOut out;
+    float4 world = float4(vertices[vertexID].position, 1.0);
+    out.position = uniforms.viewProjection * world;
+    out.uv = vertices[vertexID].uv;
+    out.color = vertices[vertexID].color;
+    out.patternKind = vertices[vertexID].patternKind;
+    out.textureBlend = vertices[vertexID].textureBlend;
+    return out;
+}
+
+float softCircle(float2 p, float radius, float blur) {
+    return 1.0 - smoothstep(radius, radius + blur, length(p));
+}
+
+float softEllipse(float2 p, float2 radii, float blur) {
+    float2 normalized = p / max(radii, float2(0.0001));
+    return 1.0 - smoothstep(1.0, 1.0 + blur, length(normalized));
+}
+
+float softCapsule(float2 p, float2 a, float2 b, float radius, float blur) {
+    float2 pa = p - a;
+    float2 ba = b - a;
+    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+    return 1.0 - smoothstep(radius, radius + blur, length(pa - ba * h));
+}
+
+float softArc(float2 p, float radius, float thickness, float angleCenter, float angleSpan, float blur) {
+    float angle = atan2(p.y, p.x);
+    float delta = atan2(sin(angle - angleCenter), cos(angle - angleCenter));
+    float radial = 1.0 - smoothstep(thickness, thickness + blur, abs(length(p) - radius));
+    float angular = 1.0 - smoothstep(angleSpan * 0.5, angleSpan * 0.5 + blur * 2.4, abs(delta));
+    return radial * angular;
+}
+
+float rotatedPetal(float2 p, float angle, float distance, float width, float height, float blur) {
+    float c = cos(angle);
+    float s = sin(angle);
+    float2 rp = float2(
+        c * p.x - s * p.y,
+        s * p.x + c * p.y
+    );
+    rp.y += distance;
+    return softEllipse(rp, float2(width, height), blur);
+}
+
+float beePatternMask(float2 uv, float patternKind) {
+    float2 p = uv * 2.0 - 1.0;
+    p.y *= -1.0;
+    const float blur = 0.08;
+    float mask = 0.0;
+
+    if (patternKind < 0.5) {
+        mask = softCircle(p, 0.78, blur);
+    } else if (patternKind < 1.5) {
+        for (int i = 0; i < 5; ++i) {
+            float angle = float(i) * 1.25663706144 + 0.31415926535;
+            float2 dir = float2(cos(angle), sin(angle));
+            float2 normal = float2(-dir.y, dir.x) * 0.06;
+            mask = max(mask, softCapsule(p, dir * 0.10 + normal, dir * 0.62 + normal, 0.055, blur));
+            mask = max(mask, softCapsule(p, dir * 0.10 - normal, dir * 0.62 - normal, 0.055, blur));
+        }
+    } else if (patternKind < 2.5) {
+        for (int i = 0; i < 5; ++i) {
+            float angle = float(i) * 1.25663706144;
+            mask = max(mask, rotatedPetal(p, angle, 0.36, 0.18, 0.34, blur));
+        }
+        mask *= (1.0 - softCircle(p, 0.18, blur));
+    } else if (patternKind < 3.5) {
+        for (int i = 0; i < 5; ++i) {
+            float angle = float(i) * 1.25663706144 + 0.42;
+            mask = max(mask, rotatedPetal(p, angle, 0.26, 0.15, 0.34, blur));
+        }
+    } else if (patternKind < 4.5) {
+        for (int i = 0; i < 8; ++i) {
+            float angle = float(i) * 0.78539816339;
+            float2 dir = float2(cos(angle), sin(angle));
+            mask = max(mask, softCircle(p - dir * 0.14, 0.055, blur));
+            mask = max(mask, softCircle(p - dir * 0.28, 0.065, blur));
+            mask = max(mask, softCircle(p - dir * 0.42, 0.075, blur));
+            mask = max(mask, softCircle(p - dir * 0.56, 0.085, blur));
+        }
+    } else if (patternKind < 5.5) {
+        const int count = 16;
+        const float2 offsets[count] = {
+            float2(-0.44, -0.40),
+            float2(-0.16, -0.48),
+            float2(0.14, -0.46),
+            float2(0.42, -0.36),
+            float2(-0.50, -0.08),
+            float2(-0.24, -0.12),
+            float2(0.02, -0.10),
+            float2(0.28, -0.06),
+            float2(0.52, 0.00),
+            float2(-0.36, 0.18),
+            float2(-0.10, 0.16),
+            float2(0.16, 0.18),
+            float2(0.42, 0.22),
+            float2(-0.18, 0.46),
+            float2(0.10, 0.46),
+            float2(0.38, 0.42)
+        };
+        for (int i = 0; i < count; ++i) {
+            float angle = -0.30 + float(i % 4) * 0.10;
+            mask = max(mask, rotatedPetal(p - offsets[i], angle, 0.02, 0.07, 0.11, blur));
+        }
+    } else if (patternKind < 6.5) {
+        for (int i = 0; i < 3; ++i) {
+            float angle = float(i) * 2.09439510239 + 0.22;
+            mask = max(mask, softArc(p - float2(cos(angle), sin(angle)) * 0.06, 0.34, 0.09, angle + 1.10, 2.10, blur));
+        }
+        mask *= (1.0 - softCircle(p, 0.16, blur));
+    } else {
+        float notchMask = 0.0;
+        for (int i = 0; i < 5; ++i) {
+            float angle = float(i) * 1.25663706144 + 0.60;
+            mask = max(mask, rotatedPetal(p, angle, 0.28, 0.16, 0.34, blur));
+            float c = cos(angle);
+            float s = sin(angle);
+            float2 rp = float2(
+                c * p.x - s * p.y,
+                s * p.x + c * p.y
+            );
+            notchMask = max(notchMask, softEllipse(rp + float2(0.02, 0.08), float2(0.05, 0.10), blur));
+        }
+        mask *= (1.0 - notchMask);
+        mask *= (1.0 - softCircle(p, 0.14, blur));
+    }
+
+    return saturate(mask);
+}
+
+fragment half4 stageSpriteFragment(
+    SpriteOut in [[stage_in]],
+    texture2d<half> patternTexture [[texture(0)]]
+) {
+    float2 p = in.uv * 2.0 - 1.0;
+    float pattern = 0.0;
+    if (in.textureBlend > 0.5) {
+        constexpr sampler textureSampler(coord::normalized, address::clamp_to_zero, filter::linear);
+        half4 textureSample = patternTexture.sample(textureSampler, in.uv);
+        pattern = max(textureSample.a, max(textureSample.r, max(textureSample.g, textureSample.b)));
+    } else {
+        pattern = beePatternMask(in.uv, in.patternKind);
+    }
+    float halo = softCircle(p, 0.96, 0.32) * 0.24;
+    float alpha = saturate(pattern + halo) * in.color.a;
+    float core = 0.42 + pattern * 0.92;
+    float3 rgb = in.color.rgb * alpha * core;
+    return half4(half3(rgb), half(alpha));
+}
+"""
+
+private struct StageMetalColorVertex {
+    var position: SIMD3<Float>
+    var color: SIMD4<Float>
+}
+
+private struct StageMetalBeamVertex {
+    var position: SIMD3<Float>
+    var color: SIMD4<Float>
+    var axial: Float
+    var lateral: Float
+    var mode: Float
+}
+
+private struct StageMetalSpriteVertex {
+    var position: SIMD3<Float>
+    var uv: SIMD2<Float>
+    var color: SIMD4<Float>
+    var patternKind: Float
+    var textureBlend: Float
+}
+
+private struct StageMetalUniforms {
+    var viewProjection: simd_float4x4
+}
+
+private struct StageMetalFixtureSnapshot {
+    var position: SIMD3<Float>
+    var beamKind: StageFixtureBeam.BeamKind
+    var isBeeEye: Bool
+    var yawDegrees: Float
+    var pitchDegrees: Float
+    var rollDegrees: Float
+    var color: SIMD4<Float>
+    var wallWashEmitterColors: [SIMD4<Float>]
+    var selected: Bool
+}
+
+private struct StageMetalPatternSpriteSnapshot {
+    var center: SIMD3<Float>
+    var sideAxis: SIMD3<Float>
+    var upAxis: SIMD3<Float>
+    var size: SIMD2<Float>
+    var color: SIMD4<Float>
+    var patternID: String
+    var patternKind: Float
+    var rotationDegrees: Float
+    var cameraFacing: Bool
+}
+
+private enum StageMetalBeamProfile {
+    case round
+    case oval
+    case fan
+}
+
+private struct StageMetalBeamSnapshot {
+    var start: SIMD3<Float>
+    var end: SIMD3<Float>
+    var color: SIMD4<Float>
+    var nearSideRadius: Float
+    var farSideRadius: Float
+    var nearUpRadius: Float
+    var farUpRadius: Float
+    var expansionExponent: Float
+    var ribbonCount: Int
+    var segmentCount: Int
+    var profile: StageMetalBeamProfile
+    var allowFloorProjection: Bool
+}
+
+private struct StageMetalPreviewSnapshot {
+    var fixtures: [StageMetalFixtureSnapshot]
+    var beams: [StageMetalBeamSnapshot]
+    var patternSprites: [StageMetalPatternSpriteSnapshot]
+}
+
+private struct StageMetalResolvedCamera {
+    var position: SIMD3<Float>
+    var target: SIMD3<Float>
+    var up: SIMD3<Float>
+}
+
+private struct StageMetalCameraState {
+    var preset: Stage3DCameraPreset = .audience
+    var orbitYaw: Float = 0
+    var orbitPitch: Float = 0
+    var zoomScale: Float = 1
+    var panOffset = SIMD3<Float>(repeating: 0)
+
+    mutating func applyPreset(_ preset: Stage3DCameraPreset) {
+        guard self.preset != preset else { return }
+        self.preset = preset
+        orbitYaw = 0
+        orbitPitch = 0
+        zoomScale = 1
+        panOffset = SIMD3<Float>(repeating: 0)
+    }
+
+    func resolved() -> StageMetalResolvedCamera {
+        let baseTarget = preset.metalTargetPosition
+        var offset = preset.metalCameraPosition - baseTarget
+        offset = simdRotate(offset, axis: SIMD3<Float>(0, 1, 0), radians: orbitYaw)
+        let right = simd_normalize(simd_cross(offset, SIMD3<Float>(0, 1, 0)))
+        let pitchAxis = simd_length_squared(right) > 0.0001 ? right : SIMD3<Float>(1, 0, 0)
+        offset = simdRotate(offset, axis: pitchAxis, radians: orbitPitch)
+        let target = baseTarget + panOffset
+        let position = target + offset * zoomScale
+        return StageMetalResolvedCamera(position: position, target: target, up: SIMD3<Float>(0, 1, 0))
+    }
+}
+
+private final class StageMetalPreviewMTKView: MTKView {
+    weak var interactionRenderer: StageMetalPreviewRenderer?
+    private var dragMode: DragMode?
+    private var lastPoint = NSPoint.zero
+
+    private enum DragMode {
+        case orbit
+        case pan
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        dragMode = event.modifierFlags.contains(.option) ? .pan : .orbit
+        lastPoint = convert(event.locationInWindow, from: nil)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let deltaX = Float(point.x - lastPoint.x)
+        let deltaY = Float(point.y - lastPoint.y)
+        switch dragMode {
+        case .pan:
+            interactionRenderer?.pan(deltaX: deltaX, deltaY: deltaY)
+        default:
+            interactionRenderer?.orbit(deltaX: deltaX, deltaY: deltaY)
+        }
+        lastPoint = point
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragMode = nil
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        dragMode = .pan
+        lastPoint = convert(event.locationInWindow, from: nil)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        interactionRenderer?.pan(
+            deltaX: Float(point.x - lastPoint.x),
+            deltaY: Float(point.y - lastPoint.y)
+        )
+        lastPoint = point
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        dragMode = nil
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        interactionRenderer?.zoom(delta: Float(event.scrollingDeltaY))
+    }
+
+    override func magnify(with event: NSEvent) {
+        interactionRenderer?.zoom(delta: Float(-event.magnification * 140))
+    }
+}
+
+private final class StageMetalPreviewRenderer: NSObject, MTKViewDelegate {
+    private weak var model: AppModel?
+    private var metalDevice: MTLDevice?
+    private var commandQueue: MTLCommandQueue?
+    private var colorPipeline: MTLRenderPipelineState?
+    private var beamPipeline: MTLRenderPipelineState?
+    private var spritePipeline: MTLRenderPipelineState?
+    private var solidDepthState: MTLDepthStencilState?
+    private var beamDepthState: MTLDepthStencilState?
+    private var beePatternMetalTextureCache: [String: MTLTexture] = [:]
+    private var cameraState = StageMetalCameraState()
+
+    func attach(model: AppModel, preset: Stage3DCameraPreset) {
+        self.model = model
+        cameraState.applyPreset(preset)
+    }
+
+    func setCameraPreset(_ preset: Stage3DCameraPreset) {
+        cameraState.applyPreset(preset)
+    }
+
+    func orbit(deltaX: Float, deltaY: Float) {
+        cameraState.orbitYaw += deltaX * 0.008
+        cameraState.orbitPitch = max(-1.2, min(1.2, cameraState.orbitPitch + deltaY * 0.008))
+    }
+
+    func pan(deltaX: Float, deltaY: Float) {
+        let resolved = cameraState.resolved()
+        let forward = simd_normalize(resolved.target - resolved.position)
+        let right = simd_normalize(simd_cross(forward, resolved.up))
+        let up = simd_normalize(simd_cross(right, forward))
+        let distance = max(0.8, simd_length(resolved.position - resolved.target))
+        let scale = distance * 0.0018
+        cameraState.panOffset += (-deltaX * scale) * right
+        cameraState.panOffset += (deltaY * scale) * up
+    }
+
+    func zoom(delta: Float) {
+        let factor = 1 + delta * 0.008
+        cameraState.zoomScale = min(2.8, max(0.30, cameraState.zoomScale * max(0.85, factor)))
+    }
+
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+
+    func draw(in view: MTKView) {
+        configureIfNeeded(for: view)
+        guard
+            let descriptor = view.currentRenderPassDescriptor,
+            let drawable = view.currentDrawable,
+            let commandQueue,
+            let colorPipeline,
+            let beamPipeline,
+            let spritePipeline,
+            let solidDepthState,
+            let beamDepthState
+        else { return }
+
+        let snapshot = currentSnapshot()
+        let camera = cameraState.resolved()
+        let uniforms = StageMetalUniforms(
+            viewProjection: simdPerspectiveMatrix(
+                fovYRadians: 48 * .pi / 180,
+                aspect: max(0.1, Float(view.drawableSize.width / max(view.drawableSize.height, 1))),
+                near: 0.02,
+                far: 60
+            ) * simdLookAtMatrix(eye: camera.position, target: camera.target, up: camera.up)
+        )
+
+        var lineVertices: [StageMetalColorVertex] = []
+        var solidVertices: [StageMetalColorVertex] = []
+        var solidIndices: [UInt32] = []
+        var beamVertices: [StageMetalBeamVertex] = []
+        var beamIndices: [UInt32] = []
+
+        appendStageEnvironment(to: &lineVertices)
+        appendFixtures(snapshot.fixtures, to: &solidVertices, indices: &solidIndices)
+        appendBeams(
+            snapshot.beams,
+            cameraPosition: camera.position,
+            to: &beamVertices,
+            indices: &beamIndices
+        )
+
+        let commandBuffer = commandQueue.makeCommandBuffer()
+        let encoder = commandBuffer?.makeRenderCommandEncoder(descriptor: descriptor)
+
+        descriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0.025, green: 0.035, blue: 0.055, alpha: 1.0)
+        descriptor.depthAttachment.clearDepth = 1.0
+
+        if let encoder {
+            if !lineVertices.isEmpty {
+                let vertexBuffer = metalDevice?.makeBuffer(
+                    bytes: lineVertices,
+                    length: MemoryLayout<StageMetalColorVertex>.stride * lineVertices.count
+                )
+                var uniformsCopy = uniforms
+                let uniformBuffer = metalDevice?.makeBuffer(
+                    bytes: &uniformsCopy,
+                    length: MemoryLayout<StageMetalUniforms>.stride
+                )
+                encoder.setRenderPipelineState(colorPipeline)
+                encoder.setDepthStencilState(solidDepthState)
+                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+                encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: lineVertices.count)
+            }
+
+            if !solidVertices.isEmpty, !solidIndices.isEmpty {
+                let vertexBuffer = metalDevice?.makeBuffer(
+                    bytes: solidVertices,
+                    length: MemoryLayout<StageMetalColorVertex>.stride * solidVertices.count
+                )
+                let indexBuffer = metalDevice?.makeBuffer(
+                    bytes: solidIndices,
+                    length: MemoryLayout<UInt32>.stride * solidIndices.count
+                )
+                var uniformsCopy = uniforms
+                let uniformBuffer = metalDevice?.makeBuffer(
+                    bytes: &uniformsCopy,
+                    length: MemoryLayout<StageMetalUniforms>.stride
+                )
+                encoder.setRenderPipelineState(colorPipeline)
+                encoder.setDepthStencilState(solidDepthState)
+                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+                encoder.drawIndexedPrimitives(
+                    type: .triangle,
+                    indexCount: solidIndices.count,
+                    indexType: .uint32,
+                    indexBuffer: indexBuffer!,
+                    indexBufferOffset: 0
+                )
+            }
+
+            if !beamVertices.isEmpty, !beamIndices.isEmpty {
+                let vertexBuffer = metalDevice?.makeBuffer(
+                    bytes: beamVertices,
+                    length: MemoryLayout<StageMetalBeamVertex>.stride * beamVertices.count
+                )
+                let indexBuffer = metalDevice?.makeBuffer(
+                    bytes: beamIndices,
+                    length: MemoryLayout<UInt32>.stride * beamIndices.count
+                )
+                var uniformsCopy = uniforms
+                let uniformBuffer = metalDevice?.makeBuffer(
+                    bytes: &uniformsCopy,
+                    length: MemoryLayout<StageMetalUniforms>.stride
+                )
+                encoder.setRenderPipelineState(beamPipeline)
+                encoder.setDepthStencilState(beamDepthState)
+                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+                encoder.drawIndexedPrimitives(
+                    type: .triangle,
+                    indexCount: beamIndices.count,
+                    indexType: .uint32,
+                    indexBuffer: indexBuffer!,
+                    indexBufferOffset: 0
+                )
+            }
+
+            if !snapshot.patternSprites.isEmpty {
+                var uniformsCopy = uniforms
+                let uniformBuffer = metalDevice?.makeBuffer(
+                    bytes: &uniformsCopy,
+                    length: MemoryLayout<StageMetalUniforms>.stride
+                )
+                encoder.setRenderPipelineState(spritePipeline)
+                encoder.setDepthStencilState(beamDepthState)
+                encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+
+                for sprite in snapshot.patternSprites {
+                    let patternTexture = metalDevice.flatMap { metalBeePatternTexture(patternID: sprite.patternID, device: $0) }
+                    let spriteVertices = makePatternSpriteVertices(
+                        for: sprite,
+                        cameraPosition: camera.position,
+                        textureBlend: patternTexture == nil ? 0.0 : 1.0
+                    )
+                    guard
+                        let vertexBuffer = metalDevice?.makeBuffer(
+                            bytes: spriteVertices,
+                            length: MemoryLayout<StageMetalSpriteVertex>.stride * spriteVertices.count
+                        )
+                    else { continue }
+
+                    let indices: [UInt16] = [0, 1, 2, 0, 2, 3]
+                    guard let indexBuffer = metalDevice?.makeBuffer(
+                        bytes: indices,
+                        length: MemoryLayout<UInt16>.stride * indices.count
+                    ) else { continue }
+
+                    encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                    encoder.setFragmentTexture(patternTexture, index: 0)
+                    encoder.drawIndexedPrimitives(
+                        type: .triangle,
+                        indexCount: indices.count,
+                        indexType: .uint16,
+                        indexBuffer: indexBuffer,
+                        indexBufferOffset: 0
+                    )
+                }
+            }
+
+            encoder.endEncoding()
+        }
+
+        commandBuffer?.present(drawable)
+        commandBuffer?.commit()
+    }
+
+    private func configureIfNeeded(for view: MTKView) {
+        guard colorPipeline == nil || beamPipeline == nil || spritePipeline == nil else { return }
+        guard let device = view.device ?? MTLCreateSystemDefaultDevice() else { return }
+
+        if metalDevice !== device {
+            beePatternMetalTextureCache.removeAll()
+        }
+        metalDevice = device
+        view.device = device
+        view.colorPixelFormat = .bgra8Unorm
+        view.depthStencilPixelFormat = .depth32Float
+        view.sampleCount = 1
+        view.clearColor = MTLClearColor(red: 0.025, green: 0.035, blue: 0.055, alpha: 1.0)
+        view.preferredFramesPerSecond = 60
+        view.isPaused = false
+        view.enableSetNeedsDisplay = false
+
+        commandQueue = device.makeCommandQueue()
+
+        let library: MTLLibrary
+        do {
+            library = try device.makeLibrary(source: stageMetalShaderSource, options: nil)
+        } catch {
+            print("Metal shader compile error:", error)
+            return
+        }
+
+        let colorDescriptor = MTLRenderPipelineDescriptor()
+        colorDescriptor.label = "BeatBeamColorPipeline"
+        colorDescriptor.vertexFunction = library.makeFunction(name: "stageColorVertex")
+        colorDescriptor.fragmentFunction = library.makeFunction(name: "stageColorFragment")
+        colorDescriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat
+        colorDescriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat
+        colorDescriptor.vertexDescriptor = nil
+        colorDescriptor.colorAttachments[0].isBlendingEnabled = true
+        colorDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        colorDescriptor.colorAttachments[0].alphaBlendOperation = .add
+        colorDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        colorDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        colorDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
+        colorDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        let beamDescriptor = MTLRenderPipelineDescriptor()
+        beamDescriptor.label = "BeatBeamBeamPipeline"
+        beamDescriptor.vertexFunction = library.makeFunction(name: "stageBeamVertex")
+        beamDescriptor.fragmentFunction = library.makeFunction(name: "stageBeamFragment")
+        beamDescriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat
+        beamDescriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat
+        beamDescriptor.vertexDescriptor = nil
+        beamDescriptor.colorAttachments[0].isBlendingEnabled = true
+        beamDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        beamDescriptor.colorAttachments[0].alphaBlendOperation = .add
+        beamDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        beamDescriptor.colorAttachments[0].destinationRGBBlendFactor = .one
+        beamDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        beamDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        let spriteDescriptor = MTLRenderPipelineDescriptor()
+        spriteDescriptor.label = "BeatBeamSpritePipeline"
+        spriteDescriptor.vertexFunction = library.makeFunction(name: "stageSpriteVertex")
+        spriteDescriptor.fragmentFunction = library.makeFunction(name: "stageSpriteFragment")
+        spriteDescriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat
+        spriteDescriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat
+        spriteDescriptor.vertexDescriptor = nil
+        spriteDescriptor.colorAttachments[0].isBlendingEnabled = true
+        spriteDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        spriteDescriptor.colorAttachments[0].alphaBlendOperation = .add
+        spriteDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        spriteDescriptor.colorAttachments[0].destinationRGBBlendFactor = .one
+        spriteDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        spriteDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        do {
+            colorPipeline = try device.makeRenderPipelineState(descriptor: colorDescriptor)
+            beamPipeline = try device.makeRenderPipelineState(descriptor: beamDescriptor)
+            spritePipeline = try device.makeRenderPipelineState(descriptor: spriteDescriptor)
+        } catch {
+            print("Metal pipeline error:", error)
+            return
+        }
+
+        let solidDepth = MTLDepthStencilDescriptor()
+        solidDepth.depthCompareFunction = .lessEqual
+        solidDepth.isDepthWriteEnabled = true
+        solidDepthState = device.makeDepthStencilState(descriptor: solidDepth)
+
+        let beamDepth = MTLDepthStencilDescriptor()
+        beamDepth.depthCompareFunction = .lessEqual
+        beamDepth.isDepthWriteEnabled = false
+        beamDepthState = device.makeDepthStencilState(descriptor: beamDepth)
+    }
+
+    private func metalBeePatternTexture(patternID: String, device: MTLDevice) -> MTLTexture? {
+        if let cached = beePatternMetalTextureCache[patternID] {
+            return cached
+        }
+
+        let image: NSImage? = if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                beePatternMaskRasterImage(patternID: patternID, size: 512)
+            }
+        } else {
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    beePatternMaskRasterImage(patternID: patternID, size: 512)
+                }
+            }
+        }
+
+        guard
+            let image,
+            let tiffData = image.tiffRepresentation,
+            let bitmap = NSBitmapImageRep(data: tiffData),
+            let cgImage = bitmap.cgImage
+        else {
+            return nil
+        }
+
+        do {
+            let loader = MTKTextureLoader(device: device)
+            let texture = try loader.newTexture(cgImage: cgImage, options: [
+                MTKTextureLoader.Option.SRGB: false
+            ])
+            beePatternMetalTextureCache[patternID] = texture
+            return texture
+        } catch {
+            nativeLog("kon Bee pattern texture niet laden voor \(patternID): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func currentSnapshot() -> StageMetalPreviewSnapshot {
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated { buildSnapshotOnMainActor() }
+        }
+        return DispatchQueue.main.sync {
+            MainActor.assumeIsolated { buildSnapshotOnMainActor() }
+        }
+    }
+
+    @MainActor
+    private func buildSnapshotOnMainActor() -> StageMetalPreviewSnapshot {
+        guard let model = model else {
+            return StageMetalPreviewSnapshot(fixtures: [], beams: [], patternSprites: [])
+        }
+
+        let time = model.previewAnimationTime(for: Date())
+        var fixtures: [StageMetalFixtureSnapshot] = []
+        var beams: [StageMetalBeamSnapshot] = []
+        var patternSprites: [StageMetalPatternSpriteSnapshot] = []
+
+        for editor in model.slotEditors.sorted(by: { $0.id < $1.id }) {
+            let world = model.worldPosition(for: editor.id)
+            let preview = model.slotPreviews[editor.id]
+            let stageMotion = model.stageMotionStates[editor.id]
+            let beamKind = stageBeamKindFor3D(editor)
+            let wallWashEmitters = beamKind == .wallWash
+                ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: time)
+                : []
+            let isBeeEye = slotPreviewIsBeeEye(preview) || editor.fixtureID == "generic_smart_bee_eye_pattern_moving_head"
+            let baseColor = fixtureSceneColor(preview)
+            let spotColor = fixtureSceneSpotColor(preview)
+            let fixturePosition = simdStageVector(for: world)
+
+            fixtures.append(
+                StageMetalFixtureSnapshot(
+                    position: fixturePosition,
+                    beamKind: beamKind,
+                    isBeeEye: isBeeEye,
+                    yawDegrees: Float(world.yawDegrees),
+                    pitchDegrees: Float(world.pitchDegrees),
+                    rollDegrees: Float(world.rollDegrees),
+                    color: simdColor(baseColor, alpha: preview?.enabled == true ? 0.96 : 0.42),
+                    wallWashEmitterColors: wallWashEmitters.map { $0.metalColor(alphaScale: 0.48 + Float($0.intensity) * 1.24) },
+                    selected: model.selectedSlotID == editor.id || model.previewSelectionContains(editor.id)
+                )
+            )
+
+            guard let preview, preview.enabled else { continue }
+
+            let isMovingHead = beamKind == .movingHead
+            let panRange = stageMotion?.panRange ?? (preview.panRange ?? (isMovingHead ? 540.0 : 180.0))
+            let tiltRange = stageMotion?.tiltRange ?? (preview.tiltRange ?? (isMovingHead ? 180.0 : 90.0))
+
+            let pose: StageBeamPose
+            if let stageMotion, isMovingHead {
+                pose = StageBeamPose(
+                    panDegrees: stageMotion.currentPanDegrees,
+                    tiltDegrees: stageMotion.currentTiltDegrees
+                )
+            } else {
+                pose = StageBeamPose(
+                    panDegrees: preview.logicalPanDegrees
+                        ?? preview.panDegrees
+                        ?? panDegrees(forDMX: preview.pan, range: panRange),
+                    tiltDegrees: preview.logicalTiltDegrees
+                        ?? preview.tiltDegrees
+                        ?? tiltDegrees(forDMX: preview.tilt, range: tiltRange)
+                )
+            }
+
+            let endpoint = beamWorldEndpoint(
+                worldOrigin: world,
+                mountYawDegrees: world.yawDegrees,
+                mountPitchDegrees: world.pitchDegrees,
+                pose: pose,
+                panRange: panRange,
+                tiltRange: tiltRange,
+                beamKind: beamKind
+            )
+
+            let start = simdStageVector(for: world)
+            let end = simdStageVector(for: endpoint)
+            let direction = simd_normalize(end - start)
+            let basis = simdBeamBasis(for: direction)
+            let beamLength = simd_length(end - start)
+            let movingHeadFarRadius = coneFarRadius(length: beamLength, fullAngleDegrees: 40)
+            let movingHeadNearRadius = max(0.012, movingHeadFarRadius * 0.06)
+            let staticWashFarRadius = coneFarRadius(length: beamLength, fullAngleDegrees: 40)
+            let staticWashNearRadius = max(0.016, staticWashFarRadius * 0.08)
+            let washBrightness = Float(max(0.0, effectivePreviewBrightness(preview, at: time)))
+            let spotBrightness = Float(max(0.0, effectiveSpotPreviewBrightness(preview, at: time)))
+            let beeSpread = Float(slotPreviewBeeSpread(preview))
+            let beeBackgroundLevel = Float(slotPreviewBeeBackgroundLevel(preview))
+            let beeSoftness = Float(slotPreviewBeeSoftness(preview))
+            let beeShapeTransition = Float(slotPreviewBeeShapeTransition(preview))
+            let strobeBoost: Float = preview.strobeActive ? 0.12 : 0.0
+            let patternID = slotPreviewResolvedPatternID(preview, at: time)
+            let patternOpen = patternID == "open" || (preview.spotPatternOpen ?? false)
+            let patternRotation = Float(slotPreviewResolvedPatternRotation(preview, at: time))
+
+            switch beamKind {
+            case .movingHead:
+                if isBeeEye {
+                    if washBrightness > 0.01 {
+                        let washOuterAlpha = min(0.78, (0.10 + washBrightness * 0.28 + strobeBoost) * (0.38 + beeBackgroundLevel * 0.66))
+                        let washInnerAlpha = min(0.68, (0.08 + washBrightness * 0.24) * (0.34 + beeBackgroundLevel * 0.54))
+                        beams.append(
+                            StageMetalBeamSnapshot(
+                                start: start,
+                                end: end,
+                                color: simdColor(baseColor, alpha: washOuterAlpha),
+                                nearSideRadius: movingHeadNearRadius * 1.18,
+                                farSideRadius: movingHeadFarRadius * (0.96 + beeBackgroundLevel * 0.48 + beeSoftness * 0.12),
+                                nearUpRadius: movingHeadNearRadius,
+                                farUpRadius: movingHeadFarRadius * (0.82 + beeBackgroundLevel * 0.30),
+                                expansionExponent: 1.0,
+                                ribbonCount: 7,
+                                segmentCount: 28,
+                                profile: .oval,
+                                allowFloorProjection: true
+                            )
+                        )
+                        beams.append(
+                            StageMetalBeamSnapshot(
+                                start: start,
+                                end: end,
+                                color: simdColor(baseColor, alpha: washInnerAlpha),
+                                nearSideRadius: movingHeadNearRadius * 0.92,
+                                farSideRadius: movingHeadFarRadius * (0.72 + beeBackgroundLevel * 0.26),
+                                nearUpRadius: movingHeadNearRadius * 0.82,
+                                farUpRadius: movingHeadFarRadius * (0.62 + beeBackgroundLevel * 0.20),
+                                expansionExponent: 1.0,
+                                ribbonCount: 6,
+                                segmentCount: 24,
+                                profile: .round,
+                                allowFloorProjection: true
+                            )
+                        )
+                    }
+                    if spotBrightness > 0.01 {
+                        for offset in simdBeeEyeTripletOffsets(
+                            side: basis.side,
+                            up: basis.up,
+                            spread: beeSpread,
+                            rotationDegrees: patternRotation
+                        ) {
+                            let beeStart = start + offset * 0.46
+                            let nominalBeeEnd = end + offset * (1.56 + beeSpread * 0.62)
+                            let beeEnd = simdExtendedBeeSpotEnd(start: beeStart, end: nominalBeeEnd)
+                            beams.append(
+                                StageMetalBeamSnapshot(
+                                    start: beeStart,
+                                    end: beeEnd,
+                                    color: simdColor(spotColor, alpha: min(0.92, 0.16 + spotBrightness * 0.52 + strobeBoost + beeShapeTransition * 0.10)),
+                                    nearSideRadius: movingHeadNearRadius * 0.78,
+                                    farSideRadius: movingHeadFarRadius * (0.72 + beeSpread * 0.18 + beeSoftness * 0.08),
+                                    nearUpRadius: movingHeadNearRadius * 0.78,
+                                    farUpRadius: movingHeadFarRadius * (0.68 + beeSpread * 0.14),
+                                    expansionExponent: 1.0,
+                                    ribbonCount: 6,
+                                    segmentCount: 24,
+                                    profile: .round,
+                                    allowFloorProjection: patternOpen
+                                )
+                            )
+                        }
+                        if !patternOpen {
+                            patternSprites.append(contentsOf: makeBeePatternGroupSpriteSnapshots(
+                                start: start,
+                                end: end,
+                                color: simdColor(spotColor, alpha: min(1.0, 0.50 + spotBrightness * 0.28 + strobeBoost * 0.4 + beeShapeTransition * 0.18)),
+                                patternID: patternID,
+                                patternKind: beePatternShaderKind(for: patternID),
+                                rotationDegrees: patternRotation,
+                                sizeScale: 0.92 + beeSpread * 0.20,
+                                spread: beeSpread
+                            ))
+                        }
+                    }
+                } else {
+                    let brightness = max(washBrightness, spotBrightness)
+                    if brightness > 0.01 {
+                        let liveColor = spotBrightness > washBrightness * 1.05 ? spotColor : baseColor
+                        beams.append(
+                            StageMetalBeamSnapshot(
+                                start: start,
+                                end: end,
+                                color: simdColor(liveColor, alpha: min(0.88, 0.18 + brightness * 0.58 + strobeBoost)),
+                                nearSideRadius: movingHeadNearRadius,
+                                farSideRadius: movingHeadFarRadius,
+                                nearUpRadius: movingHeadNearRadius,
+                                farUpRadius: movingHeadFarRadius,
+                                expansionExponent: 1.0,
+                                ribbonCount: 7,
+                                segmentCount: 26,
+                                profile: .round,
+                                allowFloorProjection: true
+                            )
+                        )
+                    }
+                }
+            case .wallWash:
+                guard washBrightness > 0.01 else { continue }
+                continue
+            case .staticWash:
+                guard washBrightness > 0.01 else { continue }
+                beams.append(
+                    StageMetalBeamSnapshot(
+                        start: start,
+                        end: end,
+                        color: simdColor(baseColor, alpha: min(0.84, 0.20 + washBrightness * 0.54 + strobeBoost)),
+                        nearSideRadius: staticWashNearRadius * 1.12,
+                        farSideRadius: staticWashFarRadius * 1.18,
+                        nearUpRadius: staticWashNearRadius,
+                        farUpRadius: staticWashFarRadius,
+                        expansionExponent: 1.0,
+                        ribbonCount: 8,
+                        segmentCount: 26,
+                        profile: .oval,
+                        allowFloorProjection: true
+                    )
+                )
+            }
+        }
+
+        return StageMetalPreviewSnapshot(fixtures: fixtures, beams: beams, patternSprites: patternSprites)
+    }
+
+    private func appendStageEnvironment(to vertices: inout [StageMetalColorVertex]) {
+        let rearHeight = Float(StageWorld.maxZ / 100.0 - 0.45)
+        let stageFrontZ = Float(-StageWorld.maxY / 100.0)
+        let minX = Float(StageWorld.minX / 100.0)
+        let maxX = Float(StageWorld.maxX / 100.0)
+        let minZ = Float(-StageWorld.maxY / 100.0)
+        let maxZ = Float(0.0)
+
+        appendLine(
+            from: SIMD3<Float>(minX, rearHeight, 0.0),
+            to: SIMD3<Float>(maxX, rearHeight, 0.0),
+            color: SIMD4<Float>(0.72, 0.74, 0.78, 0.90),
+            to: &vertices
+        )
+        appendLine(
+            from: SIMD3<Float>(minX, 0.01, stageFrontZ),
+            to: SIMD3<Float>(maxX, 0.01, stageFrontZ),
+            color: SIMD4<Float>(0.10, 0.76, 0.90, 0.60),
+            to: &vertices
+        )
+        appendLine(
+            from: SIMD3<Float>(0.0, 0.01, 0.0),
+            to: SIMD3<Float>(0.0, 0.01, stageFrontZ),
+            color: SIMD4<Float>(0.82, 0.84, 0.88, 0.22),
+            to: &vertices
+        )
+
+        for value in stride(from: StageWorld.minX, through: StageWorld.maxX, by: StageWorld.gridStepCm) {
+            let x = Float(value / 100.0)
+            appendLine(
+                from: SIMD3<Float>(x, 0.002, maxZ),
+                to: SIMD3<Float>(x, 0.002, minZ),
+                color: SIMD4<Float>(0.42, 0.46, 0.54, value == 0 ? 0.28 : 0.14),
+                to: &vertices
+            )
+        }
+
+        for value in stride(from: StageWorld.minY, through: StageWorld.maxY, by: StageWorld.gridStepCm) {
+            let z = Float(-value / 100.0)
+            appendLine(
+                from: SIMD3<Float>(minX, 0.002, z),
+                to: SIMD3<Float>(maxX, 0.002, z),
+                color: SIMD4<Float>(0.42, 0.46, 0.54, value == 0 ? 0.24 : 0.14),
+                to: &vertices
+            )
+        }
+    }
+
+    private func appendFixtures(
+        _ fixtures: [StageMetalFixtureSnapshot],
+        to vertices: inout [StageMetalColorVertex],
+        indices: inout [UInt32]
+    ) {
+        for fixture in fixtures {
+            switch fixture.beamKind {
+            case .movingHead:
+                appendBox(
+                    center: fixture.position + SIMD3<Float>(0, -0.02, 0),
+                    size: SIMD3<Float>(0.26, 0.08, 0.18),
+                    color: simdScaledColor(fixture.color, scale: 0.42),
+                    to: &vertices,
+                    indices: &indices
+                )
+                appendBox(
+                    center: fixture.position + SIMD3<Float>(0, 0.11, 0),
+                    size: fixture.isBeeEye ? SIMD3<Float>(0.22, 0.12, 0.18) : SIMD3<Float>(0.19, 0.11, 0.17),
+                    color: simdScaledColor(fixture.color, scale: 0.52),
+                    to: &vertices,
+                    indices: &indices
+                )
+            case .wallWash:
+                appendOrientedBox(
+                    center: fixture.position,
+                    size: SIMD3<Float>(0.90, 0.10, 0.11),
+                    yawDegrees: fixture.yawDegrees,
+                    pitchDegrees: fixture.pitchDegrees,
+                    rollDegrees: fixture.rollDegrees,
+                    color: SIMD4<Float>(0.05, 0.05, 0.06, 0.92),
+                    to: &vertices,
+                    indices: &indices
+                )
+                appendWallWashEmitters(
+                    center: fixture.position,
+                    yawDegrees: fixture.yawDegrees,
+                    pitchDegrees: fixture.pitchDegrees,
+                    rollDegrees: fixture.rollDegrees,
+                    emitterColors: fixture.wallWashEmitterColors,
+                    fallbackColor: simdScaledColor(fixture.color, scale: 0.92),
+                    to: &vertices,
+                    indices: &indices
+                )
+            case .staticWash:
+                appendBox(
+                    center: fixture.position,
+                    size: SIMD3<Float>(0.20, 0.16, 0.20),
+                    color: simdScaledColor(fixture.color, scale: 0.48),
+                    to: &vertices,
+                    indices: &indices
+                )
+            }
+
+            if fixture.selected {
+                if fixture.beamKind == .wallWash {
+                    appendOrientedBox(
+                        center: fixture.position + SIMD3<Float>(0, 0.02, 0),
+                        size: SIMD3<Float>(1.02, 0.16, 0.20),
+                        yawDegrees: fixture.yawDegrees,
+                        pitchDegrees: fixture.pitchDegrees,
+                        rollDegrees: fixture.rollDegrees,
+                        color: SIMD4<Float>(0.18, 0.88, 1.0, 0.18),
+                        to: &vertices,
+                        indices: &indices
+                    )
+                } else {
+                    appendBox(
+                        center: fixture.position + SIMD3<Float>(0, 0.02, 0),
+                        size: SIMD3<Float>(0.34, 0.24, 0.28),
+                        color: SIMD4<Float>(0.18, 0.88, 1.0, 0.18),
+                        to: &vertices,
+                        indices: &indices
+                    )
+                }
+            }
+        }
+    }
+
+    private func appendBeams(
+        _ beams: [StageMetalBeamSnapshot],
+        cameraPosition: SIMD3<Float>,
+        to vertices: inout [StageMetalBeamVertex],
+        indices: inout [UInt32]
+    ) {
+        for beam in beams {
+            let direction = simd_normalize(beam.end - beam.start)
+            let basis = simdBeamBasis(for: direction)
+            let diagonalAxis = simd_normalize(basis.side + basis.up * 0.72)
+            switch beam.profile {
+            case .round, .oval:
+                appendBeamBillboard(
+                    start: beam.start,
+                    end: beam.end,
+                    nearSideRadius: beam.nearSideRadius,
+                    farSideRadius: beam.farSideRadius,
+                    nearUpRadius: beam.nearUpRadius,
+                    farUpRadius: beam.farUpRadius,
+                    expansionExponent: beam.expansionExponent,
+                    color: beam.color,
+                    segmentCount: beam.segmentCount,
+                    widthScale: 1.0,
+                    mode: 0.0,
+                    cameraPosition: cameraPosition,
+                    to: &vertices,
+                    indices: &indices
+                )
+                appendBeamSheet(
+                    start: beam.start,
+                    end: beam.end,
+                    nearSideRadius: beam.nearSideRadius * 1.16,
+                    farSideRadius: beam.farSideRadius * 1.48,
+                    nearUpRadius: beam.nearUpRadius * 1.14,
+                    farUpRadius: beam.farUpRadius * 1.42,
+                    expansionExponent: beam.expansionExponent * 1.04,
+                    color: SIMD4<Float>(beam.color.x, beam.color.y, beam.color.z, beam.color.w * 0.40),
+                    segmentCount: max(16, beam.segmentCount - 2),
+                    widthScale: 1.0,
+                    mode: 0.25,
+                    axis: basis.side,
+                    to: &vertices,
+                    indices: &indices
+                )
+                appendBeamSheet(
+                    start: beam.start,
+                    end: beam.end,
+                    nearSideRadius: beam.nearSideRadius * 1.08,
+                    farSideRadius: beam.farSideRadius * 1.24,
+                    nearUpRadius: beam.nearUpRadius * 1.08,
+                    farUpRadius: beam.farUpRadius * 1.22,
+                    expansionExponent: beam.expansionExponent,
+                    color: SIMD4<Float>(beam.color.x, beam.color.y, beam.color.z, beam.color.w * 0.28),
+                    segmentCount: max(16, beam.segmentCount - 4),
+                    widthScale: 1.0,
+                    mode: 0.25,
+                    axis: diagonalAxis,
+                    to: &vertices,
+                    indices: &indices
+                )
+                appendBeamRibbonSet(
+                    start: beam.start,
+                    end: beam.end,
+                    nearSideRadius: beam.nearSideRadius * 0.84,
+                    farSideRadius: beam.farSideRadius * 0.88,
+                    nearUpRadius: beam.nearUpRadius * 0.84,
+                    farUpRadius: beam.farUpRadius * 0.88,
+                    expansionExponent: beam.expansionExponent,
+                    color: SIMD4<Float>(beam.color.x, beam.color.y, beam.color.z, beam.color.w * 0.08),
+                    ribbonCount: max(3, beam.ribbonCount / 2),
+                    segmentCount: max(12, beam.segmentCount - 6),
+                    widthScale: 0.72,
+                    mode: 0.5,
+                    profile: beam.profile,
+                    to: &vertices,
+                    indices: &indices
+                )
+            case .fan:
+                appendBeamBillboard(
+                    start: beam.start,
+                    end: beam.end,
+                    nearSideRadius: beam.nearSideRadius,
+                    farSideRadius: beam.farSideRadius,
+                    nearUpRadius: beam.nearUpRadius,
+                    farUpRadius: beam.farUpRadius,
+                    expansionExponent: beam.expansionExponent,
+                    color: SIMD4<Float>(beam.color.x, beam.color.y, beam.color.z, beam.color.w * 0.74),
+                    segmentCount: beam.segmentCount,
+                    widthScale: 1.0,
+                    mode: 0.0,
+                    cameraPosition: cameraPosition,
+                    to: &vertices,
+                    indices: &indices
+                )
+                appendBeamSheet(
+                    start: beam.start,
+                    end: beam.end,
+                    nearSideRadius: beam.nearSideRadius * 1.12,
+                    farSideRadius: beam.farSideRadius * 1.36,
+                    nearUpRadius: beam.nearUpRadius * 1.04,
+                    farUpRadius: beam.farUpRadius * 1.18,
+                    expansionExponent: beam.expansionExponent,
+                    color: SIMD4<Float>(beam.color.x, beam.color.y, beam.color.z, beam.color.w * 0.34),
+                    segmentCount: max(14, beam.segmentCount - 2),
+                    widthScale: 1.0,
+                    mode: 0.25,
+                    axis: basis.side,
+                    to: &vertices,
+                    indices: &indices
+                )
+                appendBeamRibbonSet(
+                    start: beam.start,
+                    end: beam.end,
+                    nearSideRadius: beam.nearSideRadius,
+                    farSideRadius: beam.farSideRadius,
+                    nearUpRadius: beam.nearUpRadius,
+                    farUpRadius: beam.farUpRadius,
+                    expansionExponent: beam.expansionExponent,
+                    color: beam.color,
+                    ribbonCount: beam.ribbonCount,
+                    segmentCount: beam.segmentCount,
+                    widthScale: 0.84,
+                    mode: 0.5,
+                    profile: beam.profile,
+                    to: &vertices,
+                    indices: &indices
+                )
+                appendBeamRibbonSet(
+                    start: beam.start,
+                    end: beam.end,
+                    nearSideRadius: beam.nearSideRadius * 1.34,
+                    farSideRadius: beam.farSideRadius * 1.42,
+                    nearUpRadius: beam.nearUpRadius * 1.16,
+                    farUpRadius: beam.farUpRadius * 1.22,
+                    expansionExponent: beam.expansionExponent * 1.04,
+                    color: SIMD4<Float>(beam.color.x, beam.color.y, beam.color.z, beam.color.w * 0.10),
+                    ribbonCount: max(3, beam.ribbonCount - 1),
+                    segmentCount: max(14, beam.segmentCount - 2),
+                    widthScale: 0.96,
+                    mode: 0.5,
+                    profile: beam.profile,
+                    to: &vertices,
+                    indices: &indices
+                )
+            }
+
+            if beam.allowFloorProjection {
+                appendBeamFloorProjection(
+                    beam,
+                    to: &vertices,
+                    indices: &indices
+                )
+            }
+        }
+    }
+
+    private func makeBeePatternSpriteSnapshot(
+        start: SIMD3<Float>,
+        end: SIMD3<Float>,
+        color: SIMD4<Float>,
+        patternID: String,
+        patternKind: Float,
+        rotationDegrees: Float,
+        sizeScale: Float = 1.0
+    ) -> StageMetalPatternSpriteSnapshot? {
+        let direction = simd_normalize(end - start)
+        guard simd_length_squared(direction) > 0.0001 else { return nil }
+        let basis = simdBeamBasis(for: direction)
+        let beamLength = simd_length(end - start)
+        let maxDistance = Float(StageWorld.beamMaxDistanceCm / 100.0)
+
+        if direction.y < -0.02 {
+            let distanceToFloor = start.y / max(0.0001, -direction.y)
+            if distanceToFloor > 0, distanceToFloor <= min(maxDistance, beamLength + 0.6) {
+                let hit = start + direction * distanceToFloor
+                let minX = Float(StageWorld.minX / 100.0)
+                let maxX = Float(StageWorld.maxX / 100.0)
+                let minZ = Float(-StageWorld.maxY / 100.0)
+                let maxZ = Float(-StageWorld.minY / 100.0)
+                if hit.x >= minX - 0.4, hit.x <= maxX + 0.4, hit.z >= minZ - 0.4, hit.z <= maxZ + 0.4 {
+                    var sideAxis = SIMD3<Float>(direction.z, 0, -direction.x)
+                    if simd_length_squared(sideAxis) < 0.0001 {
+                        sideAxis = basis.side
+                    } else {
+                        sideAxis = simd_normalize(sideAxis)
+                    }
+                    var forwardAxis = SIMD3<Float>(direction.x, 0, direction.z)
+                    if simd_length_squared(forwardAxis) < 0.0001 {
+                        forwardAxis = SIMD3<Float>(0, 0, -1)
+                    } else {
+                        forwardAxis = simd_normalize(forwardAxis)
+                    }
+                    return StageMetalPatternSpriteSnapshot(
+                        center: SIMD3<Float>(hit.x, 0.014, hit.z) + forwardAxis * 0.03,
+                        sideAxis: sideAxis,
+                        upAxis: forwardAxis,
+                        size: SIMD2<Float>(repeating: beePatternProjectedSize(distance: distanceToFloor) * max(0.72, sizeScale)),
+                        color: color,
+                        patternID: patternID,
+                        patternKind: patternKind,
+                        rotationDegrees: rotationDegrees
+                        ,
+                        cameraFacing: false
+                    )
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func makeBeePatternGroupSpriteSnapshots(
+        start: SIMD3<Float>,
+        end: SIMD3<Float>,
+        color: SIMD4<Float>,
+        patternID: String,
+        patternKind: Float,
+        rotationDegrees: Float,
+        sizeScale: Float = 1.0,
+        spread: Float = 1.0
+    ) -> [StageMetalPatternSpriteSnapshot] {
+        let direction = simd_normalize(end - start)
+        guard simd_length_squared(direction) > 0.0001 else { return [] }
+        let basis = simdBeamBasis(for: direction)
+        let beamLength = simd_length(end - start)
+        let maxDistance = Float(StageWorld.beamMaxDistanceCm / 100.0)
+        guard direction.y < -0.02 else { return [] }
+
+        let distanceToFloor = start.y / max(0.0001, -direction.y)
+        guard distanceToFloor > 0, distanceToFloor <= min(maxDistance, beamLength + 0.6) else { return [] }
+
+        let hit = start + direction * distanceToFloor
+        let minX = Float(StageWorld.minX / 100.0)
+        let maxX = Float(StageWorld.maxX / 100.0)
+        let minZ = Float(-StageWorld.maxY / 100.0)
+        let maxZ = Float(-StageWorld.minY / 100.0)
+        guard hit.x >= minX - 0.4, hit.x <= maxX + 0.4, hit.z >= minZ - 0.4, hit.z <= maxZ + 0.4 else { return [] }
+
+        var sideAxis = SIMD3<Float>(direction.z, 0, -direction.x)
+        if simd_length_squared(sideAxis) < 0.0001 {
+            sideAxis = basis.side
+        } else {
+            sideAxis = simd_normalize(sideAxis)
+        }
+
+        var forwardAxis = SIMD3<Float>(direction.x, 0, direction.z)
+        if simd_length_squared(forwardAxis) < 0.0001 {
+            forwardAxis = SIMD3<Float>(0, 0, -1)
+        } else {
+            forwardAxis = simd_normalize(forwardAxis)
+        }
+
+        let groupCenter = SIMD3<Float>(hit.x, 0.014, hit.z) + forwardAxis * 0.03
+        let glyphSize = beePatternProjectedSize(distance: distanceToFloor) * max(0.72, sizeScale)
+        let spacingScale = glyphSize * 0.82 * max(0.78, min(1.40, spread))
+        let radians = Float(Double(rotationDegrees) * .pi / 180.0)
+        let cosine = Float(cos(Double(radians)))
+        let sine = Float(sin(Double(radians)))
+        let localOffsets: [SIMD2<Float>] = [
+            SIMD2<Float>(0.0, -spacingScale * 0.70),
+            SIMD2<Float>(-spacingScale * 0.68, spacingScale * 0.42),
+            SIMD2<Float>(spacingScale * 0.68, spacingScale * 0.42),
+        ]
+
+        return localOffsets.map { offset in
+            let rotated = SIMD2<Float>(
+                offset.x * cosine - offset.y * sine,
+                offset.x * sine + offset.y * cosine
+            )
+            return StageMetalPatternSpriteSnapshot(
+                center: groupCenter + sideAxis * rotated.x + forwardAxis * rotated.y,
+                sideAxis: sideAxis,
+                upAxis: forwardAxis,
+                size: SIMD2<Float>(repeating: glyphSize),
+                color: color,
+                patternID: patternID,
+                patternKind: patternKind,
+                rotationDegrees: rotationDegrees,
+                cameraFacing: false
+            )
+        }
+    }
+
+    private func makePatternSpriteVertices(
+        for sprite: StageMetalPatternSpriteSnapshot,
+        cameraPosition: SIMD3<Float>,
+        textureBlend: Float
+    ) -> [StageMetalSpriteVertex] {
+        let sideAxis: SIMD3<Float>
+        let upAxis: SIMD3<Float>
+        let normal: SIMD3<Float>
+
+        if sprite.cameraFacing {
+            let forward = simd_normalize(cameraPosition - sprite.center)
+            let fallbackUp = abs(forward.y) > 0.92 ? SIMD3<Float>(1, 0, 0) : SIMD3<Float>(0, 1, 0)
+            var side = simd_cross(fallbackUp, forward)
+            if simd_length_squared(side) < 0.0001 {
+                side = sprite.sideAxis
+            }
+            sideAxis = simd_normalize(side)
+            upAxis = simd_normalize(simd_cross(forward, sideAxis))
+            normal = forward
+        } else {
+            sideAxis = simd_normalize(sprite.sideAxis)
+            upAxis = simd_normalize(sprite.upAxis)
+            normal = simd_normalize(simd_cross(sideAxis, upAxis))
+        }
+
+        let rotationRadians = sprite.rotationDegrees * .pi / 180.0
+        let rotatedSide = simdRotate(sideAxis, axis: normal, radians: rotationRadians)
+        let rotatedUp = simdRotate(upAxis, axis: normal, radians: rotationRadians)
+        let halfSide = simd_normalize(rotatedSide) * (sprite.size.x * 0.5)
+        let halfUp = simd_normalize(rotatedUp) * (sprite.size.y * 0.5)
+
+        let bottomLeft = sprite.center - halfSide - halfUp
+        let bottomRight = sprite.center + halfSide - halfUp
+        let topRight = sprite.center + halfSide + halfUp
+        let topLeft = sprite.center - halfSide + halfUp
+
+        return [
+            StageMetalSpriteVertex(position: bottomLeft, uv: SIMD2<Float>(0, 1), color: sprite.color, patternKind: sprite.patternKind, textureBlend: textureBlend),
+            StageMetalSpriteVertex(position: bottomRight, uv: SIMD2<Float>(1, 1), color: sprite.color, patternKind: sprite.patternKind, textureBlend: textureBlend),
+            StageMetalSpriteVertex(position: topRight, uv: SIMD2<Float>(1, 0), color: sprite.color, patternKind: sprite.patternKind, textureBlend: textureBlend),
+            StageMetalSpriteVertex(position: topLeft, uv: SIMD2<Float>(0, 0), color: sprite.color, patternKind: sprite.patternKind, textureBlend: textureBlend),
+        ]
+    }
+
+    private func appendBeamBillboard(
+        start: SIMD3<Float>,
+        end: SIMD3<Float>,
+        nearSideRadius: Float,
+        farSideRadius: Float,
+        nearUpRadius: Float,
+        farUpRadius: Float,
+        expansionExponent: Float,
+        color: SIMD4<Float>,
+        segmentCount: Int,
+        widthScale: Float,
+        mode: Float,
+        cameraPosition: SIMD3<Float>,
+        to vertices: inout [StageMetalBeamVertex],
+        indices: inout [UInt32]
+    ) {
+        let direction = simd_normalize(end - start)
+        guard simd_length_squared(direction) > 0.0001 else { return }
+        let basis = simdBeamBasis(for: direction)
+        let center = simd_mix(start, end, SIMD3<Float>(repeating: 0.5))
+        let toCamera = simd_normalize(cameraPosition - center)
+        var billboardAxis = simd_cross(direction, toCamera)
+        if simd_length_squared(billboardAxis) < 0.0001 {
+            billboardAxis = basis.side
+        } else {
+            billboardAxis = simd_normalize(billboardAxis)
+        }
+        appendBeamSheet(
+            start: start,
+            end: end,
+            nearSideRadius: nearSideRadius,
+            farSideRadius: farSideRadius,
+            nearUpRadius: nearUpRadius,
+            farUpRadius: farUpRadius,
+            expansionExponent: expansionExponent,
+            color: color,
+            segmentCount: segmentCount,
+            widthScale: widthScale,
+            mode: mode,
+            axis: billboardAxis,
+            to: &vertices,
+            indices: &indices
+        )
+    }
+
+    private func appendBeamSheet(
+        start: SIMD3<Float>,
+        end: SIMD3<Float>,
+        nearSideRadius: Float,
+        farSideRadius: Float,
+        nearUpRadius: Float,
+        farUpRadius: Float,
+        expansionExponent: Float,
+        color: SIMD4<Float>,
+        segmentCount: Int,
+        widthScale: Float,
+        mode: Float,
+        axis: SIMD3<Float>,
+        to vertices: inout [StageMetalBeamVertex],
+        indices: inout [UInt32]
+    ) {
+        let direction = simd_normalize(end - start)
+        guard simd_length_squared(direction) > 0.0001 else { return }
+        let basis = simdBeamBasis(for: direction)
+        let baseIndex = UInt32(vertices.count)
+        let normalizedAxis = simd_length_squared(axis) > 0.0001 ? simd_normalize(axis) : basis.side
+
+        for step in 0...segmentCount {
+            let t = Float(step) / Float(segmentCount)
+            let shapedT = pow(t, expansionExponent)
+            let center = simd_mix(start, end, SIMD3<Float>(repeating: t))
+            let radius = ellipseRadius(
+                along: normalizedAxis,
+                sideAxis: basis.side,
+                upAxis: basis.up,
+                sideRadius: nearSideRadius + (farSideRadius - nearSideRadius) * shapedT,
+                upRadius: nearUpRadius + (farUpRadius - nearUpRadius) * shapedT
+            ) * widthScale
+            let offsetVector = normalizedAxis * radius
+
+            vertices.append(
+                StageMetalBeamVertex(
+                    position: center - offsetVector,
+                    color: color,
+                    axial: t,
+                    lateral: -1,
+                    mode: mode
+                )
+            )
+            vertices.append(
+                StageMetalBeamVertex(
+                    position: center + offsetVector,
+                    color: color,
+                    axial: t,
+                    lateral: 1,
+                    mode: mode
+                )
+            )
+        }
+
+        for step in 0..<segmentCount {
+            let offset = UInt32(step * 2)
+            indices.append(baseIndex + offset)
+            indices.append(baseIndex + offset + 1)
+            indices.append(baseIndex + offset + 2)
+            indices.append(baseIndex + offset + 1)
+            indices.append(baseIndex + offset + 3)
+            indices.append(baseIndex + offset + 2)
+        }
+    }
+
+    private func appendBeamFloorProjection(
+        _ beam: StageMetalBeamSnapshot,
+        to vertices: inout [StageMetalBeamVertex],
+        indices: inout [UInt32]
+    ) {
+        let direction = simd_normalize(beam.end - beam.start)
+        guard simd_length_squared(direction) > 0.0001 else { return }
+        guard direction.y < -0.02 else { return }
+
+        let distanceToFloor = beam.start.y / max(0.0001, -direction.y)
+        let maxDistance = Float(StageWorld.beamMaxDistanceCm / 100.0)
+        guard distanceToFloor > 0, distanceToFloor <= maxDistance else { return }
+
+        let hit = beam.start + direction * distanceToFloor
+        let minX = Float(StageWorld.minX / 100.0)
+        let maxX = Float(StageWorld.maxX / 100.0)
+        let minZ = Float(-StageWorld.maxY / 100.0)
+        let maxZ = Float(-StageWorld.minY / 100.0)
+        guard hit.x >= minX - 0.4, hit.x <= maxX + 0.4, hit.z >= minZ - 0.4, hit.z <= maxZ + 0.4 else { return }
+
+        let beamLength = simd_length(beam.end - beam.start)
+        let travelT = beamLength > 0.0001 ? (distanceToFloor / beamLength) : 1.0
+        let shapedT = pow(max(0, travelT), beam.expansionExponent)
+        let sideRadius = beam.nearSideRadius + (beam.farSideRadius - beam.nearSideRadius) * shapedT
+        let upRadius = beam.nearUpRadius + (beam.farUpRadius - beam.nearUpRadius) * shapedT
+
+        var sideAxis = SIMD3<Float>(direction.z, 0, -direction.x)
+        if simd_length_squared(sideAxis) < 0.0001 {
+            sideAxis = SIMD3<Float>(1, 0, 0)
+        } else {
+            sideAxis = simd_normalize(sideAxis)
+        }
+
+        var forwardAxis = SIMD3<Float>(direction.x, 0, direction.z)
+        if simd_length_squared(forwardAxis) < 0.0001 {
+            forwardAxis = SIMD3<Float>(0, 0, -1)
+        } else {
+            forwardAxis = simd_normalize(forwardAxis)
+        }
+
+        let forwardStretch = 1.0 / max(0.18, abs(direction.y))
+        let footprintSideRadius = sideRadius * (beam.profile == .fan ? 1.22 : 1.08)
+        let footprintForwardRadius = max(sideRadius, upRadius * forwardStretch) * (beam.profile == .fan ? 1.08 : 1.0)
+        let center = SIMD3<Float>(hit.x, 0.008, hit.z)
+        let footprintColor = SIMD4<Float>(beam.color.x, beam.color.y, beam.color.z, beam.color.w * 0.52)
+        let baseIndex = UInt32(vertices.count)
+
+        let corners: [(Float, Float)] = [
+            (-1, -1),
+            (1, -1),
+            (1, 1),
+            (-1, 1),
+        ]
+
+        for (lateral, axial) in corners {
+            let position =
+                center
+                + sideAxis * (lateral * footprintSideRadius)
+                + forwardAxis * (axial * footprintForwardRadius)
+            vertices.append(
+                StageMetalBeamVertex(
+                    position: position,
+                    color: footprintColor,
+                    axial: axial,
+                    lateral: lateral,
+                    mode: 1
+                )
+            )
+        }
+
+        indices.append(contentsOf: [
+            baseIndex + 0, baseIndex + 1, baseIndex + 2,
+            baseIndex + 0, baseIndex + 2, baseIndex + 3,
+        ])
+    }
+
+    private func appendBeamRibbonSet(
+        start: SIMD3<Float>,
+        end: SIMD3<Float>,
+        nearSideRadius: Float,
+        farSideRadius: Float,
+        nearUpRadius: Float,
+        farUpRadius: Float,
+        expansionExponent: Float,
+        color: SIMD4<Float>,
+        ribbonCount: Int,
+        segmentCount: Int,
+        widthScale: Float,
+        mode: Float,
+        profile: StageMetalBeamProfile,
+        to vertices: inout [StageMetalBeamVertex],
+        indices: inout [UInt32]
+    ) {
+        let direction = simd_normalize(end - start)
+        guard simd_length_squared(direction) > 0.0001 else { return }
+        let basis = simdBeamBasis(for: direction)
+        let planes = max(profile == .fan ? 3 : 4, ribbonCount)
+        let fanArc: Float = profile == .fan ? (.pi * 0.72) : .pi
+
+        for ribbon in 0..<planes {
+            let normalizedRibbon = planes == 1 ? 0.5 : Float(ribbon) / Float(planes - 1)
+            let angle = profile == .fan
+                ? (normalizedRibbon - 0.5) * fanArc
+                : Float(ribbon) * (fanArc / Float(planes))
+            let baseIndex = UInt32(vertices.count)
+
+            for step in 0...segmentCount {
+                let t = Float(step) / Float(segmentCount)
+                let center = simd_mix(start, end, SIMD3<Float>(repeating: t))
+                let shapedT = pow(t, expansionExponent)
+                let sideRadius = nearSideRadius + (farSideRadius - nearSideRadius) * shapedT
+                let upRadius = nearUpRadius + (farUpRadius - nearUpRadius) * shapedT
+                let offsetVector = (
+                    basis.side * cos(angle) * sideRadius +
+                    basis.up * sin(angle) * upRadius
+                ) * widthScale
+                vertices.append(
+                    StageMetalBeamVertex(
+                        position: center - offsetVector,
+                        color: color,
+                        axial: t,
+                        lateral: -1,
+                        mode: mode
+                    )
+                )
+                vertices.append(
+                    StageMetalBeamVertex(
+                        position: center + offsetVector,
+                        color: color,
+                        axial: t,
+                        lateral: 1,
+                        mode: mode
+                    )
+                )
+            }
+
+            for step in 0..<segmentCount {
+                let offset = UInt32(step * 2)
+                indices.append(baseIndex + offset)
+                indices.append(baseIndex + offset + 1)
+                indices.append(baseIndex + offset + 2)
+                indices.append(baseIndex + offset + 1)
+                indices.append(baseIndex + offset + 3)
+                indices.append(baseIndex + offset + 2)
+            }
+        }
+    }
+
+    private func appendLine(
+        from start: SIMD3<Float>,
+        to end: SIMD3<Float>,
+        color: SIMD4<Float>,
+        to vertices: inout [StageMetalColorVertex]
+    ) {
+        vertices.append(StageMetalColorVertex(position: start, color: color))
+        vertices.append(StageMetalColorVertex(position: end, color: color))
+    }
+
+    private func appendOrientedBox(
+        center: SIMD3<Float>,
+        size: SIMD3<Float>,
+        yawDegrees: Float,
+        pitchDegrees: Float,
+        rollDegrees: Float,
+        color: SIMD4<Float>,
+        to vertices: inout [StageMetalColorVertex],
+        indices: inout [UInt32]
+    ) {
+        let half = size * 0.5
+        let localPoints: [SIMD3<Float>] = [
+            SIMD3<Float>(-half.x, -half.y, -half.z),
+            SIMD3<Float>(half.x, -half.y, -half.z),
+            SIMD3<Float>(half.x, half.y, -half.z),
+            SIMD3<Float>(-half.x, half.y, -half.z),
+            SIMD3<Float>(-half.x, -half.y, half.z),
+            SIMD3<Float>(half.x, -half.y, half.z),
+            SIMD3<Float>(half.x, half.y, half.z),
+            SIMD3<Float>(-half.x, half.y, half.z),
+        ]
+        let rotatedPoints = localPoints.map {
+            center + simdFixtureOrientedOffset(
+                $0,
+                yawDegrees: yawDegrees,
+                pitchDegrees: pitchDegrees,
+                rollDegrees: rollDegrees
+            )
+        }
+        appendBoxVertices(rotatedPoints, color: color, to: &vertices, indices: &indices)
+    }
+
+    private func appendWallWashEmitters(
+        center: SIMD3<Float>,
+        yawDegrees: Float,
+        pitchDegrees: Float,
+        rollDegrees: Float,
+        emitterColors: [SIMD4<Float>],
+        fallbackColor: SIMD4<Float>,
+        to vertices: inout [StageMetalColorVertex],
+        indices: inout [UInt32]
+    ) {
+        for index in 0..<24 {
+            let t = Float(index) / 23.0
+            let localCenter = SIMD3<Float>(
+                -0.41 + t * 0.82,
+                0.0,
+                -0.060
+            )
+            let rotatedCenter = center + simdFixtureOrientedOffset(
+                localCenter,
+                yawDegrees: yawDegrees,
+                pitchDegrees: pitchDegrees,
+                rollDegrees: rollDegrees
+            )
+            let emitterColor = emitterColors.indices.contains(index) ? emitterColors[index] : fallbackColor
+            appendOrientedBox(
+                center: rotatedCenter,
+                size: SIMD3<Float>(0.022, 0.032, 0.012),
+                yawDegrees: yawDegrees,
+                pitchDegrees: pitchDegrees,
+                rollDegrees: rollDegrees,
+                color: emitterColor,
+                to: &vertices,
+                indices: &indices
+            )
+        }
+    }
+
+    private func appendBox(
+        center: SIMD3<Float>,
+        size: SIMD3<Float>,
+        color: SIMD4<Float>,
+        to vertices: inout [StageMetalColorVertex],
+        indices: inout [UInt32]
+    ) {
+        let hx = size.x * 0.5
+        let hy = size.y * 0.5
+        let hz = size.z * 0.5
+        let points: [SIMD3<Float>] = [
+            center + SIMD3<Float>(-hx, -hy, -hz),
+            center + SIMD3<Float>(hx, -hy, -hz),
+            center + SIMD3<Float>(hx, hy, -hz),
+            center + SIMD3<Float>(-hx, hy, -hz),
+            center + SIMD3<Float>(-hx, -hy, hz),
+            center + SIMD3<Float>(hx, -hy, hz),
+            center + SIMD3<Float>(hx, hy, hz),
+            center + SIMD3<Float>(-hx, hy, hz),
+        ]
+        appendBoxVertices(points, color: color, to: &vertices, indices: &indices)
+    }
+
+    private func appendBoxVertices(
+        _ points: [SIMD3<Float>],
+        color: SIMD4<Float>,
+        to vertices: inout [StageMetalColorVertex],
+        indices: inout [UInt32]
+    ) {
+        let baseIndex = UInt32(vertices.count)
+        for point in points {
+            vertices.append(StageMetalColorVertex(position: point, color: color))
+        }
+        indices.append(contentsOf: [
+            baseIndex + 0, baseIndex + 1, baseIndex + 2, baseIndex + 0, baseIndex + 2, baseIndex + 3,
+            baseIndex + 4, baseIndex + 6, baseIndex + 5, baseIndex + 4, baseIndex + 7, baseIndex + 6,
+            baseIndex + 0, baseIndex + 4, baseIndex + 5, baseIndex + 0, baseIndex + 5, baseIndex + 1,
+            baseIndex + 1, baseIndex + 5, baseIndex + 6, baseIndex + 1, baseIndex + 6, baseIndex + 2,
+            baseIndex + 2, baseIndex + 6, baseIndex + 7, baseIndex + 2, baseIndex + 7, baseIndex + 3,
+            baseIndex + 3, baseIndex + 7, baseIndex + 4, baseIndex + 3, baseIndex + 4, baseIndex + 0,
+        ])
+    }
+}
+
+private struct StageMetalPreviewRepresentable: NSViewRepresentable {
+    @ObservedObject var model: AppModel
+    let cameraPreset: Stage3DCameraPreset
+
+    final class Coordinator {
+        let renderer = StageMetalPreviewRenderer()
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> StageMetalPreviewMTKView {
+        let view = StageMetalPreviewMTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
+        view.interactionRenderer = context.coordinator.renderer
+        view.delegate = context.coordinator.renderer
+        context.coordinator.renderer.attach(model: model, preset: cameraPreset)
+        return view
+    }
+
+    func updateNSView(_ nsView: StageMetalPreviewMTKView, context: Context) {
+        nsView.interactionRenderer = context.coordinator.renderer
+        context.coordinator.renderer.attach(model: model, preset: cameraPreset)
+        context.coordinator.renderer.setCameraPreset(cameraPreset)
+    }
+}
+
+struct Stage3DPreviewView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var cameraPreset: Stage3DCameraPreset = .audience
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            StageMetalPreviewRepresentable(
+                model: model,
+                cameraPreset: cameraPreset
+            )
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    ForEach(Stage3DCameraPreset.allCases) { preset in
+                        Button {
+                            cameraPreset = preset
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: preset.iconName)
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text(preset.title)
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(cameraPreset == preset ? BeatBeamPalette.triggerActive.opacity(0.24) : Color.black.opacity(0.28))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(cameraPreset == preset ? BeatBeamPalette.triggerActive.opacity(0.80) : Color.white.opacity(0.10), lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Text("Drag = orbit  •  scroll/pinch = zoom  •  right-drag = pan")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.72))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.black.opacity(0.26))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .padding(10)
+        }
+    }
+}
+
+private extension Stage3DCameraPreset {
+    var metalCameraPosition: SIMD3<Float> {
+        SIMD3<Float>(Float(cameraPosition.x), Float(cameraPosition.y), Float(cameraPosition.z))
+    }
+
+    var metalTargetPosition: SIMD3<Float> {
+        SIMD3<Float>(Float(targetPosition.x), Float(targetPosition.y), Float(targetPosition.z))
+    }
+}
+
+private struct SimdBeamBasis {
+    let side: SIMD3<Float>
+    let up: SIMD3<Float>
+}
+
+private func simdStageVector(for world: SlotWorldPosition) -> SIMD3<Float> {
+    SIMD3<Float>(
+        Float(world.x / 100.0),
+        Float(world.z / 100.0),
+        Float(-world.y / 100.0)
+    )
+}
+
+private func simdColor(_ color: NSColor, alpha: Float = 1.0) -> SIMD4<Float> {
+    let resolved = color.usingColorSpace(.deviceRGB) ?? color
+    return SIMD4<Float>(
+        Float(resolved.redComponent),
+        Float(resolved.greenComponent),
+        Float(resolved.blueComponent),
+        alpha
+    )
+}
+
+private func simdScaledColor(_ color: SIMD4<Float>, scale: Float) -> SIMD4<Float> {
+    SIMD4<Float>(color.x * scale, color.y * scale, color.z * scale, color.w)
+}
+
+private func coneFarRadius(length: Float, fullAngleDegrees: Float) -> Float {
+    let halfAngleRadians = (fullAngleDegrees * .pi / 180) * 0.5
+    return max(0.02, tan(halfAngleRadians) * max(0, length))
+}
+
+private func beePatternProjectedSize(distance: Float) -> Float {
+    let projectedDiameter = coneFarRadius(length: distance, fullAngleDegrees: 40) * 2.0
+    return min(1.75, max(0.22, projectedDiameter * 0.30))
+}
+
+private func simdRotate(_ vector: SIMD3<Float>, axis: SIMD3<Float>, radians: Float) -> SIMD3<Float> {
+    let normalizedAxis = simd_normalize(axis)
+    let cosine = cos(radians)
+    let sine = sin(radians)
+    return vector * cosine
+        + simd_cross(normalizedAxis, vector) * sine
+        + normalizedAxis * simd_dot(normalizedAxis, vector) * (1 - cosine)
+}
+
+private func simdFixtureOrientedOffset(
+    _ vector: SIMD3<Float>,
+    yawDegrees: Float,
+    pitchDegrees: Float,
+    rollDegrees: Float
+) -> SIMD3<Float> {
+    let yawRadians = -yawDegrees * .pi / 180.0
+    let pitchRadians = pitchDegrees * .pi / 180.0
+    let rollRadians = rollDegrees * .pi / 180.0
+    var rotated = vector
+    rotated = simdRotate(rotated, axis: SIMD3<Float>(0, 0, 1), radians: rollRadians)
+    rotated = simdRotate(rotated, axis: SIMD3<Float>(1, 0, 0), radians: pitchRadians)
+    rotated = simdRotate(rotated, axis: SIMD3<Float>(0, 1, 0), radians: yawRadians)
+    return rotated
+}
+
+private func simdBeamBasis(for direction: SIMD3<Float>) -> SimdBeamBasis {
+    let fallbackUp = abs(direction.y) > 0.92 ? SIMD3<Float>(1, 0, 0) : SIMD3<Float>(0, 1, 0)
+    let side = simd_normalize(simd_cross(direction, fallbackUp))
+    let up = simd_normalize(simd_cross(side, direction))
+    return SimdBeamBasis(side: side, up: up)
+}
+
+private func ellipseRadius(
+    along axis: SIMD3<Float>,
+    sideAxis: SIMD3<Float>,
+    upAxis: SIMD3<Float>,
+    sideRadius: Float,
+    upRadius: Float
+) -> Float {
+    let sideComponent = simd_dot(axis, sideAxis)
+    let upComponent = simd_dot(axis, upAxis)
+    let a = max(0.0001, sideRadius)
+    let b = max(0.0001, upRadius)
+    let denominator = (sideComponent * sideComponent) / (a * a) + (upComponent * upComponent) / (b * b)
+    return denominator > 0.0001 ? 1.0 / sqrt(denominator) : max(a, b)
+}
+
+private func simdBeeEyeTripletOffsets(side: SIMD3<Float>, up: SIMD3<Float>, spread: Float = 1.0, rotationDegrees: Float = 0.0) -> [SIMD3<Float>] {
+    let scaledSpread = max(0.78, min(1.40, spread))
+    let radians = Float(Double(rotationDegrees) * .pi / 180.0)
+    let cosine = Float(cos(Double(radians)))
+    let sine = Float(sin(Double(radians)))
+    let localOffsets: [SIMD2<Float>] = [
+        SIMD2<Float>(0.0, 0.225 * scaledSpread),
+        SIMD2<Float>(-0.225 * scaledSpread, -0.150 * scaledSpread),
+        SIMD2<Float>(0.225 * scaledSpread, -0.150 * scaledSpread),
+    ]
+
+    return localOffsets.map { offset in
+        let rotated = SIMD2<Float>(
+            offset.x * cosine - offset.y * sine,
+            offset.x * sine + offset.y * cosine
+        )
+        return side * rotated.x + up * rotated.y
+    }
+}
+
+private func simdExtendedBeeSpotEnd(start: SIMD3<Float>, end: SIMD3<Float>) -> SIMD3<Float> {
+    let direction = simd_normalize(end - start)
+    guard simd_length_squared(direction) > 0.0001 else { return end }
+
+    let maxDistance = Float(StageWorld.beamMaxDistanceCm / 100.0)
+    let currentLength = simd_length(end - start)
+    let preferredDistance = min(maxDistance, max(currentLength * 1.6, currentLength + 1.8))
+    let extendedEnd = start + direction * preferredDistance
+
+    if direction.y < -0.02 {
+        let distanceToFloor = start.y / max(0.0001, -direction.y)
+        if distanceToFloor > 0, distanceToFloor <= maxDistance {
+            let hit = start + direction * distanceToFloor
+            let minX = Float(StageWorld.minX / 100.0)
+            let maxX = Float(StageWorld.maxX / 100.0)
+            let minZ = Float(-StageWorld.maxY / 100.0)
+            let maxZ = Float(-StageWorld.minY / 100.0)
+            if hit.x >= minX - 0.4, hit.x <= maxX + 0.4, hit.z >= minZ - 0.4, hit.z <= maxZ + 0.4 {
+                return hit
+            }
+        }
+    }
+
+    return extendedEnd
+}
+
+private func simdLookAtMatrix(eye: SIMD3<Float>, target: SIMD3<Float>, up: SIMD3<Float>) -> simd_float4x4 {
+    let forward = simd_normalize(target - eye)
+    let right = simd_normalize(simd_cross(forward, up))
+    let upVector = simd_cross(right, forward)
+
+    return simd_float4x4(
+        SIMD4<Float>(right.x, upVector.x, -forward.x, 0),
+        SIMD4<Float>(right.y, upVector.y, -forward.y, 0),
+        SIMD4<Float>(right.z, upVector.z, -forward.z, 0),
+        SIMD4<Float>(
+            -simd_dot(right, eye),
+            -simd_dot(upVector, eye),
+            simd_dot(forward, eye),
+            1
+        )
+    )
+}
+
+private func simdPerspectiveMatrix(fovYRadians: Float, aspect: Float, near: Float, far: Float) -> simd_float4x4 {
+    let yScale = 1 / tan(fovYRadians * 0.5)
+    let xScale = yScale / max(0.0001, aspect)
+    let zRange = far - near
+    let zScale = -(far + near) / zRange
+    let wzScale = -(2 * far * near) / zRange
+
+    return simd_float4x4(
+        SIMD4<Float>(xScale, 0, 0, 0),
+        SIMD4<Float>(0, yScale, 0, 0),
+        SIMD4<Float>(0, 0, zScale, -1),
+        SIMD4<Float>(0, 0, wzScale, 0)
+    )
+}
+
+private func stageSceneVector(for world: SlotWorldPosition) -> SCNVector3 {
+    SCNVector3(
+        CGFloat(world.x / 100.0),
+        CGFloat(world.z / 100.0),
+        CGFloat(-world.y / 100.0)
+    )
+}
+
+private func sceneVectorAdd(_ lhs: SCNVector3, _ rhs: SCNVector3) -> SCNVector3 {
+    SCNVector3(lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z)
+}
+
+private func sceneVectorSubtract(_ lhs: SCNVector3, _ rhs: SCNVector3) -> SCNVector3 {
+    SCNVector3(lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z)
+}
+
+private func sceneVectorScale(_ value: SCNVector3, _ factor: CGFloat) -> SCNVector3 {
+    SCNVector3(value.x * factor, value.y * factor, value.z * factor)
+}
+
+private func sceneVectorLength(_ value: SCNVector3) -> CGFloat {
+    sqrt(value.x * value.x + value.y * value.y + value.z * value.z)
+}
+
+private func sceneVectorNormalize(_ value: SCNVector3) -> SCNVector3 {
+    let length = sceneVectorLength(value)
+    guard length > 0.0001 else { return SCNVector3(0, 0, 0) }
+    return sceneVectorScale(value, 1.0 / length)
+}
+
+private func sceneVectorCross(_ lhs: SCNVector3, _ rhs: SCNVector3) -> SCNVector3 {
+    SCNVector3(
+        lhs.y * rhs.z - lhs.z * rhs.y,
+        lhs.z * rhs.x - lhs.x * rhs.z,
+        lhs.x * rhs.y - lhs.y * rhs.x
+    )
+}
+
+private func sceneVectorMidpoint(_ lhs: SCNVector3, _ rhs: SCNVector3) -> SCNVector3 {
+    SCNVector3((lhs.x + rhs.x) * 0.5, (lhs.y + rhs.y) * 0.5, (lhs.z + rhs.z) * 0.5)
+}
+
+private func + (lhs: SCNVector3, rhs: SCNVector3) -> SCNVector3 {
+    sceneVectorAdd(lhs, rhs)
+}
+
+private func * (lhs: SCNVector3, rhs: CGFloat) -> SCNVector3 {
+    sceneVectorScale(lhs, rhs)
+}
+
+private func * (lhs: CGFloat, rhs: SCNVector3) -> SCNVector3 {
+    sceneVectorScale(rhs, lhs)
+}
+
+private struct SceneBeamBasis {
+    let side: SCNVector3
+    let up: SCNVector3
+}
+
+private func beamBasis(for direction: SCNVector3) -> SceneBeamBasis {
+    let fallbackUp = abs(direction.y) > 0.92 ? SCNVector3(1, 0, 0) : SCNVector3(0, 1, 0)
+    let side = sceneVectorNormalize(sceneVectorCross(direction, fallbackUp))
+    let up = sceneVectorNormalize(sceneVectorCross(side, direction))
+    return SceneBeamBasis(side: side, up: up)
+}
+
+private func beeEyeTripletOffsets3D(side: SCNVector3, up: SCNVector3, spread: CGFloat = 1.0, rotationDegrees: Double = 0.0) -> [SCNVector3] {
+    let scaledSpread = max(0.78, min(1.40, spread))
+    let radians = CGFloat(rotationDegrees * .pi / 180.0)
+    let cosine = cos(radians)
+    let sine = sin(radians)
+    let localOffsets: [CGPoint] = [
+        CGPoint(x: 0.0, y: 0.225 * scaledSpread),
+        CGPoint(x: -0.225 * scaledSpread, y: -0.150 * scaledSpread),
+        CGPoint(x: 0.225 * scaledSpread, y: -0.150 * scaledSpread),
+    ]
+
+    return localOffsets.map { offset in
+        let rotatedX = offset.x * cosine - offset.y * sine
+        let rotatedY = offset.x * sine + offset.y * cosine
+        return sceneVectorAdd(sceneVectorScale(side, rotatedX), sceneVectorScale(up, rotatedY))
+    }
+}
+
+private func fixtureSceneColor(_ preview: SlotPreview?) -> NSColor {
+    guard let preview, preview.enabled else {
+        return NSColor(calibratedWhite: 0.58, alpha: 1.0)
+    }
+    let whiteBoost = Double(preview.white) / 255.0
+    let scaledRed = min(1.0, Double(preview.red) / 255.0 + whiteBoost * 0.14)
+    let scaledGreen = min(1.0, Double(preview.green) / 255.0 + whiteBoost * 0.14)
+    let scaledBlue = min(1.0, Double(preview.blue) / 255.0 + whiteBoost * 0.14)
+    let maxComponent = max(scaledRed, scaledGreen, scaledBlue, 0.001)
+    let normalizedRed = min(1.0, scaledRed / maxComponent)
+    let normalizedGreen = min(1.0, scaledGreen / maxComponent)
+    let normalizedBlue = min(1.0, scaledBlue / maxComponent)
+    return NSColor(
+        calibratedRed: CGFloat(normalizedRed),
+        green: CGFloat(normalizedGreen),
+        blue: CGFloat(normalizedBlue),
+        alpha: 1.0
+    )
+}
+
+private func fixtureSceneSpotColor(_ preview: SlotPreview?) -> NSColor {
+    guard
+        let preview,
+        preview.enabled,
+        preview.spotRed != nil || preview.spotGreen != nil || preview.spotBlue != nil || preview.spotWhite != nil
+    else {
+        return fixtureSceneColor(preview)
+    }
+    let whiteBoost = Double(preview.spotWhite ?? 0) / 255.0
+    let scaledRed = min(1.0, Double(preview.spotRed ?? 0) / 255.0 + whiteBoost * 0.14)
+    let scaledGreen = min(1.0, Double(preview.spotGreen ?? 0) / 255.0 + whiteBoost * 0.14)
+    let scaledBlue = min(1.0, Double(preview.spotBlue ?? 0) / 255.0 + whiteBoost * 0.14)
+    let maxComponent = max(scaledRed, scaledGreen, scaledBlue, 0.001)
+    return NSColor(
+        calibratedRed: CGFloat(min(1.0, scaledRed / maxComponent)),
+        green: CGFloat(min(1.0, scaledGreen / maxComponent)),
+        blue: CGFloat(min(1.0, scaledBlue / maxComponent)),
+        alpha: 1.0
+    )
+}
+
+private func makeSceneSegmentNode(from start: SCNVector3, to end: SCNVector3, radius: CGFloat, color: NSColor, opacity: CGFloat) -> SCNNode {
+    let dx = end.x - start.x
+    let dy = end.y - start.y
+    let dz = end.z - start.z
+    let length = CGFloat(sqrt(dx * dx + dy * dy + dz * dz))
+    guard length > 0.0001 else { return SCNNode() }
+
+    let geometry = SCNCylinder(radius: radius, height: length)
+    let material = SCNMaterial()
+    material.diffuse.contents = color
+    material.emission.contents = color
+    material.emission.intensity = 0.48
+    material.roughness.contents = 0.28
+    material.metalness.contents = 0.02
+    material.transparency = opacity
+    geometry.radialSegmentCount = 10
+    geometry.materials = [material]
+
+    let node = SCNNode(geometry: geometry)
+    node.position = SCNVector3(
+        (start.x + end.x) * 0.5,
+        (start.y + end.y) * 0.5,
+        (start.z + end.z) * 0.5
+    )
+    node.look(at: end, up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 1, 0))
+    return node
+}
+
 struct StagePreviewPanel<Content: View>: View {
     let title: String
     let subtitle: String
@@ -7032,29 +13364,33 @@ struct ProjectionWorldGrid: View {
                     let normalized = projection == .back
                         ? 1.0 - scalarNormalized(value, lower: StageWorld.minX, upper: StageWorld.maxX)
                         : scalarNormalized(value, lower: StageWorld.minX, upper: StageWorld.maxX)
-                    let x = geometry.size.width * normalized
-                    path.move(to: CGPoint(x: x, y: 0))
-                    path.addLine(to: CGPoint(x: x, y: geometry.size.height))
+                    let start = projectionViewportTransform(CGPoint(x: normalized, y: 0))
+                    let end = projectionViewportTransform(CGPoint(x: normalized, y: 1))
+                    path.move(to: CGPoint(x: geometry.size.width * start.x, y: geometry.size.height * start.y))
+                    path.addLine(to: CGPoint(x: geometry.size.width * end.x, y: geometry.size.height * end.y))
                 }
                 for value in stride(from: StageWorld.minY, through: StageWorld.maxY, by: StageWorld.gridStepCm) {
                     if projection == .top || projection == .side {
                         let normalized = scalarNormalized(value, lower: StageWorld.minY, upper: StageWorld.maxY)
-                        let x = geometry.size.width * normalized
                         if projection == .side {
-                            path.move(to: CGPoint(x: x, y: 0))
-                            path.addLine(to: CGPoint(x: x, y: geometry.size.height))
+                            let start = projectionViewportTransform(CGPoint(x: normalized, y: 0))
+                            let end = projectionViewportTransform(CGPoint(x: normalized, y: 1))
+                            path.move(to: CGPoint(x: geometry.size.width * start.x, y: geometry.size.height * start.y))
+                            path.addLine(to: CGPoint(x: geometry.size.width * end.x, y: geometry.size.height * end.y))
                         } else {
-                            let y = geometry.size.height * normalized
-                            path.move(to: CGPoint(x: 0, y: y))
-                            path.addLine(to: CGPoint(x: geometry.size.width, y: y))
+                            let start = projectionViewportTransform(CGPoint(x: 0, y: normalized))
+                            let end = projectionViewportTransform(CGPoint(x: 1, y: normalized))
+                            path.move(to: CGPoint(x: geometry.size.width * start.x, y: geometry.size.height * start.y))
+                            path.addLine(to: CGPoint(x: geometry.size.width * end.x, y: geometry.size.height * end.y))
                         }
                     }
                 }
                 for value in stride(from: StageWorld.minZ, through: StageWorld.maxZ, by: StageWorld.gridStepCm) where projection != .top {
                     let normalized = 1.0 - scalarNormalized(value, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-                    let y = geometry.size.height * normalized
-                    path.move(to: CGPoint(x: 0, y: y))
-                    path.addLine(to: CGPoint(x: geometry.size.width, y: y))
+                    let start = projectionViewportTransform(CGPoint(x: 0, y: normalized))
+                    let end = projectionViewportTransform(CGPoint(x: 1, y: normalized))
+                    path.move(to: CGPoint(x: geometry.size.width * start.x, y: geometry.size.height * start.y))
+                    path.addLine(to: CGPoint(x: geometry.size.width * end.x, y: geometry.size.height * end.y))
                 }
             }
             .stroke(Color.white.opacity(0.05), lineWidth: 1)
@@ -7212,8 +13548,393 @@ private func dmxPreviewColor(red: Int, green: Int, blue: Int, white: Int = 0) ->
     return Color(red: normalizedRed, green: normalizedGreen, blue: normalizedBlue)
 }
 
+private func dmxPreviewNSColor(red: Int, green: Int, blue: Int, white: Int = 0) -> NSColor {
+    let whiteBoost = CGFloat(white) / 255.0
+    let scaledRed = min(1.0, CGFloat(red) / 255.0 + whiteBoost * 0.14)
+    let scaledGreen = min(1.0, CGFloat(green) / 255.0 + whiteBoost * 0.14)
+    let scaledBlue = min(1.0, CGFloat(blue) / 255.0 + whiteBoost * 0.14)
+    let maxComponent = max(scaledRed, scaledGreen, scaledBlue, 0.001)
+    let normalizedRed = min(1.0, scaledRed / maxComponent)
+    let normalizedGreen = min(1.0, scaledGreen / maxComponent)
+    let normalizedBlue = min(1.0, scaledBlue / maxComponent)
+    return NSColor(
+        calibratedRed: normalizedRed,
+        green: normalizedGreen,
+        blue: normalizedBlue,
+        alpha: 1.0
+    )
+}
+
+struct WallWashEmitterPreview {
+    let red: Int
+    let green: Int
+    let blue: Int
+    let white: Int
+    let intensity: CGFloat
+
+    var color: Color {
+        dmxPreviewColor(red: red, green: green, blue: blue, white: white)
+    }
+
+    var nsColor: NSColor {
+        dmxPreviewNSColor(red: red, green: green, blue: blue, white: white)
+    }
+
+    func metalColor(alphaScale: Float = 1.0) -> SIMD4<Float> {
+        simdColor(nsColor, alpha: min(1.0, Float(intensity) * alphaScale))
+    }
+}
+
+struct WallWashProjectionPoint<T> {
+    let t: CGFloat
+    let payload: T
+}
+
+private func wallWashFlashScale(preview: SlotPreview?, animationTime: TimeInterval) -> CGFloat {
+    guard let preview, preview.strobeActive else { return 1.0 }
+    return 0.08 + CGFloat(slotPreviewStrobeFactor(preview, at: animationTime)) * 0.92
+}
+
+@MainActor
+private func wallWashEmitterPreviews(
+    editor: SlotEditor,
+    model: AppModel,
+    preview: SlotPreview?,
+    animationTime: TimeInterval
+) -> [WallWashEmitterPreview] {
+    guard let preview, preview.enabled else {
+        return Array(
+            repeating: WallWashEmitterPreview(red: 255, green: 255, blue: 255, white: 0, intensity: 0.12),
+            count: 24
+        )
+    }
+
+    let flashScale = wallWashFlashScale(preview: preview, animationTime: animationTime)
+    let fallback = Array(
+        repeating: makeWallWashEmitterPreview(
+            red: preview.red,
+            green: preview.green,
+            blue: preview.blue,
+            white: preview.white,
+            flashScale: flashScale
+        ),
+        count: 24
+    )
+
+    guard let range = model.dmxSlotRanges[editor.id] else {
+        return fallback
+    }
+
+    let channelValues = (range.address...range.lastChannel).map { model.dmxValues[$0] ?? 0 }
+    let mode = editor.mode.lowercased()
+
+    switch mode {
+    case "p001":
+        return wallWashZoneEmitterPreviews(channelValues: channelValues, zoneCount: 8, totalEmitters: 24, flashScale: flashScale)
+    case "l001":
+        return wallWashZoneEmitterPreviews(channelValues: channelValues, zoneCount: 4, totalEmitters: 24, flashScale: flashScale)
+    case "e001":
+        return wallWashZoneEmitterPreviews(channelValues: channelValues, zoneCount: 2, totalEmitters: 24, flashScale: flashScale)
+    case "c001":
+        guard channelValues.count >= 3 else { return fallback }
+        return Array(
+            repeating: makeWallWashEmitterPreview(
+                red: channelValues[0],
+                green: channelValues[1],
+                blue: channelValues[2],
+                flashScale: flashScale
+            ),
+            count: 24
+        )
+    case "d001", "h001":
+        guard channelValues.count >= 4 else { return fallback }
+        return Array(
+            repeating: makeWallWashEmitterPreview(
+                red: channelValues[1],
+                green: channelValues[2],
+                blue: channelValues[3],
+                flashScale: flashScale
+            ),
+            count: 24
+        )
+    default:
+        return fallback
+    }
+}
+
+private func wallWashZoneEmitterPreviews(
+    channelValues: [Int],
+    zoneCount: Int,
+    totalEmitters: Int,
+    flashScale: CGFloat
+) -> [WallWashEmitterPreview] {
+    guard zoneCount > 0, totalEmitters > 0 else { return [] }
+    let emittersPerZone = max(1, totalEmitters / zoneCount)
+    var emitters: [WallWashEmitterPreview] = []
+    emitters.reserveCapacity(totalEmitters)
+
+    for zoneIndex in 0..<zoneCount {
+        let offset = zoneIndex * 3
+        guard channelValues.count >= offset + 3 else { break }
+        let emitter = makeWallWashEmitterPreview(
+            red: channelValues[offset],
+            green: channelValues[offset + 1],
+            blue: channelValues[offset + 2],
+            flashScale: flashScale
+        )
+        for _ in 0..<emittersPerZone {
+            emitters.append(emitter)
+        }
+    }
+
+    while emitters.count < totalEmitters {
+        emitters.append(emitters.last ?? WallWashEmitterPreview(red: 255, green: 255, blue: 255, white: 0, intensity: 0.12))
+    }
+    if emitters.count > totalEmitters {
+        emitters.removeLast(emitters.count - totalEmitters)
+    }
+    return emitters
+}
+
+private func makeWallWashEmitterPreview(red: Int, green: Int, blue: Int, white: Int = 0, flashScale: CGFloat) -> WallWashEmitterPreview {
+    let baseIntensity = CGFloat(max(red, green, blue, white)) / 255.0
+    return WallWashEmitterPreview(
+        red: red,
+        green: green,
+        blue: blue,
+        white: white,
+        intensity: max(0.08, min(1.0, baseIntensity * flashScale))
+    )
+}
+
+private func wallWashProjectionPoints(
+    from emitters: [WallWashEmitterPreview],
+    count: Int
+) -> [WallWashProjectionPoint<WallWashEmitterPreview>] {
+    guard !emitters.isEmpty, count > 0 else { return [] }
+    let groupCount = min(count, emitters.count)
+    return (0..<groupCount).map { index in
+        let start = (index * emitters.count) / groupCount
+        let end = max(start + 1, ((index + 1) * emitters.count) / groupCount)
+        let bucket = Array(emitters[start..<min(end, emitters.count)])
+        let weightedIntensity = max(0.001, bucket.reduce(CGFloat.zero) { $0 + $1.intensity })
+        let averaged = WallWashEmitterPreview(
+            red: Int((bucket.reduce(CGFloat.zero) { $0 + CGFloat($1.red) * $1.intensity } / weightedIntensity).rounded()),
+            green: Int((bucket.reduce(CGFloat.zero) { $0 + CGFloat($1.green) * $1.intensity } / weightedIntensity).rounded()),
+            blue: Int((bucket.reduce(CGFloat.zero) { $0 + CGFloat($1.blue) * $1.intensity } / weightedIntensity).rounded()),
+            white: Int((bucket.reduce(CGFloat.zero) { $0 + CGFloat($1.white) * $1.intensity } / weightedIntensity).rounded()),
+            intensity: bucket.map(\.intensity).max() ?? 0.12
+        )
+        return WallWashProjectionPoint(
+            t: groupCount == 1 ? 0.5 : CGFloat(index) / CGFloat(groupCount - 1),
+            payload: averaged
+        )
+    }
+}
+
+private let beeEyeIndexedSpotColors: [Color] = [
+    dmxPreviewColor(red: 255, green: 255, blue: 255, white: 255),
+    dmxPreviewColor(red: 255, green: 0, blue: 0, white: 0),
+    dmxPreviewColor(red: 0, green: 255, blue: 0, white: 0),
+    dmxPreviewColor(red: 0, green: 0, blue: 255, white: 0),
+    dmxPreviewColor(red: 255, green: 255, blue: 0, white: 0),
+    dmxPreviewColor(red: 0, green: 255, blue: 255, white: 0),
+    dmxPreviewColor(red: 255, green: 128, blue: 0, white: 0),
+    dmxPreviewColor(red: 180, green: 0, blue: 255, white: 0),
+]
+
+private let beeEyePatternOrder = [
+    "open",
+    "spoke_star",
+    "flower",
+    "swirl",
+    "dot_star",
+    "dot_cluster",
+    "triskelion",
+    "pinwheel_flower",
+]
+
+private func steppedWheelIndex(base: Int, count: Int, rate: Double, time: TimeInterval) -> Int {
+    guard count > 0 else { return 0 }
+    guard rate > 0 else { return ((base % count) + count) % count }
+    let advanced = base + Int(floor(time * rate))
+    return ((advanced % count) + count) % count
+}
+
+private func beeEyeSpotColor(for index: Int) -> Color {
+    guard !beeEyeIndexedSpotColors.isEmpty else { return Color.white }
+    let safeIndex = ((index % beeEyeIndexedSpotColors.count) + beeEyeIndexedSpotColors.count) % beeEyeIndexedSpotColors.count
+    return beeEyeIndexedSpotColors[safeIndex]
+}
+
+private func beeEyePatternID(for index: Int) -> String {
+    guard !beeEyePatternOrder.isEmpty else { return "open" }
+    let safeIndex = ((index % beeEyePatternOrder.count) + beeEyePatternOrder.count) % beeEyePatternOrder.count
+    return beeEyePatternOrder[safeIndex]
+}
+
+private func beePatternShaderKind(for patternID: String) -> Float {
+    switch patternID {
+    case "spoke_star":
+        return 1
+    case "flower":
+        return 2
+    case "swirl":
+        return 3
+    case "dot_star":
+        return 4
+    case "dot_cluster":
+        return 5
+    case "triskelion":
+        return 6
+    case "pinwheel_flower":
+        return 7
+    default:
+        return 0
+    }
+}
+
+private enum BeeEffectMode: String {
+    case wash
+    case beam
+    case fx
+}
+
+private func slotPreviewResolvedBeeEffectMode(_ preview: SlotPreview?) -> BeeEffectMode {
+    if let raw = preview?.beeEffectMode?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+       let mode = BeeEffectMode(rawValue: raw) {
+        return mode
+    }
+
+    let washBrightness = slotBrightnessFraction(preview)
+    let spotBrightness = slotPreviewSpotBrightnessFraction(preview)
+    let patternOpen = preview?.spotPatternOpen ?? true
+
+    if !patternOpen {
+        return .fx
+    }
+    if spotBrightness > washBrightness * 1.12 {
+        return .beam
+    }
+    return .wash
+}
+
+private func slotPreviewBeeSpread(_ preview: SlotPreview?) -> CGFloat {
+    if let explicit = preview?.beeSpread {
+        return min(max(CGFloat(explicit), 0.82), 1.40)
+    }
+    switch slotPreviewResolvedBeeEffectMode(preview) {
+    case .wash:
+        return 0.92
+    case .beam:
+        return 1.00
+    case .fx:
+        return 1.18
+    }
+}
+
+private func slotPreviewBeeBackgroundLevel(_ preview: SlotPreview?) -> CGFloat {
+    if let explicit = preview?.beeBackgroundLevel {
+        return min(max(CGFloat(explicit), 0.0), 1.0)
+    }
+    switch slotPreviewResolvedBeeEffectMode(preview) {
+    case .wash:
+        return 0.86
+    case .beam:
+        return 0.40
+    case .fx:
+        return 0.62
+    }
+}
+
+private func slotPreviewBeeSoftness(_ preview: SlotPreview?) -> CGFloat {
+    if let explicit = preview?.beeSoftness {
+        return min(max(CGFloat(explicit), 0.0), 1.0)
+    }
+    switch slotPreviewResolvedBeeEffectMode(preview) {
+    case .wash:
+        return 0.76
+    case .beam:
+        return 0.28
+    case .fx:
+        return 0.54
+    }
+}
+
+private func slotPreviewBeeShapeTransition(_ preview: SlotPreview?) -> CGFloat {
+    if let explicit = preview?.beeShapeTransition {
+        return min(max(CGFloat(explicit), 0.0), 1.0)
+    }
+    switch slotPreviewResolvedBeeEffectMode(preview) {
+    case .wash:
+        return 0.22
+    case .beam:
+        return 0.16
+    case .fx:
+        return 0.44
+    }
+}
+
+private func slotPreviewIsBeeEye(_ preview: SlotPreview?) -> Bool {
+    preview?.fixtureKind == "bee_eye_pattern"
+}
+
+private func slotPreviewResolvedSpotColor(_ preview: SlotPreview, at time: TimeInterval) -> Color {
+    if slotPreviewIsBeeEye(preview), preview.spotColorCycle == true {
+        let count = max(beeEyeIndexedSpotColors.count, preview.spotColorCount ?? 0)
+        let index = steppedWheelIndex(
+            base: preview.spotColorIndex ?? 0,
+            count: count,
+            rate: preview.spotColorCycleRate ?? 0,
+            time: time
+        )
+        return beeEyeSpotColor(for: index)
+    }
+    return slotPreviewSpotBaseColor(preview)
+}
+
+private func slotPreviewResolvedPatternID(_ preview: SlotPreview, at time: TimeInterval) -> String {
+    if slotPreviewIsBeeEye(preview), preview.spotPatternCycle == true {
+        let count = max(beeEyePatternOrder.count, preview.spotPatternCount ?? 0)
+        let index = steppedWheelIndex(
+            base: preview.spotPatternIndex ?? 0,
+            count: count,
+            rate: preview.spotPatternCycleRate ?? 0,
+            time: time
+        )
+        return beeEyePatternID(for: index)
+    }
+    let raw = (preview.spotPatternId ?? "open").trimmingCharacters(in: .whitespacesAndNewlines)
+    return raw.isEmpty ? "open" : raw
+}
+
+private func slotPreviewResolvedPatternRotation(_ preview: SlotPreview, at time: TimeInterval) -> Double {
+    (preview.spotPatternRotationDegrees ?? 0) + (preview.spotPatternSpinDps ?? 0) * time
+}
+
 private func slotPreviewBaseColor(_ preview: SlotPreview) -> Color {
     dmxPreviewColor(red: preview.red, green: preview.green, blue: preview.blue, white: preview.white)
+}
+
+private func slotPreviewSpotBaseColor(_ preview: SlotPreview) -> Color {
+    dmxPreviewColor(
+        red: preview.spotRed ?? preview.red,
+        green: preview.spotGreen ?? preview.green,
+        blue: preview.spotBlue ?? preview.blue,
+        white: preview.spotWhite ?? preview.white
+    )
+}
+
+private func slotPreviewSpotBrightnessFraction(_ preview: SlotPreview?) -> CGFloat {
+    guard let preview else { return 0 }
+    return max(0, min(1, CGFloat(preview.spotBrightness ?? 0) / 255.0))
+}
+
+private func slotPreviewBeamColor(_ preview: SlotPreview) -> Color {
+    if (preview.spotBrightness ?? 0) > 10 {
+        return slotPreviewResolvedSpotColor(preview, at: 0)
+    }
+    return slotPreviewBaseColor(preview)
 }
 
 private func slotPreviewColor(_ preview: SlotPreview) -> Color {
@@ -7232,16 +13953,40 @@ private func slotPreviewStrobeRate(_ preview: SlotPreview?) -> Double {
 }
 
 private func slotPreviewStrobeFactor(_ preview: SlotPreview?, at time: TimeInterval) -> Double {
+    guard let preview, preview.enabled, preview.strobeActive, preview.strobe > 0 else { return 0 }
+    if preview.strobeExternal {
+        return 1.0
+    }
     let rate = slotPreviewStrobeRate(preview)
     guard rate > 0 else { return 0 }
-    let normalized = min(1.0, max(0.0, Double(preview?.strobe ?? 0) / 255.0))
-    let dutyCycle = max(0.12, 0.38 - normalized * 0.16)
+    let normalized = min(1.0, max(0.0, Double(preview.strobe) / 255.0))
+    let dutyCycle = max(0.10, 0.34 - normalized * 0.14)
     let phase = (time * rate).truncatingRemainder(dividingBy: 1.0)
     return phase < dutyCycle ? 1.0 : 0.0
 }
 
 private func effectivePreviewBrightness(_ preview: SlotPreview?, at time: TimeInterval) -> CGFloat {
-    slotBrightnessFraction(preview)
+    let base = slotBrightnessFraction(preview)
+    guard let preview, preview.enabled, preview.strobeActive, preview.strobe > 0 else {
+        return base
+    }
+    if preview.strobeExternal {
+        return base
+    }
+    let gated = CGFloat(slotPreviewStrobeFactor(preview, at: time))
+    return base * gated
+}
+
+private func effectiveSpotPreviewBrightness(_ preview: SlotPreview?, at time: TimeInterval) -> CGFloat {
+    let base = slotPreviewSpotBrightnessFraction(preview)
+    guard let preview, preview.enabled, preview.strobeActive, preview.strobe > 0 else {
+        return base
+    }
+    if preview.strobeExternal {
+        return base
+    }
+    let gated = CGFloat(slotPreviewStrobeFactor(preview, at: time))
+    return base * gated
 }
 
 struct UniverseChannelValue: Identifiable {
@@ -7288,48 +14033,62 @@ struct ProjectionReferenceLines: View {
             ZStack {
                 switch projection {
                 case .top:
-                    referenceLine(
-                        from: CGPoint(
-                            x: geometry.size.width * scalarNormalized(0, lower: StageWorld.minX, upper: StageWorld.maxX),
+                    let topX = projectionViewportTransform(
+                        CGPoint(
+                            x: scalarNormalized(0, lower: StageWorld.minX, upper: StageWorld.maxX),
                             y: 0
-                        ),
-                        to: CGPoint(
-                            x: geometry.size.width * scalarNormalized(0, lower: StageWorld.minX, upper: StageWorld.maxX),
-                            y: geometry.size.height
                         )
+                    )
+                    let topXEnd = projectionViewportTransform(
+                        CGPoint(
+                            x: scalarNormalized(0, lower: StageWorld.minX, upper: StageWorld.maxX),
+                            y: 1
+                        )
+                    )
+                    referenceLine(
+                        from: CGPoint(x: geometry.size.width * topX.x, y: geometry.size.height * topX.y),
+                        to: CGPoint(x: geometry.size.width * topXEnd.x, y: geometry.size.height * topXEnd.y)
                     )
 
-                    referenceLine(
-                        from: CGPoint(
+                    let topY = projectionViewportTransform(
+                        CGPoint(
                             x: 0,
-                            y: geometry.size.height * scalarNormalized(0, lower: StageWorld.minY, upper: StageWorld.maxY)
-                        ),
-                        to: CGPoint(
-                            x: geometry.size.width,
-                            y: geometry.size.height * scalarNormalized(0, lower: StageWorld.minY, upper: StageWorld.maxY)
+                            y: scalarNormalized(0, lower: StageWorld.minY, upper: StageWorld.maxY)
                         )
+                    )
+                    let topYEnd = projectionViewportTransform(
+                        CGPoint(
+                            x: 1,
+                            y: scalarNormalized(0, lower: StageWorld.minY, upper: StageWorld.maxY)
+                        )
+                    )
+                    referenceLine(
+                        from: CGPoint(x: geometry.size.width * topY.x, y: geometry.size.height * topY.y),
+                        to: CGPoint(x: geometry.size.width * topYEnd.x, y: geometry.size.height * topYEnd.y)
                     )
                 case .front, .back:
+                    let centerTop = projectionViewportTransform(CGPoint(x: 0.5, y: 0))
+                    let centerBottom = projectionViewportTransform(CGPoint(x: 0.5, y: 1))
                     referenceLine(
-                        from: CGPoint(
-                            x: geometry.size.width * 0.5,
-                            y: 0
-                        ),
-                        to: CGPoint(
-                            x: geometry.size.width * 0.5,
-                            y: geometry.size.height
-                        )
+                        from: CGPoint(x: geometry.size.width * centerTop.x, y: geometry.size.height * centerTop.y),
+                        to: CGPoint(x: geometry.size.width * centerBottom.x, y: geometry.size.height * centerBottom.y)
                     )
                 case .side:
-                    referenceLine(
-                        from: CGPoint(
+                    let sideStart = projectionViewportTransform(
+                        CGPoint(
                             x: 0,
-                            y: geometry.size.height * (1.0 - scalarNormalized(0, lower: StageWorld.minZ, upper: StageWorld.maxZ))
-                        ),
-                        to: CGPoint(
-                            x: geometry.size.width,
-                            y: geometry.size.height * (1.0 - scalarNormalized(0, lower: StageWorld.minZ, upper: StageWorld.maxZ))
+                            y: 1.0 - scalarNormalized(0, lower: StageWorld.minZ, upper: StageWorld.maxZ)
                         )
+                    )
+                    let sideEnd = projectionViewportTransform(
+                        CGPoint(
+                            x: 1,
+                            y: 1.0 - scalarNormalized(0, lower: StageWorld.minZ, upper: StageWorld.maxZ)
+                        )
+                    )
+                    referenceLine(
+                        from: CGPoint(x: geometry.size.width * sideStart.x, y: geometry.size.height * sideStart.y),
+                        to: CGPoint(x: geometry.size.width * sideEnd.x, y: geometry.size.height * sideEnd.y)
                     )
                 }
             }
@@ -7351,9 +14110,10 @@ struct ProjectionReferenceLines: View {
 private func worldProjectedPoint(_ world: SlotWorldPosition, projection: StageProjection) -> CGPoint {
     let frontMirrored = UserDefaults.standard.bool(forKey: frontProjectionMirrorDefaultsKey)
     let topRotation = UserDefaults.standard.integer(forKey: topProjectionRotationDefaultsKey)
+    let rawPoint: CGPoint
     switch projection {
     case .top:
-        return rotatedTopProjectionPoint(
+        rawPoint = rotatedTopProjectionPoint(
             CGPoint(
                 x: scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
                 y: scalarNormalized(world.y, lower: StageWorld.minY, upper: StageWorld.maxY)
@@ -7361,31 +14121,33 @@ private func worldProjectedPoint(_ world: SlotWorldPosition, projection: StagePr
             quarterTurns: topRotation
         )
     case .front:
-        return CGPoint(
+        rawPoint = CGPoint(
             x: frontMirrored
                 ? 1.0 - scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX)
                 : scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
             y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
         )
     case .back:
-        return CGPoint(
+        rawPoint = CGPoint(
             x: 1.0 - scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
             y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
         )
     case .side:
-        return CGPoint(
+        rawPoint = CGPoint(
             x: scalarNormalized(world.y, lower: StageWorld.minY, upper: StageWorld.maxY),
             y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
         )
     }
+    return projectionViewportTransform(rawPoint)
 }
 
 private func worldProjectedBeamPoint(_ world: SlotWorldPosition, projection: StageProjection) -> CGPoint {
     let frontMirrored = UserDefaults.standard.bool(forKey: frontProjectionMirrorDefaultsKey)
     let topRotation = UserDefaults.standard.integer(forKey: topProjectionRotationDefaultsKey)
+    let rawPoint: CGPoint
     switch projection {
     case .top:
-        return rotatedTopProjectionPoint(
+        rawPoint = rotatedTopProjectionPoint(
             CGPoint(
                 x: scalarProjected(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
                 y: scalarProjected(world.y, lower: StageWorld.minY, upper: StageWorld.maxY)
@@ -7393,23 +14155,24 @@ private func worldProjectedBeamPoint(_ world: SlotWorldPosition, projection: Sta
             quarterTurns: topRotation
         )
     case .front:
-        return CGPoint(
+        rawPoint = CGPoint(
             x: frontMirrored
                 ? 1.0 - scalarProjected(world.x, lower: StageWorld.minX, upper: StageWorld.maxX)
                 : scalarProjected(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
             y: 1.0 - scalarProjected(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
         )
     case .back:
-        return CGPoint(
+        rawPoint = CGPoint(
             x: 1.0 - scalarProjected(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
             y: 1.0 - scalarProjected(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
         )
     case .side:
-        return CGPoint(
+        rawPoint = CGPoint(
             x: scalarProjected(world.y, lower: StageWorld.minY, upper: StageWorld.maxY),
             y: 1.0 - scalarProjected(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
         )
     }
+    return projectionViewportTransform(rawPoint)
 }
 
 private func worldProjectedAbsolutePoint(_ world: SlotWorldPosition, projection: StageProjection, size: CGSize) -> CGPoint {
@@ -7429,8 +14192,59 @@ private func worldOrientationEndpoint(_ worldOrigin: SlotWorldPosition, distance
         y: worldOrigin.y + cos(yawRadians) * distance,
         z: worldOrigin.z,
         yawDegrees: worldOrigin.yawDegrees,
-        pitchDegrees: worldOrigin.pitchDegrees
+        pitchDegrees: worldOrigin.pitchDegrees,
+        rollDegrees: worldOrigin.rollDegrees
     )
+}
+
+private func wallWashBarWorldEndpoints(_ worldOrigin: SlotWorldPosition, halfLength: Double) -> (start: SlotWorldPosition, end: SlotWorldPosition) {
+    let axis = wallWashBarAxisVector(worldOrigin, halfLength: halfLength)
+    let start = SlotWorldPosition(
+        x: worldOrigin.x - axis.x,
+        y: worldOrigin.y - axis.y,
+        z: worldOrigin.z - axis.z,
+        yawDegrees: worldOrigin.yawDegrees,
+        pitchDegrees: worldOrigin.pitchDegrees,
+        rollDegrees: worldOrigin.rollDegrees,
+        panFlip: worldOrigin.panFlip,
+        tiltFlip: worldOrigin.tiltFlip
+    )
+    let end = SlotWorldPosition(
+        x: worldOrigin.x + axis.x,
+        y: worldOrigin.y + axis.y,
+        z: worldOrigin.z + axis.z,
+        yawDegrees: worldOrigin.yawDegrees,
+        pitchDegrees: worldOrigin.pitchDegrees,
+        rollDegrees: worldOrigin.rollDegrees,
+        panFlip: worldOrigin.panFlip,
+        tiltFlip: worldOrigin.tiltFlip
+    )
+    return (start, end)
+}
+
+private func wallWashBarAxisVector(_ worldOrigin: SlotWorldPosition, halfLength: Double) -> (x: Double, y: Double, z: Double) {
+    let rollRadians = worldOrigin.rollDegrees * .pi / 180.0
+    let pitchRadians = worldOrigin.pitchDegrees * .pi / 180.0
+    let yawRadians = worldOrigin.yawDegrees * .pi / 180.0
+
+    var axis = (x: halfLength, y: 0.0, z: 0.0)
+    axis = rotateAroundY(axis, radians: rollRadians)
+    axis = rotateAroundX(axis, radians: pitchRadians)
+    axis = rotateAroundZ(axis, radians: -yawRadians)
+    return axis
+}
+
+private func sceneWallWashSpreadAxis(_ worldOrigin: SlotWorldPosition) -> SCNVector3 {
+    let axis = wallWashBarAxisVector(worldOrigin, halfLength: 45.0)
+    return sceneVectorNormalize(SCNVector3(CGFloat(axis.x / 100.0), CGFloat(axis.z / 100.0), CGFloat(-axis.y / 100.0)))
+}
+
+private func simdWallWashSpreadAxis(_ worldOrigin: SlotWorldPosition) -> SIMD3<Float> {
+    let axis = wallWashBarAxisVector(worldOrigin, halfLength: 45.0)
+    let vector = SIMD3<Float>(Float(axis.x / 100.0), Float(axis.z / 100.0), Float(-axis.y / 100.0))
+    let length = simd_length(vector)
+    guard length > 0.0001 else { return SIMD3<Float>(1, 0, 0) }
+    return vector / length
 }
 
 private func projectedBeamTarget(origin: CGPoint, worldOrigin: SlotWorldPosition, mountYawDegrees: Double, mountPitchDegrees: Double, preview: SlotPreview, beamKind: StageFixtureBeam.BeamKind, size: CGSize, projection: StageProjection) -> CGPoint {
@@ -7522,6 +14336,14 @@ private func rotateAroundX(_ vector: (x: Double, y: Double, z: Double), radians:
         x: vector.x,
         y: vector.y * cos(radians) - vector.z * sin(radians),
         z: vector.y * sin(radians) + vector.z * cos(radians)
+    )
+}
+
+private func rotateAroundY(_ vector: (x: Double, y: Double, z: Double), radians: Double) -> (x: Double, y: Double, z: Double) {
+    (
+        x: vector.x * cos(radians) + vector.z * sin(radians),
+        y: vector.y,
+        z: -vector.x * sin(radians) + vector.z * cos(radians)
     )
 }
 
@@ -8430,7 +15252,7 @@ struct BeatBeamDMXNativeApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("BeatBeam DMX") {
+        WindowGroup(beatBeamAppDisplayName) {
             ContentView()
                 .environmentObject(model)
                 .preferredColorScheme(.dark)
@@ -8441,7 +15263,7 @@ struct BeatBeamDMXNativeApp: App {
                 }
         }
 
-        WindowGroup("Map Preview", id: "map-preview") {
+        WindowGroup("\(beatBeamAppDisplayName) Map Preview", id: "map-preview") {
             MapPreviewWindowView()
                 .environmentObject(model)
                 .preferredColorScheme(.dark)

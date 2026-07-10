@@ -212,6 +212,135 @@
       ]
     },
     {
+      "id": "generic_smart_bee_eye_pattern_moving_head",
+      "manufacturer": "Generic",
+      "model": "Smart Bee Eye + Pattern Moving Head",
+      "pan_range": 540,
+      "tilt_range": 180,
+      "beam_layout": {
+        "type": "rings",
+        "beams_by_ring": [1, 6]
+      },
+      "modes": [
+        {
+          "name": "15ch",
+          "footprint": 15,
+          "channels": [
+            { "offset": 1, "name": "Pan", "type": "pan" },
+            { "offset": 2, "name": "Tilt", "type": "tilt" },
+            { "offset": 3, "name": "Pan/Tilt Speed", "type": "pan_tilt_speed" },
+            { "offset": 4, "name": "Spot Dim", "type": "custom", "control": "spot_dimmer", "default": 0 },
+            {
+              "offset": 5,
+              "name": "Spot Strobe",
+              "type": "custom",
+              "control": "spot_strobe",
+              "default": 0,
+              "ranges": [
+                { "from": 0, "to": 9, "name": "Off" },
+                { "from": 10, "to": 255, "name": "Slow to Fast" }
+              ]
+            },
+            {
+              "offset": 6,
+              "name": "Color Disk",
+              "type": "custom",
+              "control": "color_disk",
+              "default": 0,
+              "indexed_colors": [
+                { "name": "White", "value": 0 },
+                { "name": "Red", "value": 5 },
+                { "name": "Green", "value": 10 },
+                { "name": "Blue", "value": 15 },
+                { "name": "Yellow", "value": 20 },
+                { "name": "Cyan", "value": 25 },
+                { "name": "Orange", "value": 30 },
+                { "name": "Purple", "value": 35 }
+              ],
+              "ranges": [
+                { "from": 0, "to": 4, "name": "White" },
+                { "from": 5, "to": 9, "name": "Red" },
+                { "from": 10, "to": 14, "name": "Green" },
+                { "from": 15, "to": 19, "name": "Blue" },
+                { "from": 20, "to": 24, "name": "Yellow" },
+                { "from": 25, "to": 29, "name": "Cyan" },
+                { "from": 30, "to": 34, "name": "Orange" },
+                { "from": 35, "to": 127, "name": "Purple / Hold Last Color" },
+                { "from": 128, "to": 255, "name": "Color Rotate Fast to Slow" }
+              ]
+            },
+            {
+              "offset": 7,
+              "name": "Pattern",
+              "type": "custom",
+              "control": "pattern_plate",
+              "default": 0,
+              "indexed_patterns": [
+                { "name": "Open", "value": 0 },
+                { "name": "Spoke Star", "value": 5 },
+                { "name": "Flower", "value": 10 },
+                { "name": "Swirl", "value": 15 },
+                { "name": "Dot Star", "value": 20 },
+                { "name": "Dot Cluster", "value": 25 },
+                { "name": "Triskelion", "value": 30 },
+                { "name": "Pinwheel Flower", "value": 35 }
+              ],
+              "ranges": [
+                { "from": 0, "to": 4, "name": "Open" },
+                { "from": 5, "to": 9, "name": "Spoke Star" },
+                { "from": 10, "to": 14, "name": "Flower" },
+                { "from": 15, "to": 19, "name": "Swirl" },
+                { "from": 20, "to": 24, "name": "Dot Star" },
+                { "from": 25, "to": 29, "name": "Dot Cluster" },
+                { "from": 30, "to": 34, "name": "Triskelion" },
+                { "from": 35, "to": 127, "name": "Pinwheel Flower / Hold Last Pattern" },
+                { "from": 128, "to": 255, "name": "Pattern Rotate Fast to Slow" }
+              ]
+            },
+            {
+              "offset": 8,
+              "name": "Z Rotate",
+              "type": "custom",
+              "control": "z_rotation",
+              "default": 0,
+              "ranges": [
+                { "from": 0, "to": 127, "name": "0 to 360 Degrees" },
+                { "from": 128, "to": 191, "name": "Rotate Slow to Fast" },
+                { "from": 192, "to": 255, "name": "Rotate Fast to Slow" }
+              ]
+            },
+            { "offset": 9, "name": "Bee Eye Dimmer", "type": "intensity" },
+            {
+              "offset": 10,
+              "name": "Bee Eye Strobe",
+              "type": "strobe",
+              "ranges": [
+                { "from": 0, "to": 9, "name": "Off" },
+                { "from": 10, "to": 255, "name": "Slow to Fast" }
+              ]
+            },
+            { "offset": 11, "name": "Red", "type": "color", "component": "red" },
+            { "offset": 12, "name": "Green", "type": "color", "component": "green" },
+            { "offset": 13, "name": "Blue", "type": "color", "component": "blue" },
+            { "offset": 14, "name": "White", "type": "color", "component": "white" },
+            {
+              "offset": 15,
+              "name": "Macro",
+              "type": "custom",
+              "control": "macro_function",
+              "default": 0,
+              "ranges": [
+                { "from": 0, "to": 50, "name": "Manual Channels 1 to 14" },
+                { "from": 51, "to": 150, "name": "Auto Run" },
+                { "from": 151, "to": 250, "name": "Sound" },
+                { "from": 251, "to": 255, "name": "Reset" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "shehds_led_wash_7x12w_rgbw_moving_head",
       "manufacturer": "Shehds",
       "model": "LED Wash 7x12W RGBW Moving Head Lighting",

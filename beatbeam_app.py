@@ -33,9 +33,14 @@ from enttec_open_dmx import (
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
+APP_NAME = os.environ.get("BEATBEAM_APP_NAME") or "BeatBeam DMX"
+APP_SLUG = os.environ.get("BEATBEAM_APP_SLUG") or "".join(ch for ch in APP_NAME if ch.isalnum()) or "BeatBeamDMX"
 CONFIG_PATH = Path(os.environ.get("BEATBEAM_CONFIG_PATH") or (ROOT / "beatbeam_config.json"))
+TRANSPORT_CONFIG_PATH = Path(
+    os.environ.get("BEATBEAM_TRANSPORT_CONFIG_PATH") or (ROOT / "beatbeam_transport.json")
+)
 REMOTE_ACCESS_PATH = Path(os.environ.get("BEATBEAM_REMOTE_ACCESS_PATH") or (ROOT / "beatbeam_remote.json"))
-TRIGGER_LOG_PATH = Path("/tmp/beatbeam-trigger.log")
+TRIGGER_LOG_PATH = Path(os.environ.get("BEATBEAM_TRIGGER_LOG_PATH") or "/tmp/beatbeam-trigger.log")
 TRACK_PREVIEW_CACHE_DIR = Path(
     os.environ.get("BEATBEAM_TRACK_PREVIEW_CACHE_DIR")
     or (Path.home() / "Library/Application Support" / "BeatBeamDMX" / "track_preview_cache")
@@ -47,7 +52,9 @@ REMOTE_ADDRESS_CACHE_TTL = 3.0
 DEFAULT_HTTP_PORT = 8780
 DEFAULT_OSC_PORT = 4461
 DEFAULT_DMX_FPS = 30.0
-API_SCHEMA_VERSION = 3
+API_SCHEMA_VERSION = 4
+DEFAULT_MANUAL_BPM = 124.0
+DEFAULT_MANUAL_PHRASE = "verse"
 FIXTURE_LIBRARY = load_fixture_profiles()
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = DEFAULT_HTTP_PORT
@@ -204,6 +211,11 @@ FIXTURE_PRESETS = {
         "mode": "8ch",
         "color_source": "phrase",
     },
+    "generic_smart_bee_eye_pattern_moving_head": {
+        "label_base": "Bee Eye Head",
+        "mode": "15ch",
+        "color_source": "phrase",
+    },
     "shehds_led_wash_7x12w_rgbw_moving_head": {
         "label_base": "Moving Head",
         "mode": "15ch",
@@ -228,6 +240,21 @@ WW_PURPLE = (180, 0, 255)
 WW_CYAN = (0, 255, 255)
 WW_AMBER = (255, 120, 0)
 WW_RED = (255, 0, 0)
+
+INDEXED_COLOR_RGBW = {
+    "white": (255, 255, 255, 255),
+    "open": (255, 255, 255, 255),
+    "red": (255, 0, 0, 0),
+    "green": (0, 255, 0, 0),
+    "blue": (0, 0, 255, 0),
+    "yellow": (255, 255, 0, 0),
+    "cyan": (0, 255, 255, 0),
+    "orange": (255, 128, 0, 0),
+    "amber": (255, 120, 0, 0),
+    "purple": (180, 0, 255, 0),
+    "pink": (255, 0, 180, 0),
+}
+BEE_EYE_PATTERN_FIXTURE_ID = "generic_smart_bee_eye_pattern_moving_head"
 WW_WARM_GLOW_LOW = (80, 20, 0)
 WW_WARM_GLOW_MID = (140, 50, 0)
 WW_WARM_GLOW_HIGH = (220, 90, 0)
@@ -2130,6 +2157,244 @@ def mode_capabilities(mode):
     }
 
 
+def mode_custom_controls(mode):
+    if not isinstance(mode, dict):
+        return []
+    controls = []
+    seen = set()
+    for channel in mode.get("channels", []):
+        if channel.get("type") != "custom":
+            continue
+        control_id = str(
+            channel.get("control")
+            or channel.get("id")
+            or channel.get("name")
+            or f"custom_{channel.get('offset', 0)}"
+        ).strip()
+        if not control_id or control_id in seen:
+            continue
+        seen.add(control_id)
+        controls.append(
+            {
+                "id": control_id,
+                "name": str(channel.get("name") or control_id),
+                "offset": int(channel.get("offset", 0) or 0),
+                "default": clamp_dmx(channel.get("default", 0) or 0),
+                "ranges": list(channel.get("ranges") or []),
+            }
+        )
+    return controls
+
+
+def custom_control_channel(mode, control_id):
+    if not isinstance(mode, dict):
+        return None
+    requested = str(control_id or "").strip().lower()
+    if not requested:
+        return None
+    for channel in mode.get("channels", []):
+        if channel.get("type") != "custom":
+            continue
+        current = str(
+            channel.get("control")
+            or channel.get("id")
+            or channel.get("name")
+            or ""
+        ).strip().lower()
+        if current == requested:
+            return channel
+    return None
+
+
+def indexed_color_rgbw(channel, value):
+    if not isinstance(channel, dict):
+        return None
+    entries = list(channel.get("indexed_colors") or [])
+    if not entries:
+        return None
+    try:
+        dmx_value = clamp_dmx(value)
+    except Exception:
+        dmx_value = 0
+    chosen = None
+    for entry in entries:
+        try:
+            entry_value = clamp_dmx(entry.get("value", 0))
+        except Exception:
+            continue
+        if entry_value <= dmx_value:
+            chosen = entry
+        else:
+            break
+    if chosen is None:
+        chosen = entries[0]
+    name = str(chosen.get("name", "")).strip().lower()
+    return INDEXED_COLOR_RGBW.get(name)
+
+
+def indexed_color_value_for_rgbw(channel, rgbw):
+    if not isinstance(channel, dict):
+        return None
+    entries = list(channel.get("indexed_colors") or [])
+    if not entries:
+        return None
+    try:
+        red = clamp_dmx(rgbw[0])
+        green = clamp_dmx(rgbw[1])
+        blue = clamp_dmx(rgbw[2])
+        white = clamp_dmx(rgbw[3] if len(rgbw) > 3 else 0)
+    except Exception:
+        return None
+    if white >= max(red, green, blue) + 32 or white >= 170:
+        for entry in entries:
+            if str(entry.get("name", "")).strip().lower() in ("white", "open"):
+                return clamp_dmx(entry.get("value", 0))
+    best_value = None
+    best_distance = None
+    for entry in entries:
+        name = str(entry.get("name", "")).strip().lower()
+        reference = INDEXED_COLOR_RGBW.get(name)
+        if not reference:
+            continue
+        rr, rg, rb, rw = reference
+        distance = (
+            (red - rr) ** 2
+            + (green - rg) ** 2
+            + (blue - rb) ** 2
+            + ((white - rw) * 0.8) ** 2
+        )
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_value = clamp_dmx(entry.get("value", 0))
+    return best_value
+
+
+def preview_token(text, fallback="item"):
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return fallback
+    pieces = []
+    current = []
+    for char in raw:
+        if char.isalnum():
+            current.append(char)
+        elif current:
+            pieces.append("".join(current))
+            current = []
+    if current:
+        pieces.append("".join(current))
+    token = "_".join(piece for piece in pieces if piece)
+    return token or fallback
+
+
+def indexed_wheel_entries(channel, key):
+    if not isinstance(channel, dict):
+        return []
+    entries = []
+    for index, entry in enumerate(list(channel.get(key) or [])):
+        label = str(entry.get("name") or f"Item {index + 1}").strip() or f"Item {index + 1}"
+        try:
+            value = clamp_dmx(entry.get("value", 0))
+        except Exception:
+            value = 0
+        entries.append(
+            {
+                "index": index,
+                "value": value,
+                "label": label,
+                "token": preview_token(label, fallback=f"item_{index + 1}"),
+            }
+        )
+    return entries
+
+
+def indexed_wheel_cycle_rate(value):
+    dmx_value = clamp_dmx(value)
+    if dmx_value < 128:
+        return 0.0
+    normalized = (dmx_value - 128) / 127.0
+    return 5.6 - normalized * 4.8
+
+
+def indexed_wheel_preview_state(channel, value, key):
+    entries = indexed_wheel_entries(channel, key)
+    if not entries:
+        return None
+    dmx_value = clamp_dmx(value)
+    if dmx_value < 128:
+        chosen = entries[0]
+        for entry in entries:
+            if entry["value"] <= dmx_value:
+                chosen = entry
+            else:
+                break
+        return {
+            "index": chosen["index"],
+            "label": chosen["label"],
+            "token": chosen["token"],
+            "cycle": False,
+            "cycle_rate": 0.0,
+            "count": len(entries),
+        }
+    base = entries[0]
+    return {
+        "index": base["index"],
+        "label": base["label"],
+        "token": base["token"],
+        "cycle": True,
+        "cycle_rate": indexed_wheel_cycle_rate(dmx_value),
+        "count": len(entries),
+    }
+
+
+def preview_spin_state(value):
+    dmx_value = clamp_dmx(value)
+    if dmx_value <= 127:
+        return {
+            "degrees": (dmx_value / 127.0) * 360.0,
+            "spin_dps": 0.0,
+        }
+    if dmx_value <= 191:
+        normalized = (dmx_value - 128) / 63.0
+        return {
+            "degrees": 0.0,
+            "spin_dps": 28.0 + normalized * 164.0,
+        }
+    normalized = (dmx_value - 192) / 63.0
+    return {
+        "degrees": 0.0,
+        "spin_dps": -(184.0 - normalized * 160.0),
+    }
+
+
+def fixture_preview_kind(fixture, mode):
+    fixture_id = str((fixture or {}).get("id") or "").strip()
+    if fixture_id == BEE_EYE_PATTERN_FIXTURE_ID:
+        return "bee_eye_pattern"
+    control_ids = {
+        str(control.get("id") or "").strip()
+        for control in mode_custom_controls(mode or {})
+    }
+    if {"spot_dimmer", "color_disk", "pattern_plate", "z_rotation"}.issubset(control_ids):
+        return "bee_eye_pattern"
+    return "generic"
+
+
+def indexed_wheel_value_for_token(channel, key, token, fallback=None):
+    requested = preview_token(token, fallback="item")
+    for entry in indexed_wheel_entries(channel, key):
+        if entry["token"] == requested:
+            return int(entry["value"])
+    return fallback
+
+
+def bee_eye_rotation_dmx(speed_unit, direction=1):
+    speed = clamp_unit(speed_unit)
+    if direction >= 0:
+        return clamp_dmx(round(128 + speed * 63))
+    return clamp_dmx(round(255 - speed * 63))
+
+
 def wave_sine(position):
     return math.sin(position * math.tau)
 
@@ -2304,6 +2569,71 @@ AUTO_SHOW_PHRASE_OVERRIDES = {
     "outro": "Outro",
 }
 
+TRANSPORT_SOURCE_MODES = {
+    "auto",
+    "external_osc",
+    "manual_tap",
+}
+
+MANUAL_TRANSPORT_PROFILES = {
+    "intro": {
+        "energy": 0.24,
+        "low": 0.18,
+        "mid": 0.22,
+        "high": 0.16,
+        "state": "calm",
+    },
+    "verse": {
+        "energy": 0.48,
+        "low": 0.40,
+        "mid": 0.38,
+        "high": 0.28,
+        "state": "neutral",
+    },
+    "build": {
+        "energy": 0.66,
+        "low": 0.58,
+        "mid": 0.54,
+        "high": 0.42,
+        "state": "attack",
+    },
+    "chorus": {
+        "energy": 0.78,
+        "low": 0.66,
+        "mid": 0.62,
+        "high": 0.50,
+        "state": "sustain",
+    },
+    "drop": {
+        "energy": 0.92,
+        "low": 0.84,
+        "mid": 0.74,
+        "high": 0.58,
+        "state": "attack",
+    },
+    "down": {
+        "energy": 0.38,
+        "low": 0.30,
+        "mid": 0.28,
+        "high": 0.20,
+        "state": "breakdown",
+    },
+    "break": {
+        "energy": 0.30,
+        "low": 0.22,
+        "mid": 0.24,
+        "high": 0.18,
+        "state": "calm",
+    },
+    "outro": {
+        "energy": 0.34,
+        "low": 0.24,
+        "mid": 0.28,
+        "high": 0.20,
+        "state": "breakdown",
+    },
+}
+
 
 def auto_show_phrase_override_name(value):
     normalized = str(value or "none").strip().lower()
@@ -2317,6 +2647,125 @@ def auto_show_phrase_override_label(value):
         auto_show_phrase_override_name(value),
         AUTO_SHOW_PHRASE_OVERRIDES["none"],
     )
+
+
+def manual_transport_phrase_name(value):
+    normalized = auto_show_phrase_override_name(value)
+    return DEFAULT_MANUAL_PHRASE if normalized == "none" else normalized
+
+
+def manual_transport_phrase_profile(value):
+    phrase_name = manual_transport_phrase_name(value)
+    return MANUAL_TRANSPORT_PROFILES.get(
+        phrase_name,
+        MANUAL_TRANSPORT_PROFILES[DEFAULT_MANUAL_PHRASE],
+    )
+
+
+def manual_transport_trigger(phase, width=0.12, scale=1.0):
+    try:
+        phase_value = float(phase) % 1.0
+    except (TypeError, ValueError):
+        return 0.0
+    pulse_width = max(0.02, float(width))
+    if phase_value >= pulse_width:
+        return 0.0
+    return clamp_unit((1.0 - (phase_value / pulse_width)) * float(scale))
+
+
+def manual_transport_waveform_state(phrase, beat_value):
+    phrase_name = manual_transport_phrase_name(phrase)
+    profile = manual_transport_phrase_profile(phrase_name)
+    beat_floor = int(math.floor(float(beat_value or 0.0)))
+    beat_phase = float(beat_value or 0.0) % 1.0
+    half_phase = (float(beat_value or 0.0) * 2.0) % 1.0
+    bar_phase = float(beat_value or 0.0) % 8.0
+    beat_index = beat_floor % 4 + 1
+
+    kick = manual_transport_trigger(beat_phase, width=0.14, scale=1.0)
+    snare = manual_transport_trigger(beat_phase, width=0.12, scale=0.92) if beat_index in (2, 4) else 0.0
+    hihat = manual_transport_trigger(half_phase, width=0.09, scale=0.68)
+
+    low = clamp_unit(float(profile["low"]) + kick * 0.28 + snare * 0.05)
+    mid = clamp_unit(float(profile["mid"]) + snare * 0.22 + kick * 0.04)
+    high = clamp_unit(float(profile["high"]) + hihat * 0.22 + snare * 0.04)
+    energy = clamp_unit(
+        float(profile["energy"])
+        + kick * 0.12
+        + snare * 0.08
+        + hihat * 0.04
+    )
+
+    anticipation_boost = 0.0
+    if phrase_name in {"build", "chorus", "drop"} and bar_phase >= 6.0:
+        anticipation_boost = clamp_unit((bar_phase - 6.0) / 2.0) * 0.12
+
+    lookahead_2 = {
+        "low": clamp_unit(low + anticipation_boost * 0.55),
+        "mid": clamp_unit(mid + anticipation_boost * 0.70),
+        "high": clamp_unit(high + anticipation_boost * 0.45),
+    }
+    lookahead_4 = {
+        "low": clamp_unit(low + anticipation_boost * 0.85),
+        "mid": clamp_unit(mid + anticipation_boost),
+        "high": clamp_unit(high + anticipation_boost * 0.65),
+    }
+
+    state_name = str(profile.get("state") or "neutral")
+    sustained_high = state_name == "sustain"
+    attack = state_name == "attack"
+    calm = state_name == "calm"
+    breakdown = state_name == "breakdown"
+    mood_hint = None
+    if attack or sustained_high:
+        mood_hint = 1.0
+    elif calm or breakdown:
+        mood_hint = 3.0
+    else:
+        mood_hint = 2.0
+
+    transient = clamp_unit(max(kick, snare * 0.92, hihat * 0.64))
+    volatility = clamp_unit(0.10 + hihat * 0.22 + anticipation_boost * 1.2)
+    short_avg = clamp_unit((energy * 0.78) + max(kick, snare) * 0.08)
+    mid_avg = clamp_unit((energy * 0.66) + max(kick, snare) * 0.05)
+    long_avg = clamp_unit((energy * 0.54) + anticipation_boost * 0.08)
+
+    return {
+        "energy": energy,
+        "bands": {
+            "low": low,
+            "mid": mid,
+            "high": high,
+        },
+        "lookahead": {
+            "2": lookahead_2,
+            "4": lookahead_4,
+        },
+        "analysis": {
+            "instant": energy,
+            "short_avg": short_avg,
+            "mid_avg": mid_avg,
+            "long_avg": long_avg,
+            "lift": clamp_unit(max(0.0, energy - long_avg)),
+            "crest": clamp_unit(max(0.0, energy - short_avg)),
+            "transient": transient,
+            "volatility": volatility,
+            "sustained_high": sustained_high,
+            "attack": attack,
+            "calm": calm,
+            "breakdown": breakdown,
+            "mood_hint": mood_hint,
+            "state": state_name,
+        },
+        "drums": {
+            "kick": kick,
+            "snare": snare,
+            "hihat": hihat,
+            "low_onset": kick,
+            "mid_onset": snare,
+            "high_onset": hihat,
+        },
+    }
 
 
 def track_color_signature(track_title=None, track_artist=None, track_album=None):
@@ -4073,6 +4522,25 @@ def auto_show_moving_rhythm_mode(section, base_mode, style_name, osc, slot_conte
         active_window = active_window or (section in {"build", "chorus", "drop"} and (energy >= 0.66 or kick >= 0.36 or snare >= 0.36))
         peak_window = peak_window or (section in {"chorus", "drop"} and (kick >= 0.48 or snare >= 0.50 or hihat >= 0.54))
         surge_window = surge_window or (section in {"build", "chorus", "drop"} and (kick >= 0.54 or snare >= 0.56))
+
+    # Keep restrained dimmer FX actually restrained. The previous logic could
+    # label a cue as Soft Pulse / Alternate Whole while moving-head slots still
+    # escalated to Beat Flash or faster modes inside chorus/build.
+    if base_mode == "soft_pulse":
+        if low_override or activity["breakdown"] or activity["calm"]:
+            return "soft_pulse"
+        if section in {"build", "chorus"} and not active_window:
+            return "soft_pulse"
+        if section == "drop" and not active_window:
+            return "soft_pulse"
+    if base_mode == "alternate_whole":
+        if low_override:
+            return "alternate_whole" if section in {"build", "chorus", "drop"} else "soft_pulse"
+        if section in {"build", "chorus"} and not active_window:
+            return "alternate_whole"
+        if section == "drop" and not active_window:
+            return "alternate_whole"
+
     if low_override:
         if section == "drop":
             if base_mode in {"snake", "snake_whole", "chase", "chase_whole", "beat_flash", "drop_blinder", "tremolo_dimmer", "double_hit", "gallop"}:
@@ -4113,6 +4581,10 @@ def auto_show_moving_rhythm_mode(section, base_mode, style_name, osc, slot_conte
             return "breathing"
         if activity["calm"] and not high_override and base_mode in {"snake", "snake_whole", "chase", "chase_whole", "beat_flash", "strong_pulse", "alternate_whole", "double_hit", "gallop", "pivot"}:
             return "soft_pulse"
+        if base_mode == "soft_pulse":
+            if not active_window:
+                return "soft_pulse"
+            return "alternate_whole" if not surge_window else "chase_whole"
         if base_mode in {"alternate_whole", "pivot"}:
             return base_mode if active_window else "soft_pulse"
         if base_mode == "double_hit":
@@ -4132,7 +4604,7 @@ def auto_show_moving_rhythm_mode(section, base_mode, style_name, osc, slot_conte
                 return "snake"
             if active_window:
                 return "chase" if surge_window else "chase_whole"
-            return "beat_flash"
+            return "soft_pulse" if base_mode == "soft_pulse" else "beat_flash"
         return base_mode
     if section == "drop":
         if activity["breakdown"]:
@@ -6251,6 +6723,313 @@ class OscListener:
         return self.time_seconds
 
 
+class TransportController:
+    def __init__(self, osc_listener):
+        self.osc = osc_listener
+        self.lock = osc_listener.lock
+        self.decks = osc_listener.decks
+        self._lock = threading.Lock()
+        self.config = self._load_config()
+        self.tap_times = deque(maxlen=8)
+        self.manual_clock_anchor_at = None
+        self.manual_clock_beat_at_anchor = 0.0
+        self.manual_clock_time_at_anchor = 0.0
+        self.manual_tap_locked = False
+        self.last_tap_at = None
+
+    @staticmethod
+    def default_config():
+        return {
+            "mode": "auto",
+            "manual_bpm": DEFAULT_MANUAL_BPM,
+            "manual_phrase": DEFAULT_MANUAL_PHRASE,
+            "idle_animation_enabled": True,
+        }
+
+    def start(self):
+        self.osc.start()
+
+    def stop(self):
+        self.osc.stop()
+
+    def _clean_config(self, config):
+        defaults = self.default_config()
+        cleaned = {**defaults, **(config or {})}
+        mode = str(cleaned.get("mode", defaults["mode"])).strip().lower()
+        if mode not in TRANSPORT_SOURCE_MODES:
+            mode = defaults["mode"]
+        cleaned["mode"] = mode
+        try:
+            cleaned["manual_bpm"] = max(
+                40.0,
+                min(220.0, float(cleaned.get("manual_bpm", defaults["manual_bpm"]))),
+            )
+        except (TypeError, ValueError):
+            cleaned["manual_bpm"] = defaults["manual_bpm"]
+        cleaned["manual_phrase"] = manual_transport_phrase_name(
+            cleaned.get("manual_phrase", defaults["manual_phrase"])
+        )
+        cleaned["idle_animation_enabled"] = bool(
+            cleaned.get("idle_animation_enabled", defaults["idle_animation_enabled"])
+        )
+        return cleaned
+
+    def _load_config(self):
+        defaults = self.default_config()
+        if not TRANSPORT_CONFIG_PATH.exists():
+            return defaults
+        try:
+            payload = json.loads(TRANSPORT_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return defaults
+        return self._clean_config(payload)
+
+    def _save_config(self, config):
+        cleaned = self._clean_config(config)
+        TRANSPORT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = TRANSPORT_CONFIG_PATH.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(cleaned, indent=2), encoding="utf-8")
+        tmp_path.replace(TRANSPORT_CONFIG_PATH)
+
+    def _recent_tap_count_locked(self, now):
+        return len([tap for tap in self.tap_times if now - tap <= 2.8])
+
+    def _ensure_manual_clock_locked(self, now):
+        if self.manual_clock_anchor_at is None:
+            self.manual_clock_anchor_at = float(now)
+            self.manual_clock_beat_at_anchor = 0.0
+            self.manual_clock_time_at_anchor = 0.0
+
+    def _manual_clock_state_locked(self, now):
+        self._ensure_manual_clock_locked(now)
+        bpm = float(self.config.get("manual_bpm", DEFAULT_MANUAL_BPM))
+        beat_seconds = 60.0 / max(1e-6, bpm)
+        elapsed = max(0.0, float(now) - float(self.manual_clock_anchor_at or now))
+        beat_value = float(self.manual_clock_beat_at_anchor) + (elapsed / beat_seconds)
+        time_seconds = float(self.manual_clock_time_at_anchor) + elapsed
+        return bpm, beat_value, time_seconds
+
+    def _set_manual_bpm_locked(self, bpm, now, align_downbeat=False):
+        bpm = max(40.0, min(220.0, float(bpm)))
+        if self.manual_clock_anchor_at is None or align_downbeat:
+            beat_value = 0.0
+            time_seconds = 0.0
+        else:
+            _current_bpm, beat_value, time_seconds = self._manual_clock_state_locked(now)
+        self.config["manual_bpm"] = bpm
+        self.manual_clock_anchor_at = float(now)
+        self.manual_clock_beat_at_anchor = float(beat_value)
+        self.manual_clock_time_at_anchor = float(time_seconds)
+
+    def update_config(self, payload):
+        payload = payload or {}
+        now = time.time()
+        persist_config = None
+        with self._lock:
+            merged = {**self.config, **payload}
+            cleaned = self._clean_config(merged)
+            manual_bpm_changed = (
+                "manual_bpm" in payload
+                and abs(float(cleaned["manual_bpm"]) - float(self.config.get("manual_bpm", DEFAULT_MANUAL_BPM))) > 0.0001
+            )
+            self.config = cleaned
+            if manual_bpm_changed:
+                self._set_manual_bpm_locked(
+                    cleaned["manual_bpm"],
+                    now,
+                    align_downbeat=not self.manual_tap_locked,
+                )
+                self.manual_tap_locked = True
+            persist_config = dict(self.config)
+        self._save_config(persist_config)
+        return self.transport_state()
+
+    def tap(self, now=None):
+        now = float(time.time() if now is None else now)
+        persist_config = None
+        with self._lock:
+            if self.tap_times and now - self.tap_times[-1] > 2.5:
+                self.tap_times.clear()
+                self.manual_tap_locked = False
+            self.tap_times.append(now)
+            self.last_tap_at = now
+            if len(self.tap_times) >= 4:
+                recent = list(self.tap_times)[-4:]
+                intervals = [
+                    recent[index] - recent[index - 1]
+                    for index in range(1, len(recent))
+                ]
+                if intervals and all(0.25 <= interval <= 2.0 for interval in intervals):
+                    bpm = 60.0 / (sum(intervals) / len(intervals))
+                    align_downbeat = not self.manual_tap_locked
+                    self._set_manual_bpm_locked(bpm, now, align_downbeat=align_downbeat)
+                    self.manual_tap_locked = True
+                    persist_config = dict(self.config)
+        if persist_config is not None:
+            self._save_config(persist_config)
+        return self.transport_state()
+
+    def reset_manual_clock(self):
+        with self._lock:
+            self.tap_times.clear()
+            self.last_tap_at = None
+            self.manual_tap_locked = False
+            self.manual_clock_anchor_at = None
+            self.manual_clock_beat_at_anchor = 0.0
+            self.manual_clock_time_at_anchor = 0.0
+        return self.transport_state()
+
+    def _resolved_mode(self, selected_mode, external_timing_available, tap_locked, idle_enabled):
+        if selected_mode == "external_osc":
+            return "external_osc" if external_timing_available else ("manual_tap" if tap_locked else "idle")
+        if selected_mode == "manual_tap":
+            return "manual_tap" if tap_locked else "idle"
+        if external_timing_available:
+            return "external_osc"
+        if tap_locked:
+            return "manual_tap"
+        if idle_enabled:
+            return "idle"
+        return "external_osc"
+
+    def _manual_snapshot(self, now, transport_meta, external_snapshot):
+        with self._lock:
+            bpm, beat_value, time_seconds = self._manual_clock_state_locked(now)
+            manual_phrase = self.config.get("manual_phrase", DEFAULT_MANUAL_PHRASE)
+        beat_phase = beat_value % 1.0
+        beat_index = int(math.floor(beat_value)) % 4 + 1
+        beat_display = beat_index + beat_phase
+        phrase_count_in = max(0, 8 - (int(math.floor(beat_value)) % 8))
+        waveform = manual_transport_waveform_state(manual_phrase, beat_value)
+        snapshot = dict(external_snapshot or {})
+        external_audio_fresh = not bool(snapshot.get("stale"))
+        external_waveform_energy = snapshot.get("waveform_energy") if external_audio_fresh else None
+        external_audio_bands = snapshot.get("audio_bands") if external_audio_fresh else None
+        external_waveform_bands = snapshot.get("waveform_bands") if external_audio_fresh else None
+        external_waveform_lookahead = snapshot.get("waveform_lookahead") if external_audio_fresh else None
+        external_waveform_analysis = snapshot.get("waveform_analysis") if external_audio_fresh else None
+        external_audio_drums = snapshot.get("audio_drums") if external_audio_fresh else None
+        external_drum_signals = snapshot.get("drum_signals") if external_audio_fresh else None
+        snapshot.update(
+            {
+                "port": self.osc.port,
+                "running": True,
+                "stale": False,
+                "error": None,
+                "bpm": bpm,
+                "beat": beat_display,
+                "beat_value": beat_value,
+                "beat_display": beat_display,
+                "beat_phase_age_seconds": beat_phase * (60.0 / max(1e-6, bpm)),
+                "time_seconds": time_seconds,
+                "time_display_seconds": time_seconds,
+                "phrase_current": manual_phrase,
+                "phrase_next": manual_phrase,
+                "phrase_count_in": phrase_count_in,
+                "phrase_countdown_beats": float(phrase_count_in),
+                "phrase_countdown_seconds": float(phrase_count_in) * 60.0 / max(1e-6, bpm),
+                "mood": snapshot.get("mood"),
+                "color_bank": snapshot.get("color_bank"),
+                "waveform_energy": external_waveform_energy if external_waveform_energy is not None else waveform["energy"],
+                "audio_bands": dict(external_audio_bands or waveform["bands"]),
+                "waveform_bands": dict(external_waveform_bands or waveform["bands"]),
+                "waveform_lookahead": (
+                    {
+                        "2": dict(((external_waveform_lookahead or {}).get("2")) or waveform["lookahead"]["2"]),
+                        "4": dict(((external_waveform_lookahead or {}).get("4")) or waveform["lookahead"]["4"]),
+                    }
+                ),
+                "waveform_analysis": dict(external_waveform_analysis or waveform["analysis"]),
+                "audio_drums": dict(external_audio_drums or waveform["drums"]),
+                "drum_signals": dict(external_drum_signals or waveform["drums"]),
+                "strobe_active": False,
+                "strobe_count_in": None,
+                "last_beat_at": now - (beat_phase * (60.0 / max(1e-6, bpm))),
+                "transport": transport_meta,
+            }
+        )
+        return snapshot
+
+    def _active_snapshot(self, now, external_snapshot):
+        external_snapshot = dict(external_snapshot or {})
+        with self._lock:
+            selected_mode = self.config.get("mode", "auto")
+            idle_enabled = bool(self.config.get("idle_animation_enabled", True))
+            tap_locked = bool(self.manual_tap_locked)
+            manual_bpm = float(self.config.get("manual_bpm", DEFAULT_MANUAL_BPM))
+            manual_phrase = self.config.get("manual_phrase", DEFAULT_MANUAL_PHRASE)
+            tap_count = self._recent_tap_count_locked(now)
+            last_tap_at = self.last_tap_at
+        external_fresh = not bool(external_snapshot.get("stale"))
+        external_timing_available = bool(
+            external_fresh
+            and external_snapshot.get("bpm")
+            and (
+                external_snapshot.get("beat_display") is not None
+                or external_snapshot.get("beat") is not None
+            )
+        )
+        resolved_mode = self._resolved_mode(
+            selected_mode,
+            external_timing_available,
+            tap_locked,
+            idle_enabled,
+        )
+        transport_meta = {
+            "mode": selected_mode,
+            "resolved_mode": resolved_mode,
+            "manual_bpm": manual_bpm,
+            "effective_bpm": external_snapshot.get("bpm") if resolved_mode == "external_osc" else manual_bpm,
+            "manual_phrase": manual_phrase,
+            "manual_phrase_label": auto_show_phrase_override_label(manual_phrase),
+            "idle_animation_enabled": idle_enabled,
+            "tap_count": tap_count,
+            "tap_locked": tap_locked,
+            "external_available": external_fresh,
+            "external_timing_available": external_timing_available,
+            "last_tap_at": last_tap_at,
+        }
+        if resolved_mode == "external_osc":
+            external_snapshot["transport"] = transport_meta
+            return external_snapshot
+        return self._manual_snapshot(now, transport_meta, external_snapshot)
+
+    def snapshot_for_render(self):
+        now = time.time()
+        external_snapshot = self.osc.snapshot_for_render()
+        return self._active_snapshot(now, external_snapshot)
+
+    def state(self):
+        now = time.time()
+        external_state = self.osc.state()
+        return self._active_snapshot(now, external_state)
+
+    def transport_state(self):
+        state = self.state()
+        return dict(state.get("transport") or {})
+
+    def source_state(self):
+        state = self.state()
+        transport = state.get("transport") or {}
+        resolved_mode = str(transport.get("resolved_mode") or "external_osc")
+        if resolved_mode == "external_osc":
+            app = "External OSC / Rekordbox"
+            expected_destination = f"127.0.0.1:{self.osc.port}"
+            last_source = (state.get("last_message") or {}).get("source")
+        else:
+            app = "BeatBeam Internal Clock"
+            expected_destination = "internal"
+            last_source = None
+        return {
+            "mode": transport.get("mode") or "auto",
+            "resolved_mode": resolved_mode,
+            "app": app,
+            "port": self.osc.port,
+            "expected_destination": expected_destination,
+            "last_source": last_source,
+        }
+
+
 class DmxController:
     def __init__(self, osc_listener):
         self.osc = osc_listener
@@ -6268,9 +7047,11 @@ class DmxController:
         self.current_slot_previews = {}
         self.conflicts = []
         self.motion_states = {}
+        self.slot_rhythm_states = {}
         self.save_timer = None
         self.last_auto_show_signature = None
         self.last_slot_trigger_signatures = {}
+        self.last_slot_rhythm_signatures = {}
         self.last_slot_strobe_outputs = {}
         self.outro_behavior_state = None
         self.active_one_shot_cue = None
@@ -6323,6 +7104,7 @@ class DmxController:
             "strobe": 0,
             "program": 0,
             "speed": 0,
+            "extra_values": {},
             "pan": 127,
             "tilt": 127,
             "pan_tilt_speed": 0,
@@ -7380,12 +8162,12 @@ class DmxController:
         try:
             payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception as exc:
-            print(f"BeatBeam DMX: config load failed, using defaults: {exc}")
+            print(f"{APP_NAME}: config load failed, using defaults: {exc}")
             return defaults
         try:
             return self._clean_full_config(payload)
         except Exception as exc:
-            print(f"BeatBeam DMX: config invalid, using defaults: {exc}")
+            print(f"{APP_NAME}: config invalid, using defaults: {exc}")
             return defaults
 
     def _schedule_save_locked(self):
@@ -7503,6 +8285,14 @@ class DmxController:
         if not any(mode["name"].lower() == requested_mode.lower() for mode in fixture["modes"]):
             requested_mode = fixture["modes"][0]["name"]
         cleaned["mode"] = requested_mode
+        selected_mode = find_mode(fixture, cleaned["mode"])
+        raw_extra_values = cleaned.get("extra_values")
+        if not isinstance(raw_extra_values, dict):
+            raw_extra_values = {}
+        cleaned["extra_values"] = {
+            control["id"]: clamp_dmx(raw_extra_values.get(control["id"], control["default"]))
+            for control in mode_custom_controls(selected_mode)
+        }
         cleaned["color_source"] = str(cleaned.get("color_source", "manual"))
         raw_group = str(cleaned.get("group", "") or "").strip().lower()
         raw_group = "".join(ch if (ch.isalnum() or ch in ("_", "-")) else "_" for ch in raw_group)
@@ -7857,7 +8647,7 @@ class DmxController:
             return 1.0 if step == 0 else 0.28 + movement_scale * 0.12
 
         if mode == "alternate_whole":
-            phase = int(math.floor(beat_value)) % 2
+            phase = int(math.floor(beat_value / 2.0)) % 2 if role == "moving" else int(math.floor(beat_value)) % 2
             if role == "par":
                 active_side = role_index % 2
             elif role_count <= 2:
@@ -9245,6 +10035,14 @@ class DmxController:
             )
 
         use_fine_pan_tilt = bool(config.get("use_fine_pan_tilt", True))
+        resolved_extra_values = self._resolved_fixture_extra_values(
+            config,
+            mode,
+            rgbw,
+            brightness,
+            strobe,
+            osc,
+        )
         return values_for_fixture(
             mode,
             address,
@@ -9261,6 +10059,7 @@ class DmxController:
             pan_tilt_speed=config["pan_tilt_speed"],
             reset=0,
             zone_rgb=output_zone_rgb,
+            extra_values=resolved_extra_values,
         )
 
     def _preview_for_slot(self, slot_id, config, osc, now, full_config=None, auto_show=None):
@@ -9312,12 +10111,26 @@ class DmxController:
             else {**effective_config, "strobe": strobe_input}
         )
         strobe, external_strobe_applied = self._effective_strobe_state(strobe_config, osc)
+        resolved_extra_values = self._resolved_fixture_extra_values(
+            effective_config,
+            find_mode(fixture, effective_config["mode"]),
+            rgbw,
+            brightness,
+            strobe,
+            osc,
+        )
+        spot_preview = self._fixture_preview_payload(
+            fixture,
+            find_mode(fixture, effective_config["mode"]),
+            resolved_extra_values,
+        )
         return {
             "enabled": bool(effective_config["enabled"]),
             "red": output_rgbw[0],
             "green": output_rgbw[1],
             "blue": output_rgbw[2],
             "white": output_rgbw[3],
+            **spot_preview,
             "brightness": brightness,
             "strobe": strobe,
             "strobe_active": bool(strobe > 0 and effective_config["enabled"]),
@@ -9831,8 +10644,131 @@ class DmxController:
         }
         return next_section, smoothed
 
+    @staticmethod
+    def _rhythm_change_gate_seconds(bpm):
+        try:
+            beat_seconds = 60.0 / max(1.0, float(bpm or 120.0))
+        except (TypeError, ValueError):
+            beat_seconds = 0.5
+        return max(0.05, min(0.14, beat_seconds * 0.22))
+
+    @staticmethod
+    def _rhythm_hold_beats(role, mode, section):
+        role = str(role or "static")
+        mode = str(mode or "full_on")
+        section = str(section or "unknown")
+        calm_sections = {"intro", "verse", "down", "break", "outro"}
+        if mode in {"soft_pulse", "alternate_whole", "pair_hold", "breathing"}:
+            if role == "moving":
+                return 8.0 if section in calm_sections else 4.0
+            if role == "par":
+                return 4.0 if section in calm_sections else 2.0
+            return 4.0 if section in calm_sections else 2.0
+        if mode in {"slow_fade_in", "slow_fade_out", "offbeat_flash", "medium", "full_on"}:
+            return 2.0 if section in calm_sections else 1.0
+        if role == "moving" and mode in {"chase_whole", "snake_whole", "pivot"}:
+            return 1.0
+        return 1.0
+
+    def _stabilize_slot_rhythm_mode(self, slot_id, role, section, proposed_mode, osc):
+        slot_id = str(slot_id or "").strip()
+        role = str(role or "static")
+        section = str(section or "unknown")
+        proposed_mode = str(proposed_mode or "full_on")
+        if not slot_id:
+            return proposed_mode
+
+        beat_value = osc.get("beat_value")
+        try:
+            beat_value = None if beat_value is None else float(beat_value)
+        except (TypeError, ValueError):
+            beat_value = None
+
+        bpm = osc.get("bpm")
+        try:
+            bpm = None if bpm is None else float(bpm)
+        except (TypeError, ValueError):
+            bpm = None
+
+        beat_age = osc.get("beat_phase_age_seconds")
+        try:
+            beat_age = None if beat_age is None else max(0.0, float(beat_age))
+        except (TypeError, ValueError):
+            beat_age = None
+
+        state = dict(self.slot_rhythm_states.get(slot_id) or {})
+        current_mode = str(state.get("mode") or proposed_mode)
+        lock_until_beat = state.get("lock_until_beat")
+        try:
+            lock_until_beat = (
+                None if lock_until_beat is None else float(lock_until_beat)
+            )
+        except (TypeError, ValueError):
+            lock_until_beat = None
+
+        pending = False
+        resolved_mode = current_mode if state else proposed_mode
+
+        if beat_value is None:
+            resolved_mode = current_mode if state else proposed_mode
+        elif proposed_mode != current_mode:
+            gate_seconds = self._rhythm_change_gate_seconds(bpm)
+            phase = beat_value % 1.0
+            at_beat_edge = (
+                beat_age <= gate_seconds
+                if beat_age is not None
+                else phase <= 0.18
+            )
+            if lock_until_beat is not None and beat_value < lock_until_beat:
+                pending = True
+                resolved_mode = current_mode
+            elif not at_beat_edge:
+                pending = True
+                resolved_mode = current_mode
+            else:
+                resolved_mode = proposed_mode
+        else:
+            resolved_mode = current_mode
+
+        if beat_value is not None:
+            if not state or resolved_mode != current_mode:
+                hold_beats = self._rhythm_hold_beats(role, resolved_mode, section)
+                next_beat = math.floor(beat_value) + 1.0
+                lock_until_beat = next_beat + max(0.0, hold_beats - 1.0)
+            self.slot_rhythm_states[slot_id] = {
+                "mode": resolved_mode,
+                "lock_until_beat": lock_until_beat,
+            }
+        else:
+            self.slot_rhythm_states[slot_id] = {"mode": resolved_mode}
+
+        signature = (
+            proposed_mode,
+            resolved_mode,
+            bool(pending),
+            section,
+        )
+        if self.last_slot_rhythm_signatures.get(slot_id) != signature:
+            self.last_slot_rhythm_signatures[slot_id] = signature
+            self.debug_log.log(
+                "SLOT_RHYTHM",
+                slot=slot_id,
+                role=role,
+                section=section,
+                proposed=proposed_mode,
+                resolved=resolved_mode,
+                pending=pending,
+                beat=beat_value,
+                hold_until=lock_until_beat,
+            )
+        return resolved_mode
+
     def _effective_slot_config(self, slot_id, config, osc, auto_show, full_config=None):
-        effective = {**config, "color": dict(config["color"])}
+        effective = {
+            **config,
+            "color": dict(config["color"]),
+            "extra_values": dict(config.get("extra_values") or {}),
+        }
         full_config = full_config or self._clean_full_config(dict(self.config))
         override_active = self._live_override_active(auto_show)
         if ((not auto_show["enabled"] and not override_active) or not config["enabled"] or (not auto_show["available"] and not override_active)):
@@ -9882,6 +10818,8 @@ class DmxController:
             or (auto_show.get("mirror_within_group") and motion_name in AUTO_SHOW_MEMBER_MIRROR_MOTIONS)
         )
         effective["_auto_show_theme_name"] = theme_name
+        effective["_auto_show_section"] = section
+        effective["_auto_show_style_name"] = style_name
         effective["_auto_show_look_name"] = look_name
         effective["_auto_show_color_profile_name"] = color_profile_name
         effective["_auto_show_texture_name"] = texture_name
@@ -9956,6 +10894,13 @@ class DmxController:
                 movement,
                 override_energy,
             )
+        effective["_auto_show_rhythm_mode"] = self._stabilize_slot_rhythm_mode(
+            slot_id,
+            role,
+            section,
+            effective["_auto_show_rhythm_mode"],
+            osc,
+        )
 
         base_rgbw = self._resolved_sync_rgbw(effective, osc)
         effective["_auto_show_rgbw"] = self._auto_show_rgbw_for_slot(
@@ -10212,6 +11157,299 @@ class DmxController:
 
         return effective
 
+    def _resolved_fixture_extra_values(self, config, mode, rgbw, brightness, strobe, osc=None):
+        resolved = {}
+        for control in mode_custom_controls(mode):
+            resolved[control["id"]] = clamp_dmx(
+                (config.get("extra_values") or {}).get(control["id"], control["default"])
+            )
+
+        if "_auto_show_rgbw" not in config and not config.get("_force_rgbw_override"):
+            return resolved
+
+        color_disk_channel = custom_control_channel(mode, "color_disk")
+        if color_disk_channel is not None:
+            indexed_value = indexed_color_value_for_rgbw(color_disk_channel, rgbw)
+            if indexed_value is not None:
+                resolved["color_disk"] = clamp_dmx(indexed_value)
+
+        if "macro_function" in resolved:
+            resolved["macro_function"] = 0
+
+        if "spot_dimmer" in resolved:
+            if brightness <= 10:
+                resolved["spot_dimmer"] = 0
+            else:
+                resolved["spot_dimmer"] = clamp_dmx(round(brightness * 0.74))
+
+        if "spot_strobe" in resolved:
+            resolved["spot_strobe"] = clamp_dmx(strobe if strobe > 0 else 0)
+
+        if fixture_preview_kind(find_fixture(FIXTURE_LIBRARY, config.get("fixture")), mode) == "bee_eye_pattern":
+            self._apply_auto_show_bee_eye_fx(config, mode, resolved, brightness, osc)
+
+        return resolved
+
+    def _apply_auto_show_bee_eye_fx(self, config, mode, resolved, brightness, osc=None):
+        if "_auto_show_rgbw" not in config and not config.get("_force_rgbw_override"):
+            return
+
+        section = str(config.get("_auto_show_section") or "unknown")
+        style_name = str(config.get("_auto_show_style_name") or "adaptive")
+        theme_name = str(config.get("_auto_show_theme_name") or "")
+        look_name = str(config.get("_auto_show_look_name") or "")
+        pulse_name = str(config.get("_auto_show_pulse_name") or "medium")
+        motion_name = str(config.get("_auto_show_motion_name") or "center")
+        rhythm_mode = str(config.get("_auto_show_rhythm_mode") or "full_on")
+        slot_context = config.get("_slot_context") or {}
+        energy = clamp_unit(float(config.get("_auto_show_energy", 0.0) or 0.0))
+        movement = clamp_unit(float(config.get("_auto_show_movement", 0.0) or 0.0))
+        beat_value = float((osc or {}).get("beat_value") or 0.0)
+        group_name = str(slot_context.get("group") or slot_context.get("role") or "moving")
+        group_index = int(slot_context.get("group_index", 0))
+        member_index = int(slot_context.get("member_index", 0))
+        quiet_sections = {"intro", "break", "down", "outro"}
+        peak_sections = {"chorus", "drop"}
+
+        if brightness <= 12:
+            if "pattern_plate" in resolved:
+                resolved["pattern_plate"] = clamp_dmx(0)
+            if "z_rotation" in resolved:
+                resolved["z_rotation"] = clamp_dmx(0)
+            resolved["_bee_effect_mode"] = "wash"
+            resolved["_bee_spread"] = 0.92
+            resolved["_bee_background_level"] = 0.88
+            resolved["_bee_softness"] = 0.78
+            resolved["_bee_shape_transition"] = 0.22
+            return
+
+        if section in peak_sections:
+            bee_mode = "fx"
+        elif section == "build":
+            bee_mode = "beam" if energy < 0.54 and movement < 0.58 else "fx"
+        elif section == "verse":
+            bee_mode = "beam" if energy < 0.62 and movement < 0.70 else "fx"
+        elif section in quiet_sections:
+            bee_mode = "wash" if energy < 0.48 and movement < 0.52 else "beam"
+        else:
+            bee_mode = "beam"
+
+        if pulse_name in {"snake", "chase", "gallop", "double_hit", "beat_flash"} and section not in quiet_sections:
+            bee_mode = "fx"
+        elif motion_name in {"hold", "center"} and section in quiet_sections and energy < 0.42:
+            bee_mode = "wash"
+
+        if bee_mode == "wash":
+            bee_spread = min(1.10, max(0.82, 0.88 + movement * 0.10))
+            bee_background_level = clamp_unit(0.82 + (1.0 - energy) * 0.12)
+            bee_softness = clamp_unit(0.70 + movement * 0.10)
+            bee_shape_transition = clamp_unit(0.18 + movement * 0.08)
+        elif bee_mode == "fx":
+            bee_spread = min(1.34, max(0.98, 1.02 + movement * 0.22))
+            bee_background_level = clamp_unit(0.50 + energy * 0.18)
+            bee_softness = clamp_unit(0.38 + movement * 0.22)
+            bee_shape_transition = clamp_unit(0.36 + energy * 0.24)
+        else:
+            bee_spread = min(1.18, max(0.90, 0.94 + movement * 0.12))
+            bee_background_level = clamp_unit(0.34 + energy * 0.12)
+            bee_softness = clamp_unit(0.24 + movement * 0.10)
+            bee_shape_transition = clamp_unit(0.14 + energy * 0.08)
+
+        resolved["_bee_effect_mode"] = bee_mode
+        resolved["_bee_spread"] = bee_spread
+        resolved["_bee_background_level"] = bee_background_level
+        resolved["_bee_softness"] = bee_softness
+        resolved["_bee_shape_transition"] = bee_shape_transition
+
+        pattern_channel = custom_control_channel(mode, "pattern_plate")
+        rotation_channel = custom_control_channel(mode, "z_rotation")
+
+        if pattern_channel is not None:
+            if section in quiet_sections:
+                hold_beats = 32.0
+            elif section in {"verse", "unknown"}:
+                hold_beats = 16.0
+            else:
+                hold_beats = 8.0
+
+            signature = "|".join(
+                [
+                    theme_name,
+                    style_name,
+                    section,
+                    look_name,
+                    pulse_name,
+                    motion_name,
+                    group_name,
+                    str(group_index),
+                    str(member_index),
+                    str(int(math.floor(beat_value / max(1.0, hold_beats)))),
+                ]
+            )
+            seed = stable_hash(signature)
+
+            if bee_mode == "wash":
+                if section == "intro":
+                    options = ["open", "open", "flower", "pinwheel_flower"]
+                else:
+                    options = ["open", "flower", "pinwheel_flower", "open"]
+            elif bee_mode == "fx":
+                if section == "drop":
+                    options = ["spoke_star", "triskelion", "dot_cluster", "swirl"]
+                elif section == "chorus":
+                    options = ["pinwheel_flower", "swirl", "flower", "triskelion"]
+                elif section == "build":
+                    options = ["flower", "dot_star", "swirl", "triskelion"]
+                else:
+                    options = ["flower", "swirl", "dot_star", "triskelion"]
+            else:
+                if section == "build":
+                    options = ["open", "dot_star", "spoke_star", "flower"]
+                elif section == "verse":
+                    options = ["open", "open", "dot_star", "flower", "spoke_star"]
+                else:
+                    options = ["open", "dot_star", "spoke_star", "flower"]
+
+            if pulse_name in {"snake", "chase", "gallop", "double_hit", "beat_flash"} and section not in quiet_sections:
+                options = [token for token in options if token != "open"] or options
+            if energy < 0.28 and section in quiet_sections:
+                options = ["open", "flower"]
+            elif energy < 0.40 and section == "verse":
+                options = ["open", "flower", "pinwheel_flower"]
+            elif section in peak_sections and energy >= 0.74:
+                options = [token for token in options if token != "open"] or options
+
+            pattern_token = options[seed % len(options)]
+            pattern_value = indexed_wheel_value_for_token(
+                pattern_channel,
+                "indexed_patterns",
+                pattern_token,
+                fallback=resolved.get("pattern_plate", 0),
+            )
+            if pattern_value is not None:
+                resolved["pattern_plate"] = clamp_dmx(pattern_value)
+        else:
+            pattern_token = "open"
+
+        if "spot_dimmer" in resolved:
+            if bee_mode == "wash":
+                multiplier = 0.10 if pattern_token == "open" else 0.26
+            elif bee_mode == "fx":
+                multiplier = 0.56 if pattern_token == "open" else 0.82
+            else:
+                multiplier = 0.78 if pattern_token == "open" else 0.66
+            resolved["spot_dimmer"] = clamp_dmx(round(brightness * multiplier))
+
+        if rotation_channel is not None:
+            rotation_signature = "|".join(
+                [
+                    theme_name,
+                    section,
+                    pulse_name,
+                    group_name,
+                    str(group_index),
+                ]
+            )
+            direction = -1 if stable_hash(rotation_signature) % 2 else 1
+
+            if bee_mode == "wash":
+                if pattern_token == "open" and movement < 0.40:
+                    static_angle = stable_hash(rotation_signature + "|wash-open") % 128
+                    resolved["z_rotation"] = clamp_dmx(static_angle)
+                elif pattern_token == "open":
+                    resolved["z_rotation"] = bee_eye_rotation_dmx(0.06 + energy * 0.05 + movement * 0.03, direction)
+                else:
+                    resolved["z_rotation"] = bee_eye_rotation_dmx(0.08 + energy * 0.06 + movement * 0.04, direction)
+                return
+
+            if bee_mode == "beam":
+                if pattern_token == "open" and movement < 0.52:
+                    static_angle = stable_hash(rotation_signature + "|beam-open") % 128
+                    resolved["z_rotation"] = clamp_dmx(static_angle)
+                else:
+                    resolved["z_rotation"] = bee_eye_rotation_dmx(0.10 + energy * 0.08 + movement * 0.06, direction)
+                return
+
+            if section == "intro":
+                resolved["z_rotation"] = bee_eye_rotation_dmx(0.10 + energy * 0.08, direction)
+            elif section in {"break", "down", "outro"}:
+                resolved["z_rotation"] = bee_eye_rotation_dmx(0.12 + energy * 0.10 + movement * 0.08, direction)
+            elif section == "verse":
+                resolved["z_rotation"] = bee_eye_rotation_dmx(0.18 + energy * 0.14 + movement * 0.10, direction)
+            elif section == "build":
+                resolved["z_rotation"] = bee_eye_rotation_dmx(0.30 + energy * 0.22 + movement * 0.16, direction)
+            elif section == "chorus":
+                resolved["z_rotation"] = bee_eye_rotation_dmx(0.38 + energy * 0.24 + movement * 0.18, direction)
+            elif section == "drop":
+                resolved["z_rotation"] = bee_eye_rotation_dmx(0.48 + energy * 0.26 + movement * 0.18, direction)
+            else:
+                resolved["z_rotation"] = bee_eye_rotation_dmx(0.20 + energy * 0.14, direction)
+
+    def _fixture_preview_payload(self, fixture, mode, extra_values):
+        values = dict(extra_values or {})
+        dimmer = clamp_dmx(values.get("spot_dimmer", 0))
+        color_disk_channel = custom_control_channel(mode, "color_disk")
+        rgbw = indexed_color_rgbw(color_disk_channel, values.get("color_disk", 0))
+        if rgbw is None:
+            rgbw = (255, 255, 255, 255)
+        payload = {
+            "fixture_kind": fixture_preview_kind(fixture, mode),
+            "spot_red": int(rgbw[0]),
+            "spot_green": int(rgbw[1]),
+            "spot_blue": int(rgbw[2]),
+            "spot_white": int(rgbw[3]),
+            "spot_brightness": dimmer,
+        }
+        if payload["fixture_kind"] != "bee_eye_pattern":
+            return payload
+
+        color_state = indexed_wheel_preview_state(
+            color_disk_channel,
+            values.get("color_disk", 0),
+            "indexed_colors",
+        )
+        pattern_state = indexed_wheel_preview_state(
+            custom_control_channel(mode, "pattern_plate"),
+            values.get("pattern_plate", 0),
+            "indexed_patterns",
+        )
+        rotation_state = preview_spin_state(values.get("z_rotation", 0))
+        if color_state:
+            payload.update(
+                {
+                    "spot_color_index": int(color_state["index"]),
+                    "spot_color_label": str(color_state["label"]),
+                    "spot_color_token": str(color_state["token"]),
+                    "spot_color_cycle": bool(color_state["cycle"]),
+                    "spot_color_cycle_rate": float(color_state["cycle_rate"]),
+                    "spot_color_count": int(color_state["count"]),
+                }
+            )
+        if pattern_state:
+            payload.update(
+                {
+                    "spot_pattern_index": int(pattern_state["index"]),
+                    "spot_pattern_label": str(pattern_state["label"]),
+                    "spot_pattern_id": str(pattern_state["token"]),
+                    "spot_pattern_open": str(pattern_state["token"]) == "open",
+                    "spot_pattern_cycle": bool(pattern_state["cycle"]),
+                    "spot_pattern_cycle_rate": float(pattern_state["cycle_rate"]),
+                    "spot_pattern_count": int(pattern_state["count"]),
+                }
+            )
+        payload.update(
+            {
+                "spot_pattern_rotation_degrees": float(rotation_state["degrees"]),
+                "spot_pattern_spin_dps": float(rotation_state["spin_dps"]),
+                "bee_effect_mode": str(values.get("_bee_effect_mode") or "beam"),
+                "bee_spread": float(values.get("_bee_spread", 1.0) or 1.0),
+                "bee_background_level": float(values.get("_bee_background_level", 0.42) or 0.42),
+                "bee_softness": float(values.get("_bee_softness", 0.30) or 0.30),
+                "bee_shape_transition": float(values.get("_bee_shape_transition", 0.18) or 0.18),
+            }
+        )
+        return payload
+
     def _rgbw_for_config(self, config, osc):
         if "_auto_show_rgbw" in config:
             return tuple(config["_auto_show_rgbw"])
@@ -10274,8 +11512,9 @@ class DmxController:
             )
         elif mode == "soft_pulse":
             pair_phase = par_pair_index * 1.0 if role == "par" else 0.0
+            pulse_divisor = 4.0 if role == "moving" else 2.0
             direct_multiplier = 0.55 + 0.25 * (
-                0.5 + 0.5 * wave_sine((beat_value + pair_phase) / 2.0)
+                0.5 + 0.5 * wave_sine((beat_value + pair_phase) / pulse_divisor)
             )
         elif mode == "strong_pulse":
             envelope = beat_envelope(max(0.08, config["beat_decay_ms"] / 1000.0))
@@ -10514,7 +11753,8 @@ class DmxController:
 
 
 OSC = OscListener()
-DMX = DmxController(OSC)
+TRANSPORT = TransportController(OSC)
+DMX = DmxController(TRANSPORT)
 
 
 def serial_ports():
@@ -10793,24 +12033,19 @@ def remote_access_state():
 
 
 def full_state():
-    osc_state = OSC.state()
+    osc_state = TRANSPORT.state()
     return {
-        "app": {"name": "BeatBeam DMX", "api_schema_version": API_SCHEMA_VERSION},
+        "app": {"name": APP_NAME, "api_schema_version": API_SCHEMA_VERSION},
         "dmx": DMX.state(),
         "osc": osc_state,
         "remote": remote_access_state(),
-        "source": {
-            "mode": "external_osc",
-            "app": "Live BPM Trigger",
-            "port": OSC.port,
-            "expected_destination": f"127.0.0.1:{OSC.port}",
-            "last_source": (osc_state.get("last_message") or {}).get("source"),
-        },
+        "source": TRANSPORT.source_state(),
+        "transport": TRANSPORT.transport_state(),
     }
 
 
 def remote_state():
-    osc_state = OSC.state()
+    osc_state = TRANSPORT.state()
     dmx_state = DMX.state()
     return {
         "dmx": {
@@ -10828,11 +12063,12 @@ def remote_state():
             "track_artist": osc_state.get("track_artist"),
             "stale": osc_state.get("stale", True),
         },
+        "transport": TRANSPORT.transport_state(),
     }
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "BeatBeamDMX/1.1-dev"
+    server_version = os.environ.get("BEATBEAM_SERVER_VERSION") or f"{APP_SLUG}/1.2-dev"
     protocol_version = "HTTP/1.1"
 
     def request_context(self):
@@ -10942,6 +12178,18 @@ class AppHandler(BaseHTTPRequestHandler):
                 DMX.blackout()
                 self.send_json(full_state())
                 return
+            if path == "/api/transport/update":
+                TRANSPORT.update_config(payload)
+                self.send_json(full_state())
+                return
+            if path == "/api/transport/tap":
+                TRANSPORT.tap()
+                self.send_json(full_state())
+                return
+            if path == "/api/transport/reset":
+                TRANSPORT.reset_manual_clock()
+                self.send_json(full_state())
+                return
         except Exception as exc:
             self.send_json({"error": str(exc), "state": full_state()}, status=400)
             return
@@ -11009,11 +12257,11 @@ class AppHandler(BaseHTTPRequestHandler):
 
 def shutdown():
     DMX.disconnect()
-    OSC.stop()
+    TRANSPORT.stop()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="BeatBeam DMX local controller")
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} local controller")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_HTTP_PORT)
     parser.add_argument("--osc-port", type=int, default=DEFAULT_OSC_PORT)
@@ -11024,10 +12272,10 @@ def main():
     SERVER_PORT = int(args.port)
     REMOTE_ACCESS_CONFIG = load_remote_access_config()
     OSC.port = args.osc_port
-    OSC.start()
+    TRANSPORT.start()
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)
     TRIGGER_LOG.log("BACKEND_START", host=args.host, port=args.port, osc_port=args.osc_port)
-    print(f"BeatBeam DMX running at http://{args.host}:{args.port}")
+    print(f"{APP_NAME} running at http://{args.host}:{args.port}")
     print(f"OSC input listening on UDP {args.osc_port}")
     print(f"Trigger log: {TRIGGER_LOG_PATH}")
     try:

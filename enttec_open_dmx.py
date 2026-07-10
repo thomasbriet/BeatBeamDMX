@@ -381,6 +381,7 @@ def values_for_fixture(
     pan_tilt_speed=0,
     reset=0,
     zone_rgb=None,
+    extra_values=None,
 ):
     red, green, blue, white = rgb
     values = {}
@@ -391,6 +392,7 @@ def values_for_fixture(
         "white": white,
         "coolwhite": white,
     }
+    extra_values = dict(extra_values or {})
 
     for channel in mode["channels"]:
         absolute = start_address + channel["offset"] - 1
@@ -443,6 +445,15 @@ def values_for_fixture(
             values[absolute] = clamp_dmx(strobe)
         elif channel_type == "pan_tilt_speed":
             values[absolute] = clamp_dmx(pan_tilt_speed)
+        elif channel_type == "custom":
+            control_id = str(
+                channel.get("control")
+                or channel.get("id")
+                or channel.get("name")
+                or f"custom_{channel.get('offset', absolute)}"
+            )
+            default_value = channel.get("default", 0)
+            values[absolute] = clamp_dmx(extra_values.get(control_id, default_value))
 
     return values
 
