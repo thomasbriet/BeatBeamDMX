@@ -70,6 +70,17 @@ REMOTE_ACCESS_CONFIG = None
 REMOTE_ADDRESS_CACHE = {"updated_at": 0.0, "state": None}
 
 
+def playback_system_monotonic_time():
+    """Use the macOS uptime clock shared with .NET Environment.TickCount64."""
+    clock_id = getattr(time, "CLOCK_UPTIME_RAW", None)
+    if clock_id is not None:
+        try:
+            return time.clock_gettime(clock_id)
+        except OSError:
+            pass
+    return time.monotonic()
+
+
 def _track_preview_cache_dirs():
     dirs = [TRACK_PREVIEW_CACHE_DIR]
     if "BEATBEAM_TRACK_PREVIEW_CACHE_DIR" not in os.environ:
@@ -2590,6 +2601,35 @@ DEVELOPER_PLAYBACK_SOURCES = {
 
 
 @dataclass(frozen=True)
+class PlaybackQueryTiming:
+    field: str
+    request_started_at_monotonic_milliseconds: int
+    response_received_at_monotonic_milliseconds: int
+
+    @property
+    def round_trip_milliseconds(self):
+        return max(0, self.response_received_at_monotonic_milliseconds - self.request_started_at_monotonic_milliseconds)
+
+
+@dataclass(frozen=True)
+class PlaybackPositionReference:
+    position_milliseconds: int
+    sampled_at_monotonic_milliseconds: int
+    query_timing: PlaybackQueryTiming
+
+
+@dataclass(frozen=True)
+class PlaybackTimingSnapshot:
+    clock: str
+    snapshot_started_at_monotonic_milliseconds: int
+    snapshot_completed_at_monotonic_milliseconds: int
+    sampled_at_monotonic_milliseconds: int
+    published_at_monotonic_milliseconds: int
+    query_timings: tuple
+    position_reference: object = None
+
+
+@dataclass(frozen=True)
 class PlaybackStateSnapshot:
     schema_version: int
     sequence: int
@@ -2607,6 +2647,7 @@ class PlaybackStateSnapshot:
     bar_number: object
     metrics: dict
     error_kind: object
+    timing: object = None
 
     def fingerprint(self):
         return (
@@ -2698,6 +2739,7 @@ class JsonPlaybackStateSource(PlaybackStateSource):
             or position is None
         ):
             raise ValueError("Available playback snapshot misses required timing values.")
+        timing = JsonPlaybackStateSource._optional_timing(payload.get("timing"))
         return PlaybackStateSnapshot(
             PLAYBACK_STATE_SCHEMA_VERSION,
             sequence,
@@ -2715,6 +2757,7 @@ class JsonPlaybackStateSource(PlaybackStateSource):
             bar_number,
             dict(metrics),
             JsonPlaybackStateSource._optional_text(payload.get("error_kind"), "error_kind"),
+            timing,
         )
 
     @staticmethod
@@ -2774,15 +2817,95 @@ class JsonPlaybackStateSource(PlaybackStateSource):
         value = value.strip()
         return value or None
 
+    @staticmethod
+    def _optional_timing(value):
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("timing must be an object.")
+        clock = JsonPlaybackStateSource._optional_text(value.get("clock"), "timing.clock")
+        if clock != "system_monotonic_milliseconds":
+            raise ValueError("Unsupported playback timing clock.")
+        started = JsonPlaybackStateSource._non_negative_int(
+            value.get("snapshot_started_at_monotonic_milliseconds"), "timing.snapshot_started_at_monotonic_milliseconds"
+        )
+        completed = JsonPlaybackStateSource._non_negative_int(
+            value.get("snapshot_completed_at_monotonic_milliseconds"), "timing.snapshot_completed_at_monotonic_milliseconds"
+        )
+        sampled = JsonPlaybackStateSource._non_negative_int(
+            value.get("sampled_at_monotonic_milliseconds"), "timing.sampled_at_monotonic_milliseconds"
+        )
+        published = JsonPlaybackStateSource._non_negative_int(
+            value.get("published_at_monotonic_milliseconds"), "timing.published_at_monotonic_milliseconds"
+        )
+        if completed < started or sampled < started or sampled > completed or published < completed:
+            raise ValueError("Playback timing values are not chronological.")
+        query_timings = value.get("query_timings")
+        if not isinstance(query_timings, list):
+            raise ValueError("timing.query_timings must be a list.")
+        parsed_queries = tuple(JsonPlaybackStateSource._parse_query_timing(item) for item in query_timings)
+        if any(query.request_started_at_monotonic_milliseconds < started
+               or query.response_received_at_monotonic_milliseconds > completed
+               for query in parsed_queries):
+            raise ValueError("Playback query timing falls outside its snapshot.")
+        position_queries = [query for query in parsed_queries if query.field == "PositionMilliseconds"]
+        if len(position_queries) != 1:
+            raise ValueError("Playback timing requires exactly one position query.")
+        position_query = position_queries[0]
+        if not position_query.request_started_at_monotonic_milliseconds <= sampled <= position_query.response_received_at_monotonic_milliseconds:
+            raise ValueError("Playback position sample falls outside its position query.")
+        reference = value.get("position_reference")
+        parsed_reference = None if reference is None else JsonPlaybackStateSource._parse_position_reference(reference)
+        if parsed_reference is not None:
+            reference_query = parsed_reference.query_timing
+            if reference_query.request_started_at_monotonic_milliseconds < completed:
+                raise ValueError("Playback position reference must follow its transport snapshot.")
+            if not reference_query.request_started_at_monotonic_milliseconds <= parsed_reference.sampled_at_monotonic_milliseconds <= reference_query.response_received_at_monotonic_milliseconds:
+                raise ValueError("Playback position reference sample falls outside its query.")
+        return PlaybackTimingSnapshot(clock, started, completed, sampled, published, parsed_queries, parsed_reference)
+
+    @staticmethod
+    def _parse_query_timing(value):
+        if not isinstance(value, dict):
+            raise ValueError("timing.query_timings items must be objects.")
+        field = JsonPlaybackStateSource._optional_text(value.get("field"), "timing query field")
+        if field is None:
+            raise ValueError("timing query field is required.")
+        started = JsonPlaybackStateSource._non_negative_int(
+            value.get("request_started_at_monotonic_milliseconds"), "timing query request start"
+        )
+        completed = JsonPlaybackStateSource._non_negative_int(
+            value.get("response_received_at_monotonic_milliseconds"), "timing query response finish"
+        )
+        if completed < started:
+            raise ValueError("timing query values are not chronological.")
+        return PlaybackQueryTiming(field, started, completed)
+
+    @staticmethod
+    def _parse_position_reference(value):
+        if not isinstance(value, dict):
+            raise ValueError("timing.position_reference must be an object.")
+        position = JsonPlaybackStateSource._non_negative_int(
+            value.get("position_milliseconds"), "timing.position_reference.position_milliseconds"
+        )
+        sampled = JsonPlaybackStateSource._non_negative_int(
+            value.get("sampled_at_monotonic_milliseconds"), "timing.position_reference.sampled_at_monotonic_milliseconds"
+        )
+        query = JsonPlaybackStateSource._parse_query_timing(value.get("query_timing"))
+        if not query.field == "PositionMilliseconds":
+            raise ValueError("timing.position_reference must be a position query.")
+        return PlaybackPositionReference(position, sampled, query)
+
 
 class PlaybackClock:
-    """Anchors authoritative snapshots and bounds local interpolation to a short grace period."""
+    """Latency-aware developer clock, anchored only by authoritative read-only samples."""
 
     def __init__(self, source, grace_seconds=PLAYBACK_CLOCK_GRACE_SECONDS):
         self.source = source
         self.grace_seconds = float(grace_seconds)
         self.anchor = None
         self.anchor_at = None
+        self.anchor_sample_age_milliseconds = 0.0
         self.previous = None
         self.previous_at = None
         self.last_fingerprint = None
@@ -2794,11 +2917,20 @@ class PlaybackClock:
         self.accepted_snapshot_count = 0
         self.invalid_snapshot_count = 0
         self.snapshot_intervals_ms = deque(maxlen=120)
+        self.position_query_rtt_ms = deque(maxlen=120)
+        self.snapshot_assembly_ms = deque(maxlen=120)
+        self.sample_age_at_receive_ms = deque(maxlen=120)
+        self.raw_position_delta_ms = deque(maxlen=120)
+        self.compensated_position_delta_ms = deque(maxlen=120)
         self.last_source_error = None
         self.was_disconnected = False
+        self.last_timing_alignment = "legacy_or_unavailable"
+        self.last_received_at_monotonic_milliseconds = None
+        self.last_raw_position_delta_milliseconds = None
+        self.last_compensated_position_delta_milliseconds = None
 
     def state(self, now=None):
-        now = time.monotonic() if now is None else float(now)
+        now = playback_system_monotonic_time() if now is None else float(now)
         source_read = self.source.read()
         if source_read.snapshot is not None:
             fingerprint = source_read.snapshot.fingerprint()
@@ -2816,6 +2948,9 @@ class PlaybackClock:
             self.anchor_at = None
             self.previous = None
             self.previous_at = None
+            self.anchor_sample_age_milliseconds = 0.0
+            self.last_raw_position_delta_milliseconds = None
+            self.last_compensated_position_delta_milliseconds = None
             self.availability = "disconnected" if snapshot.status == "disconnected" else "unavailable"
             self.transport_state = "unknown"
             self.was_disconnected = True
@@ -2823,17 +2958,17 @@ class PlaybackClock:
             self.last_source_error = snapshot.error_kind
             return
 
+        source_elapsed = self._source_elapsed_since_previous(snapshot, now)
         if self.previous_at is not None:
-            self.snapshot_intervals_ms.append((now - self.previous_at) * 1000.0)
-        discontinuity = self._discontinuity_reason(snapshot, now)
+            self.snapshot_intervals_ms.append(source_elapsed)
+        discontinuity = self._discontinuity_reason(snapshot, source_elapsed)
         if discontinuity is not None:
             self.last_discontinuity = discontinuity
             self.discontinuity_count += 1
             self.transport_state = "unknown"
         elif self.previous is not None:
-            elapsed_ms = max(0.0, (now - self.previous_at) * 1000.0)
             observed_ms = snapshot.position_milliseconds - self.previous.position_milliseconds
-            stationary_tolerance = max(PLAYBACK_STATIONARY_TOLERANCE_MS, elapsed_ms * 0.15)
+            stationary_tolerance = max(PLAYBACK_STATIONARY_TOLERANCE_MS, source_elapsed * 0.15)
             self.transport_state = "stationary" if abs(observed_ms) <= stationary_tolerance else "advancing"
             self.last_discontinuity = None
         elif self.was_disconnected:
@@ -2843,6 +2978,10 @@ class PlaybackClock:
         else:
             self.transport_state = "unknown"
 
+        self.last_raw_position_delta_milliseconds = None
+        self.last_compensated_position_delta_milliseconds = None
+        self.anchor_sample_age_milliseconds = self._sample_age_at_receive(snapshot, now)
+        self._record_timing(snapshot)
         self.anchor = snapshot
         self.anchor_at = now
         self.previous = snapshot
@@ -2851,15 +2990,24 @@ class PlaybackClock:
         self.accepted_snapshot_count += 1
         self.last_source_error = None
         self.was_disconnected = False
+        self.last_received_at_monotonic_milliseconds = int(round(now * 1000.0))
 
-    def _discontinuity_reason(self, snapshot, now):
+    def _source_elapsed_since_previous(self, snapshot, now):
+        if self.previous is None or self.previous_at is None:
+            return 0.0
+        current_sample_at = self._sampled_at(snapshot)
+        previous_sample_at = self._sampled_at(self.previous)
+        if current_sample_at is not None and previous_sample_at is not None:
+            return max(0.0, current_sample_at - previous_sample_at)
+        return max(0.0, (now - self.previous_at) * 1000.0)
+
+    def _discontinuity_reason(self, snapshot, elapsed_ms):
         if self.previous is None:
             return None
         if snapshot.deck_number != self.previous.deck_number:
             return "deck_changed"
         if snapshot.track_path != self.previous.track_path:
             return "track_changed"
-        elapsed_ms = max(0.0, (now - self.previous_at) * 1000.0)
         observed_ms = snapshot.position_milliseconds - self.previous.position_milliseconds
         tolerance = max(PLAYBACK_DISCONTINUITY_MINIMUM_MS, elapsed_ms * 2.0)
         if observed_ms < -PLAYBACK_STATIONARY_TOLERANCE_MS:
@@ -2868,28 +3016,73 @@ class PlaybackClock:
             return "position_jump_forward"
         return None
 
+    def _sample_age_at_receive(self, snapshot, now):
+        sampled_at = self._sampled_at(snapshot)
+        if sampled_at is None:
+            self.last_timing_alignment = "legacy_or_unavailable"
+            return 0.0
+        received_at = int(round(now * 1000.0))
+        age = received_at - sampled_at
+        if age < 0 or age > 5_000:
+            self.last_timing_alignment = "untrusted_clock_epoch"
+            return 0.0
+        self.last_timing_alignment = "system_monotonic"
+        self.sample_age_at_receive_ms.append(float(age))
+        return float(age)
+
+    @staticmethod
+    def _sampled_at(snapshot):
+        timing = snapshot.timing if snapshot is not None else None
+        return timing.sampled_at_monotonic_milliseconds if timing is not None else None
+
+    def _record_timing(self, snapshot):
+        timing = snapshot.timing
+        if timing is None:
+            return
+        self.snapshot_assembly_ms.append(float(
+            timing.snapshot_completed_at_monotonic_milliseconds - timing.snapshot_started_at_monotonic_milliseconds
+        ))
+        position_query = next((item for item in timing.query_timings if item.field == "PositionMilliseconds"), None)
+        if position_query is not None:
+            self.position_query_rtt_ms.append(float(position_query.round_trip_milliseconds))
+        reference = timing.position_reference
+        if reference is None or self.transport_state != "advancing":
+            return
+        raw_delta = reference.position_milliseconds - snapshot.position_milliseconds
+        elapsed_from_sample = max(0, reference.sampled_at_monotonic_milliseconds - timing.sampled_at_monotonic_milliseconds)
+        compensated_position = snapshot.position_milliseconds + elapsed_from_sample
+        compensated_delta = reference.position_milliseconds - compensated_position
+        self.last_raw_position_delta_milliseconds = raw_delta
+        self.last_compensated_position_delta_milliseconds = compensated_delta
+        self.raw_position_delta_ms.append(float(abs(raw_delta)))
+        self.compensated_position_delta_ms.append(float(abs(compensated_delta)))
+
     def _estimated_state(self, now, source_read):
         if self.anchor is None:
             return self._unavailable_state(source_read.status)
         age = max(0.0, now - self.anchor_at)
         if age > self.grace_seconds:
             return self._unavailable_state("unavailable")
-        estimated_position = self.anchor.position_milliseconds
+
+        elapsed_milliseconds = 0.0
+        if self.transport_state == "advancing":
+            elapsed_milliseconds = self.anchor_sample_age_milliseconds + age * 1000.0
+        estimated_position = self.anchor.position_milliseconds + int(round(elapsed_milliseconds))
         estimated_beat_position = self.anchor.beat_position
         estimated_beat_number = self.anchor.beat_number
         estimated_bar_number = self.anchor.bar_number
+        beat_phase = self._beat_phase(self.anchor.beat_position)
         extrapolated_beats = 0.0
-        if self.transport_state == "advancing":
-            estimated_position += int(round(age * 1000.0))
-            if self.anchor.bpm is not None:
-                extrapolated_beats = age * self.anchor.bpm / 60.0
-                if estimated_beat_position is not None:
-                    estimated_beat_position += extrapolated_beats
-                estimated_beat_number, estimated_bar_number = self._advance_beat_and_bar(
-                    estimated_beat_number,
-                    estimated_bar_number,
-                    extrapolated_beats,
-                )
+        if self.transport_state == "advancing" and self.anchor.bpm is not None:
+            extrapolated_beats = elapsed_milliseconds * self.anchor.bpm / 60_000.0
+            if estimated_beat_position is not None:
+                estimated_beat_position += extrapolated_beats
+            estimated_beat_number, estimated_bar_number, beat_phase = self._advance_beat_and_bar(
+                estimated_beat_number,
+                estimated_bar_number,
+                beat_phase,
+                extrapolated_beats,
+            )
         virtualdj = self._snapshot_fields(self.anchor)
         beatbeam = {
             "track_path": self.anchor.track_path,
@@ -2898,6 +3091,9 @@ class PlaybackClock:
             "beat_position": estimated_beat_position,
             "beat_number": estimated_beat_number,
             "bar_number": estimated_bar_number,
+            "beat_phase": beat_phase,
+            "time_until_next_beat_milliseconds": self._time_until_next_beat(beat_phase, self.anchor.bpm),
+            "time_until_next_bar_milliseconds": self._time_until_next_bar(estimated_beat_number, beat_phase, self.anchor.bpm),
             "first_beat_milliseconds": self.anchor.first_beat_milliseconds,
             "deck_number": self.anchor.deck_number,
         }
@@ -2909,10 +3105,13 @@ class PlaybackClock:
             "beatbeam": beatbeam,
             "delta": {
                 "position_milliseconds": estimated_position - self.anchor.position_milliseconds,
+                "raw_received_position_milliseconds": self.last_raw_position_delta_milliseconds,
+                "compensated_position_milliseconds": self.last_compensated_position_delta_milliseconds,
                 "beat_agreement": estimated_beat_number == self.anchor.beat_number,
                 "bar_agreement": estimated_bar_number == self.anchor.bar_number,
             },
-            "metrics": self._metrics(age * 1000.0),
+            "timing": self._timing_state(now),
+            "metrics": self._metrics(elapsed_milliseconds),
             "last_discontinuity": self.last_discontinuity,
             "selection": self.anchor.selection,
         }
@@ -2926,9 +3125,12 @@ class PlaybackClock:
             "beatbeam": None,
             "delta": {
                 "position_milliseconds": None,
+                "raw_received_position_milliseconds": None,
+                "compensated_position_milliseconds": None,
                 "beat_agreement": None,
                 "bar_agreement": None,
             },
+            "timing": self._timing_state(None),
             "metrics": self._metrics(None),
             "last_discontinuity": self.last_discontinuity,
             "selection": None,
@@ -2936,13 +3138,33 @@ class PlaybackClock:
         }
 
     @staticmethod
-    def _advance_beat_and_bar(beat_number, bar_number, elapsed_beats):
+    def _beat_phase(beat_position):
+        if beat_position is None or not math.isfinite(beat_position):
+            return 0.0
+        return beat_position - math.floor(beat_position)
+
+    @staticmethod
+    def _advance_beat_and_bar(beat_number, bar_number, beat_phase, elapsed_beats):
         if beat_number is None:
-            return None, bar_number
-        completed = int(math.floor(max(0.0, elapsed_beats)))
+            return None, bar_number, beat_phase
+        total_beats = max(0.0, beat_phase + elapsed_beats)
+        completed = int(math.floor(total_beats + 1e-9))
         offset = (beat_number - 1) + completed
         advanced_bar = None if bar_number is None else bar_number + (offset // 4)
-        return (offset % 4) + 1, advanced_bar
+        return (offset % 4) + 1, advanced_bar, total_beats - math.floor(total_beats)
+
+    @staticmethod
+    def _time_until_next_beat(beat_phase, bpm):
+        if bpm is None or bpm <= 0:
+            return None
+        return (1.0 - beat_phase) * 60_000.0 / bpm
+
+    @staticmethod
+    def _time_until_next_bar(beat_number, beat_phase, bpm):
+        if bpm is None or bpm <= 0 or beat_number is None:
+            return None
+        beats_remaining = (5 - beat_number) - beat_phase
+        return max(0.0, beats_remaining) * 60_000.0 / bpm
 
     @staticmethod
     def _snapshot_fields(snapshot):
@@ -2959,6 +3181,39 @@ class PlaybackClock:
             "metrics": dict(snapshot.metrics),
         }
 
+    def _timing_state(self, now):
+        timing = self.anchor.timing if self.anchor is not None else None
+        return {
+            "source_clock": timing.clock if timing is not None else None,
+            "sample_age_at_receive_milliseconds": self.anchor_sample_age_milliseconds if self.anchor is not None else None,
+            "received_at_monotonic_milliseconds": self.last_received_at_monotonic_milliseconds,
+            "consumed_at_monotonic_milliseconds": None if now is None else int(round(now * 1000.0)),
+            "alignment": self.last_timing_alignment,
+            "query_timings": [] if timing is None else [
+                {
+                    "field": query.field,
+                    "round_trip_milliseconds": query.round_trip_milliseconds,
+                    "request_started_at_monotonic_milliseconds": query.request_started_at_monotonic_milliseconds,
+                    "response_received_at_monotonic_milliseconds": query.response_received_at_monotonic_milliseconds,
+                }
+                for query in timing.query_timings
+            ],
+        }
+
+    @staticmethod
+    def _summary(values):
+        if not values:
+            return {"count": 0, "mean": None, "p50": None, "p95": None, "max": None}
+        ordered = sorted(values)
+        percentile = lambda fraction: ordered[min(len(ordered) - 1, int(math.ceil(len(ordered) * fraction)) - 1)]
+        return {
+            "count": len(ordered),
+            "mean": sum(ordered) / len(ordered),
+            "p50": percentile(.50),
+            "p95": percentile(.95),
+            "max": ordered[-1],
+        }
+
     def _metrics(self, extrapolation_ms):
         interval_average = (
             sum(self.snapshot_intervals_ms) / len(self.snapshot_intervals_ms)
@@ -2972,6 +3227,11 @@ class PlaybackClock:
             "invalid_snapshots": self.invalid_snapshot_count,
             "discontinuities": self.discontinuity_count,
             "reconnects": self.reconnect_count,
+            "position_query_rtt_milliseconds": self._summary(self.position_query_rtt_ms),
+            "snapshot_assembly_milliseconds": self._summary(self.snapshot_assembly_ms),
+            "sample_age_at_receive_milliseconds": self._summary(self.sample_age_at_receive_ms),
+            "raw_position_delta_milliseconds": self._summary(self.raw_position_delta_ms),
+            "compensated_position_delta_milliseconds": self._summary(self.compensated_position_delta_ms),
         }
 
 

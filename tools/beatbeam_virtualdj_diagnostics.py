@@ -11,10 +11,18 @@ def value(mapping, key):
     return "-" if not mapping or mapping.get(key) is None else str(mapping[key])
 
 
+def summary(mapping, key):
+    stats = (mapping or {}).get(key) or {}
+    if not stats or not stats.get("count"):
+        return "-"
+    return "mean {mean:.1f} | p50 {p50:.1f} | p95 {p95:.1f} | max {max:.1f} ms".format(**stats)
+
+
 def print_state(state):
     virtualdj = state.get("virtualdj") or {}
     beatbeam = state.get("beatbeam") or {}
     delta = state.get("delta") or {}
+    timing = state.get("timing") or {}
     metrics = state.get("metrics") or {}
     source_metrics = virtualdj.get("metrics") or {}
     print("\x1b[2J\x1b[H", end="")
@@ -36,9 +44,20 @@ def print_state(state):
         value(beatbeam, "beat_number"), value(beatbeam, "bar_number")
     ))
     print("Delta:")
-    print("  Position: {} ms | Beat agreement: {} | Bar agreement: {}".format(
+    print("  Local extrapolation: {} ms | Beat agreement: {} | Bar agreement: {}".format(
         value(delta, "position_milliseconds"), value(delta, "beat_agreement"), value(delta, "bar_agreement")
     ))
+    print("  Probe raw / compensated: {} / {} ms".format(
+        value(delta, "raw_received_position_milliseconds"), value(delta, "compensated_position_milliseconds")
+    ))
+    print("Timing:")
+    print("  Clock: {} | sample age at receive: {} ms | alignment: {}".format(
+        value(timing, "source_clock"), value(timing, "sample_age_at_receive_milliseconds"), value(timing, "alignment")
+    ))
+    query_timings = timing.get("query_timings") or []
+    if query_timings:
+        query_text = ", ".join("{}={} ms".format(value(item, "field"), value(item, "round_trip_milliseconds")) for item in query_timings)
+        print("  Query RTT: {}".format(query_text))
     print("Metrics:")
     print("  VirtualDJ snapshot/query avg/p95: {} / {} / {} ms | source failures: {}".format(
         value(source_metrics, "snapshot_latency_milliseconds"),
@@ -53,6 +72,8 @@ def print_state(state):
     print("  Accepted/invalid BeatBeam snapshots: {} / {}".format(
         value(metrics, "accepted_snapshots"), value(metrics, "invalid_snapshots")
     ))
+    print("  Position probe raw error: {}".format(summary(metrics, "raw_position_delta_milliseconds")))
+    print("  Position probe compensated error: {}".format(summary(metrics, "compensated_position_delta_milliseconds")))
     if state.get("last_discontinuity"):
         print("Last discontinuity: {}".format(state["last_discontinuity"]))
 

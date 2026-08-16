@@ -10,9 +10,13 @@ from beatbeam_app import (
     PLAYBACK_STATE_SCHEMA_VERSION,
     JsonPlaybackStateSource,
     PlaybackClock,
+    PlaybackPositionReference,
+    PlaybackQueryTiming,
     PlaybackSourceRead,
     PlaybackStateSnapshot,
+    PlaybackTimingSnapshot,
     TransportController,
+    playback_system_monotonic_time,
 )
 
 
@@ -36,6 +40,7 @@ def snapshot(
     deck_number=1,
     status="available",
     is_connected=True,
+    timing=None,
 ):
     return PlaybackStateSnapshot(
         PLAYBACK_STATE_SCHEMA_VERSION,
@@ -54,6 +59,21 @@ def snapshot(
         bar_number if status == "available" else None,
         {"snapshot_latency_milliseconds": 12.0, "error_count": 0},
         None,
+        timing,
+    )
+
+
+def timing(sampled_at, snapshot_started=None, snapshot_completed=None, position_reference=None):
+    snapshot_started = sampled_at - 50 if snapshot_started is None else snapshot_started
+    snapshot_completed = sampled_at + 50 if snapshot_completed is None else snapshot_completed
+    return PlaybackTimingSnapshot(
+        "system_monotonic_milliseconds",
+        snapshot_started,
+        snapshot_completed,
+        sampled_at,
+        snapshot_completed,
+        (PlaybackQueryTiming("PositionMilliseconds", sampled_at - 50, sampled_at + 50),),
+        position_reference,
     )
 
 
@@ -157,6 +177,90 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
         self.assertEqual(2, estimated["beatbeam"]["beat_number"])
         self.assertEqual(10, estimated["beatbeam"]["bar_number"])
 
+    def test_timed_sample_is_projected_from_midpoint_to_consumption_time(self):
+        self.publish(snapshot(1, position=1000, timing=timing(0)), 0.050)
+        accepted = self.publish(snapshot(2, position=1250, beat_position=0.5, timing=timing(250)), 0.500)
+
+        self.assertEqual("advancing", accepted["transport_state"])
+        self.assertEqual(1500, accepted["beatbeam"]["estimated_position_milliseconds"])
+        self.assertEqual(250.0, accepted["timing"]["sample_age_at_receive_milliseconds"])
+        self.assertEqual("system_monotonic", accepted["timing"]["alignment"])
+        self.assertEqual(1600, self.clock.state(0.600)["beatbeam"]["estimated_position_milliseconds"])
+
+    def test_stationary_timed_snapshot_is_not_projected(self):
+        self.publish(snapshot(1, position=1000, timing=timing(0)), 0.050)
+        stationary = self.publish(snapshot(2, position=1000, timing=timing(250)), 0.500)
+
+        self.assertEqual("stationary", stationary["transport_state"])
+        self.assertEqual(1000, stationary["beatbeam"]["estimated_position_milliseconds"])
+
+    def test_phase_and_bar_progression_cross_beat_four_to_one(self):
+        self.publish(snapshot(1, position=1000, beat_position=3.5, beat_number=4, bar_number=9, timing=timing(0)), 0.050)
+        self.publish(snapshot(2, position=1250, beat_position=4.0, beat_number=1, bar_number=10, timing=timing(250)), 0.300)
+
+        state = self.clock.state(0.500)
+
+        self.assertEqual(0.5, state["beatbeam"]["beat_phase"])
+        self.assertEqual(1, state["beatbeam"]["beat_number"])
+        self.assertEqual(10, state["beatbeam"]["bar_number"])
+        self.assertEqual(250.0, state["beatbeam"]["time_until_next_beat_milliseconds"])
+        self.assertEqual(1750.0, state["beatbeam"]["time_until_next_bar_milliseconds"])
+
+    def test_local_beat_four_to_one_increments_the_bar(self):
+        self.publish(snapshot(1, position=1000, beat_position=3.0, beat_number=4, bar_number=9, timing=timing(0)), 0.050)
+        self.publish(snapshot(2, position=1250, beat_position=3.5, beat_number=4, bar_number=9, timing=timing(250)), 0.300)
+
+        state = self.clock.state(0.500)
+
+        self.assertEqual(1, state["beatbeam"]["beat_number"])
+        self.assertEqual(10, state["beatbeam"]["bar_number"])
+        self.assertEqual(0.0, state["beatbeam"]["beat_phase"])
+
+    def test_small_timing_error_is_not_a_discontinuity(self):
+        self.publish(snapshot(1, position=1000, timing=timing(0)), 0.050)
+        accepted = self.publish(snapshot(2, position=1260, beat_position=0.52, timing=timing(250)), 0.300)
+
+        self.assertEqual("advancing", accepted["transport_state"])
+        self.assertIsNone(accepted["last_discontinuity"])
+
+    def test_independent_position_reference_records_raw_and_compensated_delta(self):
+        self.publish(snapshot(1, position=1000, timing=timing(0)), 0.050)
+        reference = PlaybackPositionReference(
+            1350,
+            350,
+            PlaybackQueryTiming("PositionMilliseconds", 300, 400),
+        )
+        self.publish(snapshot(2, position=1250, beat_position=0.5, timing=timing(250, position_reference=reference)), 0.350)
+
+        metrics = self.clock.state(0.350)["metrics"]
+        self.assertEqual(100.0, metrics["raw_position_delta_milliseconds"]["mean"])
+        self.assertEqual(0.0, metrics["compensated_position_delta_milliseconds"]["mean"])
+
+    def test_timing_with_an_unrelated_monotonic_epoch_falls_back_without_runaway(self):
+        self.publish(snapshot(1, position=1000, timing=timing(10_000)), 0.050)
+        second = self.publish(snapshot(2, position=1250, beat_position=0.5, timing=timing(10_250)), 0.300)
+
+        self.assertEqual("untrusted_clock_epoch", second["timing"]["alignment"])
+        self.assertEqual(1250, second["beatbeam"]["estimated_position_milliseconds"])
+
+    def test_clock_uses_monotonic_time_not_the_wall_clock(self):
+        self.source.snapshot = snapshot(1, position=1000)
+        with patch("beatbeam_app.playback_system_monotonic_time", return_value=0.0), patch("beatbeam_app.time.time", return_value=1.0):
+            self.clock.state()
+        self.source.snapshot = snapshot(2, position=1250, beat_position=0.5)
+        with patch("beatbeam_app.playback_system_monotonic_time", return_value=0.25), patch("beatbeam_app.time.time", return_value=9_999_999_999.0):
+            self.clock.state()
+        with patch("beatbeam_app.playback_system_monotonic_time", return_value=0.35), patch("beatbeam_app.time.time", return_value=-9_999_999_999.0):
+            state = self.clock.state()
+
+        self.assertEqual(1350, state["beatbeam"]["estimated_position_milliseconds"])
+
+    def test_system_clock_prefers_the_shared_uptime_clock(self):
+        with patch("beatbeam_app.time.clock_gettime", return_value=123.456) as clock_gettime:
+            self.assertEqual(123.456, playback_system_monotonic_time())
+
+        self.assertEqual(getattr(__import__("time"), "CLOCK_UPTIME_RAW"), clock_gettime.call_args.args[0])
+
     def test_json_source_requires_the_versioned_generic_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
@@ -190,6 +294,37 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
             valid = JsonPlaybackStateSource(path).read()
             self.assertEqual("available", valid.status)
             self.assertEqual("/Music/O'Brien - Café.flac", valid.snapshot.track_path)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["timing"] = {
+                "clock": "system_monotonic_milliseconds",
+                "snapshot_started_at_monotonic_milliseconds": 200,
+                "snapshot_completed_at_monotonic_milliseconds": 100,
+                "sampled_at_monotonic_milliseconds": 150,
+                "published_at_monotonic_milliseconds": 200,
+                "query_timings": [],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertEqual("invalid", JsonPlaybackStateSource(path).read().status)
+
+            payload["timing"] = {
+                "clock": "system_monotonic_milliseconds",
+                "snapshot_started_at_monotonic_milliseconds": 100,
+                "snapshot_completed_at_monotonic_milliseconds": 300,
+                "sampled_at_monotonic_milliseconds": 200,
+                "published_at_monotonic_milliseconds": 300,
+                "query_timings": [
+                    {
+                        "field": "PositionMilliseconds",
+                        "request_started_at_monotonic_milliseconds": 150,
+                        "response_received_at_monotonic_milliseconds": 250,
+                    }
+                ],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            parsed = JsonPlaybackStateSource(path).read()
+            self.assertEqual("available", parsed.status)
+            self.assertEqual(200, parsed.snapshot.timing.sampled_at_monotonic_milliseconds)
 
     def test_developer_source_switch_and_snapshot_path_are_persisted(self):
         with tempfile.TemporaryDirectory() as directory:
