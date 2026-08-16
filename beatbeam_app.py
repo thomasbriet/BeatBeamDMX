@@ -15,6 +15,7 @@ import threading
 import time
 from collections import deque
 from contextlib import suppress
+from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,6 +56,13 @@ DEFAULT_DMX_FPS = 30.0
 API_SCHEMA_VERSION = 4
 DEFAULT_MANUAL_BPM = 124.0
 DEFAULT_MANUAL_PHRASE = "verse"
+PLAYBACK_STATE_SCHEMA_VERSION = 1
+PLAYBACK_CLOCK_GRACE_SECONDS = 1.0
+PLAYBACK_STATIONARY_TOLERANCE_MS = 45.0
+PLAYBACK_DISCONTINUITY_MINIMUM_MS = 750.0
+DEFAULT_VIRTUALDJ_PLAYBACK_STATE_PATH = (
+    Path.home() / "Library/Application Support/MusicAnalyzer/virtualdj-playback.json"
+)
 FIXTURE_LIBRARY = load_fixture_profiles()
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = DEFAULT_HTTP_PORT
@@ -2574,6 +2582,414 @@ TRANSPORT_SOURCE_MODES = {
     "external_osc",
     "manual_tap",
 }
+
+DEVELOPER_PLAYBACK_SOURCES = {
+    "current",
+    "virtualdj",
+}
+
+
+@dataclass(frozen=True)
+class PlaybackStateSnapshot:
+    schema_version: int
+    sequence: int
+    captured_at_unix_milliseconds: int
+    is_connected: bool
+    status: str
+    selection: str
+    deck_number: object
+    track_path: object
+    bpm: object
+    position_milliseconds: object
+    first_beat_milliseconds: object
+    beat_position: object
+    beat_number: object
+    bar_number: object
+    metrics: dict
+    error_kind: object
+
+    def fingerprint(self):
+        return (
+            self.sequence,
+            self.captured_at_unix_milliseconds,
+            self.is_connected,
+            self.status,
+            self.deck_number,
+            self.track_path,
+            self.position_milliseconds,
+            self.bpm,
+            self.beat_position,
+            self.beat_number,
+            self.bar_number,
+        )
+
+
+@dataclass(frozen=True)
+class PlaybackSourceRead:
+    snapshot: object
+    status: str
+    error: object = None
+
+
+class PlaybackStateSource:
+    """Source-neutral state reader used only by developer playback diagnostics."""
+
+    def read(self):
+        raise NotImplementedError
+
+
+class JsonPlaybackStateSource(PlaybackStateSource):
+    def __init__(self, path):
+        self.path = Path(path).expanduser()
+
+    def read(self):
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return PlaybackSourceRead(None, "unavailable")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return PlaybackSourceRead(None, "invalid", type(exc).__name__)
+        try:
+            return PlaybackSourceRead(self._parse(payload), "available")
+        except ValueError as exc:
+            return PlaybackSourceRead(None, "invalid", str(exc))
+
+    @staticmethod
+    def _parse(payload):
+        if not isinstance(payload, dict):
+            raise ValueError("Playback snapshot must be an object.")
+        if payload.get("schema_version") != PLAYBACK_STATE_SCHEMA_VERSION:
+            raise ValueError("Unsupported playback snapshot schema.")
+        sequence = JsonPlaybackStateSource._positive_int(payload.get("sequence"), "sequence")
+        captured_at = JsonPlaybackStateSource._non_negative_int(
+            payload.get("captured_at_unix_milliseconds"), "captured_at_unix_milliseconds"
+        )
+        is_connected = payload.get("is_connected")
+        if not isinstance(is_connected, bool):
+            raise ValueError("is_connected must be boolean.")
+        status = str(payload.get("status") or "").strip().lower()
+        if status not in {"available", "unavailable", "disconnected"}:
+            raise ValueError("Invalid playback snapshot status.")
+        selection = str(payload.get("selection") or "").strip().lower()
+        if selection not in {"active_deck", "configured_deck", "none"}:
+            raise ValueError("Invalid playback deck selection.")
+        deck_number = JsonPlaybackStateSource._optional_positive_int(payload.get("deck_number"), "deck_number")
+        track_path = JsonPlaybackStateSource._optional_text(payload.get("track_path"), "track_path")
+        bpm = JsonPlaybackStateSource._optional_positive_float(payload.get("bpm"), "bpm")
+        position = JsonPlaybackStateSource._optional_non_negative_int(
+            payload.get("position_milliseconds"), "position_milliseconds"
+        )
+        first_beat = JsonPlaybackStateSource._optional_non_negative_float(
+            payload.get("first_beat_milliseconds"), "first_beat_milliseconds"
+        )
+        beat_position = JsonPlaybackStateSource._optional_non_negative_float(
+            payload.get("beat_position"), "beat_position"
+        )
+        beat_number = JsonPlaybackStateSource._optional_range_int(payload.get("beat_number"), "beat_number", 1, 4)
+        bar_number = JsonPlaybackStateSource._optional_positive_int(payload.get("bar_number"), "bar_number")
+        metrics = payload.get("metrics")
+        if not isinstance(metrics, dict):
+            raise ValueError("Playback snapshot metrics must be an object.")
+        if status == "available" and (
+            not is_connected
+            or deck_number is None
+            or track_path is None
+            or bpm is None
+            or position is None
+        ):
+            raise ValueError("Available playback snapshot misses required timing values.")
+        return PlaybackStateSnapshot(
+            PLAYBACK_STATE_SCHEMA_VERSION,
+            sequence,
+            captured_at,
+            is_connected,
+            status,
+            selection,
+            deck_number,
+            track_path,
+            bpm,
+            position,
+            first_beat,
+            beat_position,
+            beat_number,
+            bar_number,
+            dict(metrics),
+            JsonPlaybackStateSource._optional_text(payload.get("error_kind"), "error_kind"),
+        )
+
+    @staticmethod
+    def _positive_int(value, name):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer.")
+        return value
+
+    @staticmethod
+    def _non_negative_int(value, name):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer.")
+        return value
+
+    @staticmethod
+    def _optional_positive_int(value, name):
+        if value is None:
+            return None
+        return JsonPlaybackStateSource._positive_int(value, name)
+
+    @staticmethod
+    def _optional_non_negative_int(value, name):
+        if value is None:
+            return None
+        return JsonPlaybackStateSource._non_negative_int(value, name)
+
+    @staticmethod
+    def _optional_range_int(value, name, minimum, maximum):
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            raise ValueError(f"{name} is outside its valid range.")
+        return value
+
+    @staticmethod
+    def _optional_positive_float(value, name):
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be a positive finite number.")
+        return float(value)
+
+    @staticmethod
+    def _optional_non_negative_float(value, name):
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be a non-negative finite number.")
+        return float(value)
+
+    @staticmethod
+    def _optional_text(value, name):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"{name} must be text.")
+        value = value.strip()
+        return value or None
+
+
+class PlaybackClock:
+    """Anchors authoritative snapshots and bounds local interpolation to a short grace period."""
+
+    def __init__(self, source, grace_seconds=PLAYBACK_CLOCK_GRACE_SECONDS):
+        self.source = source
+        self.grace_seconds = float(grace_seconds)
+        self.anchor = None
+        self.anchor_at = None
+        self.previous = None
+        self.previous_at = None
+        self.last_fingerprint = None
+        self.availability = "unavailable"
+        self.transport_state = "unknown"
+        self.last_discontinuity = None
+        self.discontinuity_count = 0
+        self.reconnect_count = 0
+        self.accepted_snapshot_count = 0
+        self.invalid_snapshot_count = 0
+        self.snapshot_intervals_ms = deque(maxlen=120)
+        self.last_source_error = None
+        self.was_disconnected = False
+
+    def state(self, now=None):
+        now = time.monotonic() if now is None else float(now)
+        source_read = self.source.read()
+        if source_read.snapshot is not None:
+            fingerprint = source_read.snapshot.fingerprint()
+            if fingerprint != self.last_fingerprint:
+                self._accept(source_read.snapshot, now)
+                self.last_fingerprint = fingerprint
+        elif source_read.status == "invalid":
+            self.invalid_snapshot_count += 1
+            self.last_source_error = source_read.error
+        return self._estimated_state(now, source_read)
+
+    def _accept(self, snapshot, now):
+        if snapshot.status != "available" or not snapshot.is_connected:
+            self.anchor = None
+            self.anchor_at = None
+            self.previous = None
+            self.previous_at = None
+            self.availability = "disconnected" if snapshot.status == "disconnected" else "unavailable"
+            self.transport_state = "unknown"
+            self.was_disconnected = True
+            self.last_discontinuity = "disconnected" if self.availability == "disconnected" else "source_unavailable"
+            self.last_source_error = snapshot.error_kind
+            return
+
+        if self.previous_at is not None:
+            self.snapshot_intervals_ms.append((now - self.previous_at) * 1000.0)
+        discontinuity = self._discontinuity_reason(snapshot, now)
+        if discontinuity is not None:
+            self.last_discontinuity = discontinuity
+            self.discontinuity_count += 1
+            self.transport_state = "unknown"
+        elif self.previous is not None:
+            elapsed_ms = max(0.0, (now - self.previous_at) * 1000.0)
+            observed_ms = snapshot.position_milliseconds - self.previous.position_milliseconds
+            stationary_tolerance = max(PLAYBACK_STATIONARY_TOLERANCE_MS, elapsed_ms * 0.15)
+            self.transport_state = "stationary" if abs(observed_ms) <= stationary_tolerance else "advancing"
+            self.last_discontinuity = None
+        elif self.was_disconnected:
+            self.last_discontinuity = "reconnected"
+            self.reconnect_count += 1
+            self.transport_state = "unknown"
+        else:
+            self.transport_state = "unknown"
+
+        self.anchor = snapshot
+        self.anchor_at = now
+        self.previous = snapshot
+        self.previous_at = now
+        self.availability = "available"
+        self.accepted_snapshot_count += 1
+        self.last_source_error = None
+        self.was_disconnected = False
+
+    def _discontinuity_reason(self, snapshot, now):
+        if self.previous is None:
+            return None
+        if snapshot.deck_number != self.previous.deck_number:
+            return "deck_changed"
+        if snapshot.track_path != self.previous.track_path:
+            return "track_changed"
+        elapsed_ms = max(0.0, (now - self.previous_at) * 1000.0)
+        observed_ms = snapshot.position_milliseconds - self.previous.position_milliseconds
+        tolerance = max(PLAYBACK_DISCONTINUITY_MINIMUM_MS, elapsed_ms * 2.0)
+        if observed_ms < -PLAYBACK_STATIONARY_TOLERANCE_MS:
+            return "position_jump_backward"
+        if abs(observed_ms - elapsed_ms) > tolerance:
+            return "position_jump_forward"
+        return None
+
+    def _estimated_state(self, now, source_read):
+        if self.anchor is None:
+            return self._unavailable_state(source_read.status)
+        age = max(0.0, now - self.anchor_at)
+        if age > self.grace_seconds:
+            return self._unavailable_state("unavailable")
+        estimated_position = self.anchor.position_milliseconds
+        estimated_beat_position = self.anchor.beat_position
+        estimated_beat_number = self.anchor.beat_number
+        estimated_bar_number = self.anchor.bar_number
+        extrapolated_beats = 0.0
+        if self.transport_state == "advancing":
+            estimated_position += int(round(age * 1000.0))
+            if self.anchor.bpm is not None:
+                extrapolated_beats = age * self.anchor.bpm / 60.0
+                if estimated_beat_position is not None:
+                    estimated_beat_position += extrapolated_beats
+                estimated_beat_number, estimated_bar_number = self._advance_beat_and_bar(
+                    estimated_beat_number,
+                    estimated_bar_number,
+                    extrapolated_beats,
+                )
+        virtualdj = self._snapshot_fields(self.anchor)
+        beatbeam = {
+            "track_path": self.anchor.track_path,
+            "estimated_position_milliseconds": estimated_position,
+            "bpm": self.anchor.bpm,
+            "beat_position": estimated_beat_position,
+            "beat_number": estimated_beat_number,
+            "bar_number": estimated_bar_number,
+            "first_beat_milliseconds": self.anchor.first_beat_milliseconds,
+            "deck_number": self.anchor.deck_number,
+        }
+        return {
+            "source": "virtualdj",
+            "availability": "available",
+            "transport_state": self.transport_state,
+            "virtualdj": virtualdj,
+            "beatbeam": beatbeam,
+            "delta": {
+                "position_milliseconds": estimated_position - self.anchor.position_milliseconds,
+                "beat_agreement": estimated_beat_number == self.anchor.beat_number,
+                "bar_agreement": estimated_bar_number == self.anchor.bar_number,
+            },
+            "metrics": self._metrics(age * 1000.0),
+            "last_discontinuity": self.last_discontinuity,
+            "selection": self.anchor.selection,
+        }
+
+    def _unavailable_state(self, status):
+        return {
+            "source": "virtualdj",
+            "availability": "disconnected" if self.availability == "disconnected" else status,
+            "transport_state": "unknown",
+            "virtualdj": None,
+            "beatbeam": None,
+            "delta": {
+                "position_milliseconds": None,
+                "beat_agreement": None,
+                "bar_agreement": None,
+            },
+            "metrics": self._metrics(None),
+            "last_discontinuity": self.last_discontinuity,
+            "selection": None,
+            "error": self.last_source_error,
+        }
+
+    @staticmethod
+    def _advance_beat_and_bar(beat_number, bar_number, elapsed_beats):
+        if beat_number is None:
+            return None, bar_number
+        completed = int(math.floor(max(0.0, elapsed_beats)))
+        offset = (beat_number - 1) + completed
+        advanced_bar = None if bar_number is None else bar_number + (offset // 4)
+        return (offset % 4) + 1, advanced_bar
+
+    @staticmethod
+    def _snapshot_fields(snapshot):
+        return {
+            "track_path": snapshot.track_path,
+            "position_milliseconds": snapshot.position_milliseconds,
+            "bpm": snapshot.bpm,
+            "beat_position": snapshot.beat_position,
+            "beat_number": snapshot.beat_number,
+            "bar_number": snapshot.bar_number,
+            "first_beat_milliseconds": snapshot.first_beat_milliseconds,
+            "deck_number": snapshot.deck_number,
+            "captured_at_unix_milliseconds": snapshot.captured_at_unix_milliseconds,
+            "metrics": dict(snapshot.metrics),
+        }
+
+    def _metrics(self, extrapolation_ms):
+        interval_average = (
+            sum(self.snapshot_intervals_ms) / len(self.snapshot_intervals_ms)
+            if self.snapshot_intervals_ms
+            else None
+        )
+        return {
+            "snapshot_interval_milliseconds": interval_average,
+            "extrapolation_milliseconds": extrapolation_ms,
+            "accepted_snapshots": self.accepted_snapshot_count,
+            "invalid_snapshots": self.invalid_snapshot_count,
+            "discontinuities": self.discontinuity_count,
+            "reconnects": self.reconnect_count,
+        }
+
+
+class DeveloperPlaybackController:
+    def __init__(self, state_path):
+        self.state_path = None
+        self.clock = None
+        self.configure(state_path)
+
+    def configure(self, state_path):
+        path = str(Path(state_path).expanduser())
+        if path == self.state_path:
+            return
+        self.state_path = path
+        self.clock = PlaybackClock(JsonPlaybackStateSource(path))
+
+    def state(self):
+        return self.clock.state()
 
 MANUAL_TRANSPORT_PROFILES = {
     "intro": {
@@ -6730,6 +7146,9 @@ class TransportController:
         self.decks = osc_listener.decks
         self._lock = threading.Lock()
         self.config = self._load_config()
+        self.developer_playback = DeveloperPlaybackController(
+            self.config["developer_playback_state_path"]
+        )
         self.tap_times = deque(maxlen=8)
         self.manual_clock_anchor_at = None
         self.manual_clock_beat_at_anchor = 0.0
@@ -6744,6 +7163,8 @@ class TransportController:
             "manual_bpm": DEFAULT_MANUAL_BPM,
             "manual_phrase": DEFAULT_MANUAL_PHRASE,
             "idle_animation_enabled": True,
+            "developer_playback_source": "current",
+            "developer_playback_state_path": str(DEFAULT_VIRTUALDJ_PLAYBACK_STATE_PATH),
         }
 
     def start(self):
@@ -6771,6 +7192,21 @@ class TransportController:
         )
         cleaned["idle_animation_enabled"] = bool(
             cleaned.get("idle_animation_enabled", defaults["idle_animation_enabled"])
+        )
+        developer_source = str(
+            cleaned.get("developer_playback_source", defaults["developer_playback_source"])
+        ).strip().lower()
+        cleaned["developer_playback_source"] = (
+            developer_source
+            if developer_source in DEVELOPER_PLAYBACK_SOURCES
+            else defaults["developer_playback_source"]
+        )
+        configured_path = str(
+            cleaned.get("developer_playback_state_path", defaults["developer_playback_state_path"])
+        ).strip()
+        candidate_path = Path(configured_path).expanduser() if configured_path else DEFAULT_VIRTUALDJ_PLAYBACK_STATE_PATH
+        cleaned["developer_playback_state_path"] = str(
+            candidate_path if candidate_path.is_absolute() else DEFAULT_VIRTUALDJ_PLAYBACK_STATE_PATH
         )
         return cleaned
 
@@ -6843,6 +7279,21 @@ class TransportController:
             persist_config = dict(self.config)
         self._save_config(persist_config)
         return self.transport_state()
+
+    def update_developer_playback(self, payload):
+        payload = payload or {}
+        persist_config = None
+        with self._lock:
+            merged = dict(self.config)
+            if "source" in payload:
+                merged["developer_playback_source"] = payload["source"]
+            if "snapshot_path" in payload:
+                merged["developer_playback_state_path"] = payload["snapshot_path"]
+            self.config = self._clean_config(merged)
+            self.developer_playback.configure(self.config["developer_playback_state_path"])
+            persist_config = dict(self.config)
+        self._save_config(persist_config)
+        return self.developer_playback_state()
 
     def tap(self, now=None):
         now = float(time.time() if now is None else now)
@@ -7007,6 +7458,54 @@ class TransportController:
     def transport_state(self):
         state = self.state()
         return dict(state.get("transport") or {})
+
+    def developer_playback_state(self, current_state=None):
+        with self._lock:
+            source = self.config.get("developer_playback_source", "current")
+        if source == "virtualdj":
+            return self.developer_playback.state()
+        current_state = dict(current_state or self.state())
+        bpm = current_state.get("bpm")
+        beat_display = current_state.get("beat_display")
+        beat_number = None
+        if isinstance(beat_display, (int, float)):
+            beat_number = int(math.floor(beat_display))
+            beat_number = beat_number if 1 <= beat_number <= 4 else None
+        return {
+            "source": "current",
+            "availability": "available" if bpm else "unavailable",
+            "transport_state": "current",
+            "virtualdj": None,
+            "beatbeam": {
+                "track_path": None,
+                "estimated_position_milliseconds": (
+                    int(round(float(current_state["time_display_seconds"]) * 1000.0))
+                    if current_state.get("time_display_seconds") is not None
+                    else None
+                ),
+                "bpm": bpm,
+                "beat_position": current_state.get("beat_value"),
+                "beat_number": beat_number,
+                "bar_number": None,
+                "first_beat_milliseconds": None,
+                "deck_number": None,
+            },
+            "delta": {
+                "position_milliseconds": None,
+                "beat_agreement": None,
+                "bar_agreement": None,
+            },
+            "metrics": {
+                "snapshot_interval_milliseconds": None,
+                "extrapolation_milliseconds": None,
+                "accepted_snapshots": 0,
+                "invalid_snapshots": 0,
+                "discontinuities": 0,
+                "reconnects": 0,
+            },
+            "last_discontinuity": None,
+            "selection": None,
+        }
 
     def source_state(self):
         state = self.state()
@@ -12041,6 +12540,7 @@ def full_state():
         "remote": remote_access_state(),
         "source": TRANSPORT.source_state(),
         "transport": TRANSPORT.transport_state(),
+        "developer_playback": TRANSPORT.developer_playback_state(osc_state),
     }
 
 
@@ -12131,6 +12631,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/state":
             self.send_json(full_state())
             return
+        if path == "/api/developer/playback":
+            self.send_json(TRANSPORT.developer_playback_state())
+            return
         if path == "/api/ports":
             self.send_json({"ports": serial_ports()})
             return
@@ -12188,6 +12691,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/transport/reset":
                 TRANSPORT.reset_manual_clock()
+                self.send_json(full_state())
+                return
+            if path == "/api/developer/playback/update":
+                TRANSPORT.update_developer_playback(payload)
                 self.send_json(full_state())
                 return
         except Exception as exc:
