@@ -349,6 +349,18 @@ func nativeLog(_ text: String) {
     }
 }
 
+func redactedRemoteURL(_ value: String?) -> String {
+    guard let value, !value.isEmpty, var components = URLComponents(string: value) else {
+        return value ?? "nil"
+    }
+    components.queryItems = components.queryItems?.map { item in
+        item.name.caseInsensitiveCompare("token") == .orderedSame
+            ? URLQueryItem(name: item.name, value: "<redacted>")
+            : item
+    }
+    return components.string ?? value
+}
+
 private func clampDMX(_ value: Int) -> Int {
     min(255, max(0, value))
 }
@@ -364,6 +376,46 @@ struct AppState: Decodable {
     let remote: RemoteAccessState?
     let source: SourceState
     let transport: TransportState
+    let liveUi: LiveUiState?
+}
+
+struct LiveUiState: Decodable {
+    let source: String?
+    let availability: String?
+    let transportState: String?
+    let activeDeckNumber: Int?
+    let trackPath: String?
+    let trackTitle: String?
+    let trackArtist: String?
+    let bpm: Double?
+    let beatNumber: Int?
+    let barNumber: Int?
+    let fractionalBeat: Double?
+    let positionMilliseconds: Int?
+    let phrase: String?
+    let nextPhrase: String?
+    let barsToNext: Int?
+    let structureStatus: String?
+    let structureReason: String?
+    let decks: [LiveDeckState]?
+}
+
+struct LiveDeckState: Decodable {
+    let deckNumber: Int?
+    let isLoaded: Bool?
+    let isActive: Bool?
+    let trackPath: String?
+    let trackTitle: String?
+    let trackArtist: String?
+    let bpm: Double?
+    let positionMilliseconds: Int?
+    let beatNumber: Int?
+    let barNumber: Int?
+    let phrase: String?
+    let nextPhrase: String?
+    let barsToNext: Int?
+    let structureStatus: String?
+    let structureReason: String?
 }
 
 struct RemoteAccessState: Decodable {
@@ -1092,7 +1144,7 @@ struct OscState: Decodable {
     let trackTitle: String?
     let trackArtist: String?
     let trackAlbum: String?
-    let decks: [String: OscDeckState]?
+    let decks: OscDeckCollection?
     let lastBeatAt: Double?
 }
 
@@ -1110,6 +1162,55 @@ struct OscDeckState: Decodable {
     let waveformBands: WaveformBandsState?
     let waveformLookahead: [String: WaveformBandsState]?
     let drumSignals: DrumSignalsState?
+}
+
+struct OscDeckOverviewState: Decodable {
+    let deckNumber: Int
+    let isLoaded: Bool
+    let trackPath: String?
+    let fileName: String?
+    let artist: String?
+    let title: String?
+    let bpm: Double?
+    let positionMilliseconds: Int?
+    let beatPosition: Double?
+    let beatNumber: Int?
+    let barNumber: Int?
+    let capturedAtUnixMilliseconds: Int
+    let isPlaying: Bool?
+}
+
+struct OscDeckCollection: Decodable {
+    let legacy: [String: OscDeckState]?
+    let overview: [OscDeckOverviewState]?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let legacy = try? container.decode([String: OscDeckState].self) {
+            self.legacy = legacy
+            self.overview = nil
+            return
+        }
+
+        let overview = try container.decode([OscDeckOverviewState].self)
+        var seen = Set<Int>()
+        for deck in overview {
+            guard deck.deckNumber > 0 else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "osc.decks deck_number must be positive"
+                )
+            }
+            guard seen.insert(deck.deckNumber).inserted else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "osc.decks contains duplicate deck_number"
+                )
+            }
+        }
+        self.legacy = nil
+        self.overview = overview
+    }
 }
 
 struct OscMessage: Decodable {
@@ -2122,11 +2223,14 @@ final class AppModel: ObservableObject {
     @Published var deck1Title = "Deck 1"
     @Published var deck1Meta = "(geen track)"
     @Published var deck1Time = "-"
+    @Published var deck1IsActive = false
     @Published var deck2Title = "Deck 2"
     @Published var deck2Meta = "(geen track)"
     @Published var deck2Time = "-"
+    @Published var deck2IsActive = false
     @Published var bpmValue = "-"
     @Published var beatValue = "-"
+    @Published var barValue = "-"
     @Published var timeValue = "-"
     @Published var moodValue = "-"
     @Published var transportMode = "auto"
@@ -3693,7 +3797,7 @@ final class AppModel: ObservableObject {
             return
         }
         if let remote = state.remote {
-            nativeLog("remote state decoded: preferred=\(remote.preferredUrl ?? "nil") usb=\(remote.usbUrl ?? "nil") tailscale=\(remote.tailscaleUrl ?? "nil") lan=\(remote.lanUrl ?? "nil") local=\(remote.localUrl ?? "nil")")
+            nativeLog("remote state decoded: preferred=\(redactedRemoteURL(remote.preferredUrl)) usb=\(redactedRemoteURL(remote.usbUrl)) tailscale=\(redactedRemoteURL(remote.tailscaleUrl)) lan=\(redactedRemoteURL(remote.lanUrl)) local=\(redactedRemoteURL(remote.localUrl))")
             remoteURLText = remote.preferredUrl ?? remote.usbUrl ?? remote.tailscaleUrl ?? remote.lanUrl ?? remote.localUrl ?? "-"
             if let usbUrl = remote.usbUrl, !usbUrl.isEmpty, remoteURLText == usbUrl {
                 remoteStatusText = "USB/Wired remote: \(usbUrl)"
@@ -3807,6 +3911,8 @@ final class AppModel: ObservableObject {
         let resolvedLabel = transportResolvedLabel(for: state.source.resolvedMode ?? state.transport.resolvedMode)
         oscSourceStatus = "\(sourceLabel) • \(resolvedLabel) • \(state.source.app) • \(state.source.expectedDestination) • bron \(liveSource)"
 
+        let liveUi = state.liveUi?.source == "virtualdj" ? state.liveUi : nil
+
         let loadedTitle = normalizedDisplay(
             state.osc.trackTitle ?? deckTitleFallback(from: state),
             fallback: "(geen track)"
@@ -3837,8 +3943,40 @@ final class AppModel: ObservableObject {
         ].joined(separator: " • ")
         deck2Time = formatTime(deck2?.timeDisplaySeconds ?? deck2?.timeSeconds)
 
-        let bpmText = formatNumber(state.osc.bpm)
-        let beatText: String
+        if let liveUi {
+            trackTitle = normalizedDisplay(liveUi.trackTitle, fallback: loadedTitle)
+            trackMeta = normalizedDisplay(liveUi.trackArtist, fallback: loadedArtist)
+            func liveDeckMeta(_ deck: LiveDeckState?) -> String {
+                guard let deck, deck.isLoaded == true else { return "(geen track)" }
+                let artist = normalizedDisplay(deck.trackArtist, fallback: "onbekend")
+                let bpm = deck.bpm.map { formatNumber($0) + " BPM" } ?? "BPM -"
+                let beat = deck.beatNumber.map(String.init) ?? "Beat -"
+                let bar = deck.barNumber.map { "Bar \($0)" } ?? "Bar -"
+                let phrase = normalizedDisplay(deck.phrase, fallback: "Phrase -")
+                return "\(artist) • \(bpm) · \(beat) · \(bar)\n\(phrase)"
+            }
+
+            let liveDeck1 = liveUi.decks?.first { $0.deckNumber == 1 }
+            let liveDeck2 = liveUi.decks?.first { $0.deckNumber == 2 }
+            deck1Title = liveDeck1?.isLoaded == true
+                ? normalizedDisplay(liveDeck1?.trackTitle, fallback: "Deck 1")
+                : "Deck 1"
+            deck1Meta = liveDeckMeta(liveDeck1)
+            deck1Time = liveDeck1?.positionMilliseconds.map { formatTime(Double($0) / 1000.0) } ?? "-"
+            deck1IsActive = liveDeck1?.isActive == true || liveUi.activeDeckNumber == 1
+            deck2Title = liveDeck2?.isLoaded == true
+                ? normalizedDisplay(liveDeck2?.trackTitle, fallback: "Deck 2")
+                : "Deck 2"
+            deck2Meta = liveDeckMeta(liveDeck2)
+            deck2Time = liveDeck2?.positionMilliseconds.map { formatTime(Double($0) / 1000.0) } ?? "-"
+            deck2IsActive = liveDeck2?.isActive == true || liveUi.activeDeckNumber == 2
+        } else {
+            deck1IsActive = false
+            deck2IsActive = false
+        }
+
+        var bpmText = formatNumber(state.osc.bpm)
+        var beatText: String
         if let beatDisplay = state.osc.beatDisplay {
             beatText = String(format: "%.2f", beatDisplay)
         } else if let beat = state.osc.beat {
@@ -3847,9 +3985,19 @@ final class AppModel: ObservableObject {
         } else {
             beatText = "-"
         }
+        if let liveUi {
+            bpmText = formatNumber(liveUi.bpm)
+            beatText = liveUi.beatNumber.map(String.init) ?? "-"
+            barValue = liveUi.barNumber.map(String.init) ?? "-"
+            timeValue = liveUi.positionMilliseconds.map { formatTime(Double($0) / 1000.0) } ?? "-"
+        } else {
+            barValue = "-"
+        }
         bpmValue = bpmText
         beatValue = beatText
-        timeValue = formatTime(state.osc.timeDisplaySeconds ?? state.osc.timeSeconds)
+        if liveUi == nil {
+            timeValue = formatTime(state.osc.timeDisplaySeconds ?? state.osc.timeSeconds)
+        }
         moodValue = formatMood(state.osc.mood)
         previewClockAnchorDate = Date()
         previewClockSourceSeconds = state.osc.timeDisplaySeconds ?? state.osc.timeSeconds
@@ -3897,16 +4045,20 @@ final class AppModel: ObservableObject {
         drumHihat = drumSignals?.hihat
         playbackSummary = "BPM \(bpmText)   Beat \(beatText)   Time \(formatTime(state.osc.timeDisplaySeconds ?? state.osc.timeSeconds))"
 
-        let phraseCurrent = normalizedDisplay(state.osc.phraseCurrent, fallback: "-")
-        let phraseNext = normalizedDisplay(state.osc.phraseNext, fallback: "-")
+        let phraseCurrent = normalizedDisplay(liveUi == nil ? state.osc.phraseCurrent : liveUi?.phrase, fallback: "-")
+        let phraseNext = normalizedDisplay(liveUi == nil ? state.osc.phraseNext : liveUi?.nextPhrase, fallback: "-")
         let countIn = state.osc.phraseCountIn.map(String.init) ?? "-"
         let etaBeats = state.osc.phraseCountdownBeats.map { String(format: "%.2f beats", $0) } ?? "-"
         let etaSeconds = state.osc.phraseCountdownSeconds.map { formatTime($0) } ?? "-"
         phraseCurrentValue = phraseCurrent
-        phraseNextValue = phraseNext
+        if let bars = liveUi?.barsToNext, phraseNext != "-" {
+            phraseNextValue = "\(phraseNext) • \(bars) bars"
+        } else {
+            phraseNextValue = phraseNext
+        }
         phraseCountValue = countIn
         phraseEtaValue = etaSeconds == "-" ? etaBeats : "\(etaBeats) / \(etaSeconds)"
-        phraseSummary = "Phrase \(phraseCurrent) -> \(phraseNext)   Count-in \(countIn)   ETA \(etaBeats) / \(etaSeconds)"
+        phraseSummary = "Phrase \(phraseCurrent) -> \(phraseNextValue)   Count-in \(countIn)   ETA \(etaBeats) / \(etaSeconds)"
 
         if state.dmx.connected, let device = state.dmx.port {
             if let port = ports.first(where: { $0.device == device }) {
@@ -4897,7 +5049,7 @@ final class AppModel: ObservableObject {
     }
 
     private func deckState(_ state: AppState, logicalDeckNumber: Int) -> OscDeckState? {
-        guard let decks = state.osc.decks else { return nil }
+        guard let decks = state.osc.decks?.legacy else { return nil }
         let zeroBased = decks.keys.contains("0")
         let key = zeroBased ? String(max(0, logicalDeckNumber - 1)) : String(logicalDeckNumber)
         return decks[key]
@@ -5364,8 +5516,8 @@ struct ContentView: View {
         PanelSurface(title: "Now", compact: true) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    DeckTransportTile(title: model.deck1Title, meta: model.deck1Meta, time: model.deck1Time)
-                    DeckTransportTile(title: model.deck2Title, meta: model.deck2Meta, time: model.deck2Time)
+                    DeckTransportTile(title: model.deck1Title, meta: model.deck1Meta, time: model.deck1Time, isActive: model.deck1IsActive)
+                    DeckTransportTile(title: model.deck2Title, meta: model.deck2Meta, time: model.deck2Time, isActive: model.deck2IsActive)
                 }
 
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -5391,15 +5543,17 @@ struct ContentView: View {
 
                 LazyVGrid(
                     columns: [
-                        GridItem(.flexible(minimum: 88), spacing: 8),
-                        GridItem(.flexible(minimum: 88), spacing: 8),
-                        GridItem(.flexible(minimum: 88), spacing: 8),
-                        GridItem(.flexible(minimum: 88), spacing: 8),
+                        GridItem(.flexible(minimum: 72), spacing: 8),
+                        GridItem(.flexible(minimum: 72), spacing: 8),
+                        GridItem(.flexible(minimum: 72), spacing: 8),
+                        GridItem(.flexible(minimum: 72), spacing: 8),
+                        GridItem(.flexible(minimum: 72), spacing: 8),
                     ],
                     spacing: 8
                 ) {
                     CompactMetricTile(title: "BPM", value: model.bpmValue)
                     CompactMetricTile(title: "Beat", value: model.beatValue)
+                    CompactMetricTile(title: "Bar", value: model.barValue)
                     CompactMetricTile(title: "Phrase", value: model.phraseCurrentValue)
                     CompactMetricTile(title: "Next", value: model.phraseNextValue)
                 }
@@ -5415,8 +5569,8 @@ struct ContentView: View {
                 TransportControlPanel()
 
                 HStack(spacing: 8) {
-                    DeckTransportTile(title: model.deck1Title, meta: model.deck1Meta, time: model.deck1Time)
-                    DeckTransportTile(title: model.deck2Title, meta: model.deck2Meta, time: model.deck2Time)
+                    DeckTransportTile(title: model.deck1Title, meta: model.deck1Meta, time: model.deck1Time, isActive: model.deck1IsActive)
+                    DeckTransportTile(title: model.deck2Title, meta: model.deck2Meta, time: model.deck2Time, isActive: model.deck2IsActive)
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -15098,13 +15252,19 @@ struct DeckTransportTile: View {
     let title: String
     let meta: String
     let time: String
+    let isActive: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title.uppercased())
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(BeatBeamPalette.secondaryText)
+                    .foregroundStyle(isActive ? BeatBeamPalette.brandCyan : BeatBeamPalette.secondaryText)
+                if isActive {
+                    Text("ACTIVE")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(BeatBeamPalette.brandCyan)
+                }
                 Spacer(minLength: 8)
                 Text(time)
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))

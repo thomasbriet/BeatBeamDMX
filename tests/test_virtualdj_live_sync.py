@@ -21,6 +21,8 @@ from beatbeam_app import (
     VirtualDjBeatPulsePlan,
     VirtualDjBeatPulsePlanner,
     VirtualDjBeatPulseScheduler,
+    bars_to_next,
+    live_ui_state,
     playback_system_monotonic_time,
 )
 
@@ -46,6 +48,7 @@ def snapshot(
     status="available",
     is_connected=True,
     timing=None,
+    decks=None,
 ):
     return PlaybackStateSnapshot(
         PLAYBACK_STATE_SCHEMA_VERSION,
@@ -65,6 +68,7 @@ def snapshot(
         {"snapshot_latency_milliseconds": 12.0, "error_count": 0},
         None,
         timing,
+        decks,
     )
 
 
@@ -86,6 +90,96 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
     def setUp(self):
         self.source = SequenceSource()
         self.clock = PlaybackClock(self.source, grace_seconds=1.0)
+
+    def test_bars_to_next_uses_conservative_ceiling_and_current_tempo(self):
+        self.assertEqual(8, bars_to_next(8 * 240 / 120, 120))
+        self.assertEqual(8, bars_to_next(7.9 * 240 / 120, 120))
+        self.assertEqual(8, bars_to_next(7.01 * 240 / 120, 120))
+        self.assertEqual(7, bars_to_next(7.0 * 240 / 120, 120))
+        self.assertEqual(1, bars_to_next(2.0, 120))
+        self.assertEqual(1, bars_to_next(0.001, 120))
+        self.assertEqual(0, bars_to_next(0.0, 120))
+        self.assertIsNone(bars_to_next(1.0, 0))
+        self.assertIsNone(bars_to_next(-0.1, 120))
+
+    def test_live_ui_keeps_decks_typed_and_semantics_track_specific(self):
+        state = {
+            "_active_playback_source": "virtualdj",
+            "playback_state": {
+                "source": "virtualdj",
+                "availability": "available",
+                "transport_state": "advancing",
+                "beatbeam": {
+                    "track_path": "/Music/Example/O'Brien Café.flac",
+                    "estimated_position_milliseconds": 20_000,
+                    "bpm": 120.0,
+                    "beat_position": 1.5,
+                    "beat_number": 2,
+                    "bar_number": 2,
+                    "deck_number": 2,
+                },
+                "decks": [
+                    {
+                        "deck_number": 1,
+                        "is_loaded": False,
+                        "track_path": None,
+                        "file_name": None,
+                        "artist": None,
+                        "title": None,
+                        "bpm": None,
+                        "position_milliseconds": None,
+                        "beat_position": None,
+                        "beat_number": None,
+                        "bar_number": None,
+                        "captured_at_unix_milliseconds": 1,
+                        "is_playing": False,
+                    },
+                    {
+                        "deck_number": 2,
+                        "is_loaded": True,
+                        "track_path": "/Music/Example/O'Brien Café.flac",
+                        "file_name": "O'Brien Café.flac",
+                        "artist": "Artist",
+                        "title": "Example",
+                        "bpm": 120.0,
+                        "position_milliseconds": 20_000,
+                        "beat_position": 1.5,
+                        "beat_number": 2,
+                        "bar_number": 2,
+                        "captured_at_unix_milliseconds": 1,
+                        "is_playing": True,
+                    },
+                ],
+                "metrics": {},
+            },
+        }
+        from beatbeam_app import SongAnalyzerStructureHandoff
+        with tempfile.TemporaryDirectory() as directory:
+            handoff_path = Path(directory) / "handoff.json"
+            handoff_path.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "tracks": [{
+                        "canonical_path": "/Music/Example/O'Brien Café.flac",
+                        "availability": "current",
+                        "structure": {
+                            "model": "test",
+                            "segments": [
+                                {"index": 0, "start_seconds": 0, "end_seconds": 16, "label": "Intro 1"},
+                                {"index": 1, "start_seconds": 16, "end_seconds": 40, "label": "Chorus 1"},
+                            ],
+                        },
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            with patch("beatbeam_app.SONG_ANALYZER_STRUCTURE", SongAnalyzerStructureHandoff(handoff_path, 0)):
+                live = live_ui_state(state)
+        self.assertEqual(2, live["active_deck_number"])
+        self.assertEqual("Chorus 1", live["phrase"])
+        self.assertIsNone(live["next_phrase"])
+        self.assertFalse(live["decks"][0]["is_loaded"])
+        self.assertTrue(live["decks"][1]["is_active"])
 
     def publish(self, value, at):
         self.source.snapshot = value
@@ -160,6 +254,59 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
         self.assertEqual("available", reconnected["availability"])
         self.assertEqual("reconnected", reconnected["last_discontinuity"])
         self.assertEqual(75_000, reconnected["beatbeam"]["estimated_position_milliseconds"])
+
+    def test_unavailable_fast_transport_keeps_the_current_multi_deck_overview(self):
+        decks = [
+            {
+                "deck_number": 1,
+                "is_loaded": True,
+                "track_path": "/Music/Deck A.flac",
+                "file_name": "Deck A.flac",
+                "artist": "Artist A",
+                "title": "Deck A",
+                "bpm": 126.0,
+                "position_milliseconds": 1000,
+                "beat_position": 0.0,
+                "beat_number": 1,
+                "bar_number": 1,
+                "captured_at_unix_milliseconds": 1,
+                "is_playing": True,
+            },
+            {
+                "deck_number": 2,
+                "is_loaded": True,
+                "track_path": "/Music/Deck B.flac",
+                "file_name": "Deck B.flac",
+                "artist": "Artist B",
+                "title": "Deck B",
+                "bpm": 125.0,
+                "position_milliseconds": 1000,
+                "beat_position": -0.02,
+                "beat_number": 4,
+                "bar_number": -1,
+                "captured_at_unix_milliseconds": 1,
+                "is_playing": False,
+            },
+        ]
+        self.source.snapshot = snapshot(
+            1,
+            status="unavailable",
+            is_connected=True,
+            decks=decks,
+        )
+        self.source.status = "available"
+
+        state = self.clock.state(0.0)
+
+        self.assertEqual("unavailable", state["availability"])
+        self.assertEqual(decks, state["decks"])
+        self.assertEqual(-0.02, state["decks"][1]["beat_position"])
+        self.assertEqual(-1, state["decks"][1]["bar_number"])
+
+        self.source.snapshot = None
+        self.source.status = "unavailable"
+        cleared = self.clock.state(0.1)
+        self.assertEqual([], cleared["decks"])
 
     def test_unknown_track_path_still_has_timing_and_beat_bar_values(self):
         first = self.publish(
@@ -301,6 +448,29 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
             self.assertEqual("/Music/O'Brien - Café.flac", valid.snapshot.track_path)
 
             payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["decks"] = [
+                {
+                    "deck_number": 2,
+                    "is_loaded": True,
+                    "track_path": "/Music/Deck B.flac",
+                    "file_name": "Deck B.flac",
+                    "artist": "Artist B",
+                    "title": "Deck B",
+                    "bpm": 125.0,
+                    "position_milliseconds": 1000,
+                    "beat_position": -0.02,
+                    "beat_number": 4,
+                    "bar_number": -1,
+                    "captured_at_unix_milliseconds": 1,
+                    "is_playing": False,
+                }
+            ]
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            parsed = JsonPlaybackStateSource(path).read()
+            self.assertEqual("available", parsed.status)
+            self.assertEqual(-0.02, parsed.snapshot.decks[0]["beat_position"])
+            self.assertEqual(-1, parsed.snapshot.decks[0]["bar_number"])
+
             payload["timing"] = {
                 "clock": "system_monotonic_milliseconds",
                 "snapshot_started_at_monotonic_milliseconds": 200,
@@ -659,6 +829,48 @@ class ActivePlaybackSourceTests(unittest.TestCase):
         self.assertIsNone(stopped["bpm"])
         self.assertIsNone(stopped["track_path"])
         self.assertEqual("disconnected", stopped["_playback_event"])
+
+    def test_unavailable_virtualdj_render_preserves_multi_deck_overview(self):
+        transport, _legacy = self.make_transport(virtualdj_state(availability="unavailable"))
+        transport.developer_playback.current_state["decks"] = [
+            {
+                "deck_number": 1,
+                "is_loaded": True,
+                "track_path": "/Music/Deck A.flac",
+                "file_name": "Deck A.flac",
+                "artist": "Artist A",
+                "title": "Deck A",
+                "bpm": 126.0,
+                "position_milliseconds": 1000,
+                "beat_position": 0.0,
+                "beat_number": 1,
+                "bar_number": 1,
+                "captured_at_unix_milliseconds": 1,
+                "is_playing": True,
+            },
+            {
+                "deck_number": 2,
+                "is_loaded": True,
+                "track_path": "/Music/Deck B.flac",
+                "file_name": "Deck B.flac",
+                "artist": "Artist B",
+                "title": "Deck B",
+                "bpm": 125.0,
+                "position_milliseconds": 1000,
+                "beat_position": -0.02,
+                "beat_number": 4,
+                "bar_number": -1,
+                "captured_at_unix_milliseconds": 1,
+                "is_playing": False,
+            },
+        ]
+        transport.update_config({"active_playback_source": "virtualdj"})
+
+        rendered = transport.snapshot_for_render()
+
+        self.assertEqual(2, len(rendered["decks"]))
+        self.assertEqual("/Music/Deck B.flac", rendered["decks"][1]["track_path"])
+        self.assertEqual(-1, rendered["decks"][1]["bar_number"])
 
     def test_unknown_virtualdj_track_cannot_fall_back_to_another_tracks_structure(self):
         transport, _legacy = self.make_transport()

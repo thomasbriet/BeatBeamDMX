@@ -3106,6 +3106,7 @@ class PlaybackStateSnapshot:
     metrics: dict
     error_kind: object
     timing: object = None
+    decks: object = None
 
     def fingerprint(self):
         return (
@@ -3198,6 +3199,7 @@ class JsonPlaybackStateSource(PlaybackStateSource):
         ):
             raise ValueError("Available playback snapshot misses required timing values.")
         timing = JsonPlaybackStateSource._optional_timing(payload.get("timing"))
+        decks = JsonPlaybackStateSource._optional_decks(payload.get("decks"))
         return PlaybackStateSnapshot(
             PLAYBACK_STATE_SCHEMA_VERSION,
             sequence,
@@ -3216,6 +3218,7 @@ class JsonPlaybackStateSource(PlaybackStateSource):
             dict(metrics),
             JsonPlaybackStateSource._optional_text(payload.get("error_kind"), "error_kind"),
             timing,
+            decks,
         )
 
     @staticmethod
@@ -3267,6 +3270,22 @@ class JsonPlaybackStateSource(PlaybackStateSource):
         return float(value)
 
     @staticmethod
+    def _optional_finite_float(value, name):
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"{name} must be a finite number.")
+        return float(value)
+
+    @staticmethod
+    def _optional_int(value, name):
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer.")
+        return value
+
+    @staticmethod
     def _optional_text(value, name):
         if value is None:
             return None
@@ -3274,6 +3293,37 @@ class JsonPlaybackStateSource(PlaybackStateSource):
             raise ValueError(f"{name} must be text.")
         value = value.strip()
         return value or None
+
+    @staticmethod
+    def _optional_decks(value):
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise ValueError("decks must be a list.")
+        result = []
+        for raw in value:
+            if not isinstance(raw, dict):
+                raise ValueError("deck overview items must be objects.")
+            deck_number = JsonPlaybackStateSource._positive_int(raw.get("deck_number"), "deck_number")
+            is_loaded = raw.get("is_loaded")
+            if not isinstance(is_loaded, bool):
+                raise ValueError("deck is_loaded must be boolean.")
+            result.append({
+                "deck_number": deck_number,
+                "is_loaded": is_loaded,
+                "track_path": JsonPlaybackStateSource._optional_text(raw.get("track_path"), "deck.track_path"),
+                "file_name": JsonPlaybackStateSource._optional_text(raw.get("file_name"), "deck.file_name"),
+                "artist": JsonPlaybackStateSource._optional_text(raw.get("artist"), "deck.artist"),
+                "title": JsonPlaybackStateSource._optional_text(raw.get("title"), "deck.title"),
+                "bpm": JsonPlaybackStateSource._optional_positive_float(raw.get("bpm"), "deck.bpm"),
+                "position_milliseconds": JsonPlaybackStateSource._optional_non_negative_int(raw.get("position_milliseconds"), "deck.position_milliseconds"),
+                "beat_position": JsonPlaybackStateSource._optional_finite_float(raw.get("beat_position"), "deck.beat_position"),
+                "beat_number": JsonPlaybackStateSource._optional_range_int(raw.get("beat_number"), "deck.beat_number", 1, 4),
+                "bar_number": JsonPlaybackStateSource._optional_int(raw.get("bar_number"), "deck.bar_number"),
+                "captured_at_unix_milliseconds": JsonPlaybackStateSource._non_negative_int(raw.get("captured_at_unix_milliseconds"), "deck.captured_at_unix_milliseconds"),
+                "is_playing": raw.get("is_playing") if isinstance(raw.get("is_playing"), bool) else None,
+            })
+        return tuple(result)
 
     @staticmethod
     def _optional_timing(value):
@@ -3381,6 +3431,7 @@ class PlaybackClock:
         self.raw_position_delta_ms = deque(maxlen=120)
         self.compensated_position_delta_ms = deque(maxlen=120)
         self.last_source_error = None
+        self.overview_decks = None
         self.was_disconnected = False
         self.last_timing_alignment = "legacy_or_unavailable"
         self.last_received_at_monotonic_milliseconds = None
@@ -3391,11 +3442,20 @@ class PlaybackClock:
         now = playback_system_monotonic_time() if now is None else float(now)
         source_read = self.source.read()
         if source_read.snapshot is not None:
+            self.overview_decks = (
+                list(source_read.snapshot.decks)
+                if source_read.snapshot.status != "disconnected" and source_read.snapshot.decks is not None
+                else None
+            )
             fingerprint = source_read.snapshot.fingerprint()
             if fingerprint != self.last_fingerprint:
                 self._accept(source_read.snapshot, now)
                 self.last_fingerprint = fingerprint
-        elif source_read.status == "invalid":
+        else:
+            # A missing or malformed atomic state file must not leave the last
+            # deck cards visible after the producer has disappeared.
+            self.overview_decks = None
+        if source_read.snapshot is None and source_read.status == "invalid":
             self.invalid_snapshot_count += 1
             self.last_source_error = source_read.error
         return self._estimated_state(now, source_read)
@@ -3413,6 +3473,7 @@ class PlaybackClock:
         self.last_discontinuity = None
         self.was_disconnected = False
         self.last_source_error = None
+        self.overview_decks = None
 
     def _accept(self, snapshot, now):
         if snapshot.status != "available" or not snapshot.is_connected:
@@ -3586,12 +3647,14 @@ class PlaybackClock:
             "metrics": self._metrics(elapsed_milliseconds),
             "last_discontinuity": self.last_discontinuity,
             "selection": self.anchor.selection,
+            "decks": list(self.anchor.decks or ()),
         }
 
     def _unavailable_state(self, status):
+        effective_status = self.availability if self.availability in {"disconnected", "unavailable"} else status
         return {
             "source": "virtualdj",
-            "availability": "disconnected" if self.availability == "disconnected" else status,
+            "availability": effective_status,
             "transport_state": "unknown",
             "virtualdj": None,
             "beatbeam": None,
@@ -3607,6 +3670,7 @@ class PlaybackClock:
             "last_discontinuity": self.last_discontinuity,
             "selection": None,
             "error": self.last_source_error,
+            "decks": list(self.overview_decks or ()),
         }
 
     @staticmethod
@@ -8571,6 +8635,7 @@ class TransportController:
                     "stale": True,
                     "transport": transport,
                     "playback_state": playback_state,
+                    "decks": (playback_state or {}).get("decks"),
                 }
             )
             return snapshot
@@ -8626,6 +8691,7 @@ class TransportController:
                 "stale": False,
                 "transport": transport,
                 "playback_state": playback_state,
+                "decks": (playback_state or {}).get("decks"),
             }
         )
         return snapshot
@@ -14264,6 +14330,164 @@ def remote_access_state():
     return payload
 
 
+def bars_to_next(remaining_seconds, bpm, epsilon=1e-9):
+    """Return the conservative whole-bar countdown for the native UI.
+
+    This is presentation-only. It deliberately uses the current VirtualDJ
+    position and BPM, never a second clock or a phrase-side estimate.
+    """
+    try:
+        remaining = float(remaining_seconds)
+        tempo = float(bpm)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(remaining) or not math.isfinite(tempo) or tempo <= 0 or remaining < -epsilon:
+        return None
+    if remaining <= epsilon:
+        return 0
+    exact_bars = remaining / (240.0 / tempo)
+    return max(1, int(math.ceil(exact_bars - epsilon)))
+
+
+def _live_ui_structure(track_path, position_milliseconds, bpm):
+    if not track_path or position_milliseconds is None or bpm is None:
+        return None
+    try:
+        position_seconds = float(position_milliseconds) / 1000.0
+        if not math.isfinite(position_seconds) or position_seconds < 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    projection = SONG_ANALYZER_STRUCTURE.project({
+        "_active_playback_source": "virtualdj",
+        "track_path": track_path,
+        "time_seconds": position_seconds,
+    })
+    if projection.get("track_match") != "exact" or projection.get("availability") != "available_current":
+        return None
+    if projection.get("projection_status") not in {"in_segment", "in_final_segment"}:
+        return None
+    current = projection.get("current") or {}
+    next_segment = projection.get("next") or {}
+    next_label = next_segment.get("label")
+    remaining = None
+    countdown = None
+    if next_label is not None:
+        remaining = float(next_segment.get("start_seconds", position_seconds)) - position_seconds
+        countdown = bars_to_next(remaining, bpm)
+    return {
+        "phrase": current.get("label"),
+        "next_phrase": next_label,
+        "bars_to_next": countdown,
+        "structure_status": projection.get("projection_status"),
+        "structure_reason": None,
+    }
+
+
+def _live_ui_deck(raw, active_deck_number, active_transport=None):
+    raw = dict(raw or {})
+    deck_number = raw.get("deck_number")
+    if deck_number is None:
+        return None
+    is_active = deck_number == active_deck_number
+    active_transport = active_transport or {}
+    path = raw.get("track_path") if raw.get("is_loaded") else None
+    if is_active and active_transport.get("track_path"):
+        path = active_transport.get("track_path")
+    loaded = bool(raw.get("is_loaded") and path)
+    bpm = raw.get("bpm") if loaded else None
+    position = raw.get("position_milliseconds") if loaded else None
+    beat_number = raw.get("beat_number") if loaded else None
+    bar_number = raw.get("bar_number") if loaded else None
+    if is_active:
+        bpm = active_transport.get("bpm") if active_transport.get("bpm") is not None else bpm
+        position = active_transport.get("position_milliseconds") if active_transport.get("position_milliseconds") is not None else position
+        beat_number = active_transport.get("beat_number") if active_transport.get("beat_number") is not None else beat_number
+        bar_number = active_transport.get("bar_number") if active_transport.get("bar_number") is not None else bar_number
+    title = raw.get("title") or (Path(path).stem if path else None)
+    artist = raw.get("artist")
+    structure = _live_ui_structure(path, position, bpm) if loaded else None
+    return {
+        "deck_number": deck_number,
+        "is_loaded": loaded,
+        "is_active": is_active,
+        "track_path": path,
+        "track_title": title,
+        "track_artist": artist,
+        "bpm": bpm,
+        "position_milliseconds": position,
+        "beat_number": beat_number,
+        "bar_number": bar_number,
+        "phrase": None if structure is None else structure["phrase"],
+        "next_phrase": None if structure is None else structure["next_phrase"],
+        "bars_to_next": None if structure is None else structure["bars_to_next"],
+        "structure_status": None if structure is None else structure["structure_status"],
+        "structure_reason": None if structure is None else structure["structure_reason"],
+    }
+
+
+def live_ui_state(transport_state=None):
+    """Build the typed, read-only projection consumed by the native UI."""
+    state = dict(transport_state or {})
+    playback = dict(state.get("playback_state") or {})
+    beatbeam = dict(playback.get("beatbeam") or {})
+    source = playback.get("source") or state.get("_active_playback_source")
+    active_deck_number = beatbeam.get("deck_number")
+    active_transport = {
+        "track_path": beatbeam.get("track_path"),
+        "position_milliseconds": beatbeam.get("estimated_position_milliseconds"),
+        "bpm": beatbeam.get("bpm"),
+        "beat_number": beatbeam.get("beat_number"),
+        "bar_number": beatbeam.get("bar_number"),
+    }
+    raw_decks = playback.get("decks")
+    if not isinstance(raw_decks, list):
+        raw_decks = []
+    rendered_decks = [
+        deck for deck in (_live_ui_deck(raw, active_deck_number, active_transport) for raw in raw_decks)
+        if deck is not None
+    ]
+    if not rendered_decks and active_deck_number is not None and active_transport.get("track_path"):
+        rendered_decks = [_live_ui_deck({
+            "deck_number": active_deck_number,
+            "is_loaded": True,
+            "track_path": active_transport["track_path"],
+            "title": None,
+            "artist": None,
+            "bpm": active_transport["bpm"],
+            "position_milliseconds": active_transport["position_milliseconds"],
+            "beat_number": active_transport["beat_number"],
+            "bar_number": active_transport["bar_number"],
+        }, active_deck_number, active_transport)]
+    rendered_decks.sort(key=lambda deck: deck["deck_number"])
+    active_deck = next((deck for deck in rendered_decks if deck["is_active"]), None)
+    path = active_transport.get("track_path")
+    title = active_deck.get("track_title") if active_deck else (Path(path).stem if path else None)
+    artist = active_deck.get("track_artist") if active_deck else None
+    structure = _live_ui_structure(path, active_transport.get("position_milliseconds"), active_transport.get("bpm"))
+    return {
+        "source": source,
+        "availability": playback.get("availability", "unavailable"),
+        "transport_state": playback.get("transport_state"),
+        "active_deck_number": active_deck_number,
+        "track_path": path,
+        "track_title": title,
+        "track_artist": artist,
+        "bpm": active_transport.get("bpm"),
+        "beat_number": active_transport.get("beat_number"),
+        "bar_number": active_transport.get("bar_number"),
+        "fractional_beat": beatbeam.get("beat_position"),
+        "position_milliseconds": active_transport.get("position_milliseconds"),
+        "phrase": None if structure is None else structure["phrase"],
+        "next_phrase": None if structure is None else structure["next_phrase"],
+        "bars_to_next": None if structure is None else structure["bars_to_next"],
+        "structure_status": None if structure is None else structure["structure_status"],
+        "structure_reason": None if structure is None else structure["structure_reason"],
+        "decks": rendered_decks,
+        "clock_metrics": playback.get("metrics") or {},
+    }
+
+
 def full_state():
     osc_state = TRANSPORT.state()
     return {
@@ -14275,6 +14499,7 @@ def full_state():
         "transport": TRANSPORT.transport_state(),
         "developer_playback": TRANSPORT.developer_playback_state(osc_state),
         "developer_structure_behavior": structure_behavior_state(osc_state),
+        "live_ui": live_ui_state(osc_state),
     }
 
 
