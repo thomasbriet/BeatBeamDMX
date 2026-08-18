@@ -60,6 +60,13 @@ PLAYBACK_STATE_SCHEMA_VERSION = 1
 PLAYBACK_CLOCK_GRACE_SECONDS = 1.0
 PLAYBACK_STATIONARY_TOLERANCE_MS = 45.0
 PLAYBACK_DISCONTINUITY_MINIMUM_MS = 750.0
+DEFAULT_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS = 100
+MINIMUM_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS = 40
+MAXIMUM_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS = 500
+# A state refresh can arrive just after a scheduled downbeat. Keep that
+# already-due plan briefly so the refresh cannot replace it with the following
+# bar before the scheduler thread has dispatched it.
+MAXIMUM_VIRTUALDJ_BEAT_PULSE_LATE_DISPATCH_MILLISECONDS = 100
 DEFAULT_VIRTUALDJ_PLAYBACK_STATE_PATH = (
     Path.home() / "Library/Application Support/MusicAnalyzer/virtualdj-playback.json"
 )
@@ -3232,6 +3239,283 @@ class PlaybackClock:
             "sample_age_at_receive_milliseconds": self._summary(self.sample_age_at_receive_ms),
             "raw_position_delta_milliseconds": self._summary(self.raw_position_delta_ms),
             "compensated_position_delta_milliseconds": self._summary(self.compensated_position_delta_ms),
+        }
+
+
+@dataclass(frozen=True)
+class VirtualDjBeatPulsePlan:
+    identity: tuple
+    deadline_monotonic_seconds: float
+    track_path: str
+    deck_number: int
+    bar_number: int
+    duration_milliseconds: int
+
+
+class VirtualDjBeatPulsePlanner:
+    """Creates only future beat-1 plans from the accepted M19C clock."""
+
+    @staticmethod
+    def plan(playback_state, now, duration_milliseconds):
+        playback_state = playback_state or {}
+        beatbeam = playback_state.get("beatbeam") or {}
+        timing = playback_state.get("timing") or {}
+        if playback_state.get("source") != "virtualdj":
+            return None, "source_not_virtualdj"
+        if playback_state.get("availability") != "available":
+            return None, "source_unavailable"
+        if playback_state.get("transport_state") != "advancing":
+            return None, "transport_not_advancing"
+        if timing.get("alignment") != "system_monotonic":
+            return None, "untrusted_clock"
+        if playback_state.get("last_discontinuity") is not None:
+            return None, "awaiting_fresh_anchor"
+
+        track_path = str(beatbeam.get("track_path") or "").strip()
+        deck_number = beatbeam.get("deck_number")
+        bar_number = beatbeam.get("bar_number")
+        beat_number = beatbeam.get("beat_number")
+        milliseconds_until_bar = beatbeam.get("time_until_next_bar_milliseconds")
+        if not track_path or not isinstance(deck_number, int) or deck_number < 1:
+            return None, "missing_track_identity"
+        if not isinstance(bar_number, int) or bar_number < 1:
+            return None, "missing_bar"
+        if not isinstance(beat_number, int) or not 1 <= beat_number <= 4:
+            return None, "missing_beat"
+        if not isinstance(milliseconds_until_bar, (int, float)) or not math.isfinite(milliseconds_until_bar):
+            return None, "missing_beat_deadline"
+        if milliseconds_until_bar <= 0:
+            return None, "invalid_beat_deadline"
+
+        next_bar = bar_number + 1
+        return (
+            VirtualDjBeatPulsePlan(
+                identity=(deck_number, track_path, next_bar, 1),
+                deadline_monotonic_seconds=float(now) + (float(milliseconds_until_bar) / 1000.0),
+                track_path=track_path,
+                deck_number=deck_number,
+                bar_number=next_bar,
+                duration_milliseconds=int(duration_milliseconds),
+            ),
+            None,
+        )
+
+
+class VirtualDjBeatPulseScheduler:
+    """Developer-only monotonic deadline scheduler for one deduplicated beat-1 pulse."""
+
+    def __init__(self, dispatch, cancel, clock=playback_system_monotonic_time):
+        self._dispatch = dispatch
+        self._cancel = cancel
+        self._clock = clock
+        self._condition = threading.Condition()
+        self._enabled = False
+        self._slot_id = None
+        self._duration_milliseconds = DEFAULT_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS
+        self._plan = None
+        self._generation = 0
+        self._thread = None
+        self._last_dispatched_identity = None
+        self._last_planned_identity = None
+        self._last_reason = "disabled"
+        self._scheduled_events = 0
+        self._executed_events = 0
+        self._duplicate_events = 0
+        self._cancelled_stale_events = 0
+        self._failed_dispatches = 0
+        self._dispatch_errors_milliseconds = deque(maxlen=240)
+        self._last_event = None
+
+    def start(self, slot_id, duration_milliseconds):
+        with self._condition:
+            self._enabled = True
+            self._slot_id = str(slot_id)
+            self._duration_milliseconds = int(duration_milliseconds)
+            self._plan = None
+            self._generation += 1
+            self._last_dispatched_identity = None
+            self._last_planned_identity = None
+            self._last_reason = "awaiting_transport"
+            self._scheduled_events = 0
+            self._executed_events = 0
+            self._duplicate_events = 0
+            self._cancelled_stale_events = 0
+            self._failed_dispatches = 0
+            self._dispatch_errors_milliseconds.clear()
+            self._last_event = None
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._run,
+                    name="virtualdj-beat-pulse",
+                    daemon=True,
+                )
+                self._thread.start()
+            self._condition.notify_all()
+        self._cancel("restarted")
+        return self.state()
+
+    def stop(self, reason="stopped"):
+        with self._condition:
+            if self._plan is not None:
+                self._cancelled_stale_events += 1
+            self._enabled = False
+            self._plan = None
+            self._generation += 1
+            self._last_reason = str(reason)
+            self._condition.notify_all()
+        self._cancel(str(reason))
+        return self.state()
+
+    def observe(self, playback_state):
+        cancel_reason = None
+        with self._condition:
+            if not self._enabled:
+                return
+            now = float(self._clock())
+            plan, reason = VirtualDjBeatPulsePlanner.plan(
+                playback_state,
+                now,
+                self._duration_milliseconds,
+            )
+            if self._should_dispatch_due_plan_before_replanning(plan, now):
+                self._last_reason = "dispatching_due_plan"
+                self._condition.notify_all()
+                return
+            if plan is None:
+                if self._plan is not None:
+                    self._plan = None
+                    self._generation += 1
+                    self._cancelled_stale_events += 1
+                    cancel_reason = str(reason)
+                self._last_reason = str(reason)
+                self._condition.notify_all()
+            elif plan.identity == self._last_dispatched_identity:
+                self._last_reason = "awaiting_next_bar"
+            else:
+                previous_plan = self._plan
+                if previous_plan is not None and previous_plan.identity != plan.identity:
+                    self._cancelled_stale_events += 1
+                if plan.identity != self._last_planned_identity:
+                    self._scheduled_events += 1
+                    self._last_planned_identity = plan.identity
+                self._plan = plan
+                self._generation += 1
+                self._last_reason = "scheduled"
+                self._condition.notify_all()
+        if cancel_reason is not None:
+            self._cancel(cancel_reason)
+
+    def _should_dispatch_due_plan_before_replanning(self, next_plan, now):
+        current_plan = self._plan
+        if current_plan is None or next_plan is None:
+            return False
+        if (
+            current_plan.track_path != next_plan.track_path
+            or current_plan.deck_number != next_plan.deck_number
+            or next_plan.bar_number != current_plan.bar_number + 1
+        ):
+            return False
+        late_milliseconds = (float(now) - current_plan.deadline_monotonic_seconds) * 1000.0
+        return 0.0 <= late_milliseconds <= MAXIMUM_VIRTUALDJ_BEAT_PULSE_LATE_DISPATCH_MILLISECONDS
+
+    def state(self):
+        with self._condition:
+            plan = self._plan
+            return {
+                "enabled": self._enabled,
+                "slot_id": self._slot_id,
+                "duration_milliseconds": self._duration_milliseconds,
+                "pending": plan is not None,
+                "pending_event": None if plan is None else {
+                    "deck_number": plan.deck_number,
+                    "track_path": plan.track_path,
+                    "bar_number": plan.bar_number,
+                    "beat_number": 1,
+                    "deadline_monotonic_milliseconds": int(round(plan.deadline_monotonic_seconds * 1000.0)),
+                },
+                "last_reason": self._last_reason,
+                "scheduled_events": self._scheduled_events,
+                "executed_events": self._executed_events,
+                "duplicate_events": self._duplicate_events,
+                "cancelled_stale_events": self._cancelled_stale_events,
+                "failed_dispatches": self._failed_dispatches,
+                "dispatch_error_milliseconds": self._summary(self._dispatch_errors_milliseconds),
+                "last_event": self._last_event,
+            }
+
+    def _run(self):
+        while True:
+            with self._condition:
+                while not self._enabled or self._plan is None:
+                    self._condition.wait()
+                plan = self._plan
+                generation = self._generation
+                delay = plan.deadline_monotonic_seconds - float(self._clock())
+                if delay > 0:
+                    self._condition.wait(timeout=delay)
+                    continue
+                if not self._enabled or generation != self._generation or plan != self._plan:
+                    continue
+                self._plan = None
+                if plan.identity == self._last_dispatched_identity:
+                    self._duplicate_events += 1
+                    self._last_reason = "duplicate_suppressed"
+                    continue
+
+            scheduler_wake_at = float(self._clock())
+            dispatched_at = self._dispatch(plan, generation, self._is_current_dispatch)
+            with self._condition:
+                self._last_dispatched_identity = plan.identity
+                self._last_event = {
+                    "deck_number": plan.deck_number,
+                    "track_path": plan.track_path,
+                    "bar_number": plan.bar_number,
+                    "beat_number": 1,
+                    "predicted_deadline_monotonic_milliseconds": int(
+                        round(plan.deadline_monotonic_seconds * 1000.0)
+                    ),
+                    "scheduler_wake_monotonic_milliseconds": int(
+                        round(scheduler_wake_at * 1000.0)
+                    ),
+                    "scheduler_wake_error_milliseconds": (
+                        scheduler_wake_at - plan.deadline_monotonic_seconds
+                    ) * 1000.0,
+                    "dmx_dispatch_monotonic_milliseconds": None if dispatched_at is None else int(
+                        round(float(dispatched_at) * 1000.0)
+                    ),
+                    "dmx_dispatch_error_milliseconds": None if dispatched_at is None else (
+                        float(dispatched_at) - plan.deadline_monotonic_seconds
+                    ) * 1000.0,
+                }
+                if dispatched_at is None:
+                    self._failed_dispatches += 1
+                    self._last_reason = "dispatch_failed"
+                    continue
+                error = (float(dispatched_at) - plan.deadline_monotonic_seconds) * 1000.0
+                self._dispatch_errors_milliseconds.append(abs(error))
+                self._executed_events += 1
+                self._last_reason = "dispatched"
+
+    def _is_current_dispatch(self, plan, generation):
+        with self._condition:
+            return self._enabled and generation == self._generation and plan.identity != self._last_dispatched_identity
+
+    @staticmethod
+    def _summary(values):
+        values = list(values)
+        if not values:
+            return {"count": 0, "mean": None, "p50": None, "p95": None, "max": None}
+        ordered = sorted(values)
+
+        def percentile(fraction):
+            return ordered[min(len(ordered) - 1, int(math.ceil(len(ordered) * fraction)) - 1)]
+
+        return {
+            "count": len(ordered),
+            "mean": sum(ordered) / len(ordered),
+            "p50": percentile(0.50),
+            "p95": percentile(0.95),
+            "max": ordered[-1],
         }
 
 
@@ -7794,6 +8078,7 @@ class DmxController:
         self.osc = osc_listener
         self.debug_log = TRIGGER_LOG
         self.lock = threading.Lock()
+        self.dmx_send_lock = threading.Lock()
         self.dmx = None
         self.thread = None
         self.running = False
@@ -7817,7 +8102,19 @@ class DmxController:
         self.track_preview_summaries = {}
         self.track_show_plans = {}
         self.last_track_plan_prewarm_at = 0.0
+        self.active_virtualdj_beat_pulse = None
+        self.active_virtualdj_beat_pulse_preview = None
         self.config = self._load_config()
+        self.virtualdj_beat_pulse_scheduler = VirtualDjBeatPulseScheduler(
+            self._dispatch_virtualdj_beat_pulse,
+            self._cancel_virtualdj_beat_pulse,
+        )
+        # This uses the same accepted VirtualDJ clock path as the DMX test, but
+        # only changes the native application's preview payload.
+        self.virtualdj_beat_pulse_preview_scheduler = VirtualDjBeatPulseScheduler(
+            self._dispatch_virtualdj_beat_pulse_preview,
+            self._cancel_virtualdj_beat_pulse_preview,
+        )
 
     @staticmethod
     def default_config():
@@ -7930,6 +8227,329 @@ class DmxController:
             if key in preset:
                 common[key] = preset[key]
         return common
+
+    def start_virtualdj_beat_pulse_test(self, payload=None):
+        payload = payload or {}
+        slot_id = str(payload.get("slot_id") or "").strip()
+        if not slot_id:
+            raise ValueError("Kies een bestaande fixture-slot voor de VirtualDJ Beat Pulse Test.")
+        raw_duration = payload.get(
+            "duration_milliseconds",
+            DEFAULT_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS,
+        )
+        try:
+            duration_milliseconds = int(raw_duration)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Pulseduur moet een geheel aantal milliseconden zijn.") from exc
+        duration_milliseconds = max(
+            MINIMUM_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS,
+            min(MAXIMUM_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS, duration_milliseconds),
+        )
+
+        with self.lock:
+            if not self.connected or not self.running or self.dmx is None:
+                raise ValueError("Verbind eerst de bestaande DMX-output voordat je de Beat Pulse Test start.")
+            config = self._clean_full_config(dict(self.config))
+            if config["blackout_active"]:
+                raise ValueError("Schakel blackout uit voordat je de Beat Pulse Test start.")
+            self._virtualdj_pulse_channels_locked(config, slot_id)
+
+        playback_state = self.osc.developer_playback_state()
+        if playback_state.get("source") != "virtualdj":
+            raise ValueError("Selecteer eerst VirtualDJ als developer playback-bron.")
+        self.virtualdj_beat_pulse_scheduler.start(slot_id, duration_milliseconds)
+        self.virtualdj_beat_pulse_scheduler.observe(playback_state)
+        self.debug_log.log(
+            "VIRTUALDJ_BEAT_PULSE_START",
+            slot=slot_id,
+            duration_milliseconds=duration_milliseconds,
+        )
+        return self.virtualdj_beat_pulse_scheduler.state()
+
+    def stop_virtualdj_beat_pulse_test(self):
+        state = self.virtualdj_beat_pulse_scheduler.stop("stopped_by_user")
+        self.debug_log.log("VIRTUALDJ_BEAT_PULSE_STOP")
+        return state
+
+    def virtualdj_beat_pulse_test_state(self):
+        return self.virtualdj_beat_pulse_scheduler.state()
+
+    def start_virtualdj_beat_pulse_preview_test(self, payload=None):
+        payload = payload or {}
+        slot_id = str(payload.get("slot_id") or "").strip()
+        if not slot_id:
+            raise ValueError("Kies een bestaande fixture-slot voor de VirtualDJ Beat Pulse Preview.")
+        raw_duration = payload.get(
+            "duration_milliseconds",
+            DEFAULT_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS,
+        )
+        try:
+            duration_milliseconds = int(raw_duration)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Pulseduur moet een geheel aantal milliseconden zijn.") from exc
+        duration_milliseconds = max(
+            MINIMUM_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS,
+            min(MAXIMUM_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS, duration_milliseconds),
+        )
+
+        with self.lock:
+            config = self._clean_full_config(dict(self.config))
+            self._virtualdj_pulse_channels_locked(config, slot_id)
+
+        playback_state = self.osc.developer_playback_state()
+        if playback_state.get("source") != "virtualdj":
+            raise ValueError("Selecteer eerst VirtualDJ als developer playback-bron.")
+        self.virtualdj_beat_pulse_preview_scheduler.start(slot_id, duration_milliseconds)
+        self.virtualdj_beat_pulse_preview_scheduler.observe(playback_state)
+        self.debug_log.log(
+            "VIRTUALDJ_BEAT_PULSE_PREVIEW_START",
+            slot=slot_id,
+            duration_milliseconds=duration_milliseconds,
+        )
+        return self.virtualdj_beat_pulse_preview_test_state()
+
+    def stop_virtualdj_beat_pulse_preview_test(self):
+        state = self.virtualdj_beat_pulse_preview_scheduler.stop("stopped_by_user")
+        self.debug_log.log("VIRTUALDJ_BEAT_PULSE_PREVIEW_STOP")
+        return self.virtualdj_beat_pulse_preview_test_state(state)
+
+    def virtualdj_beat_pulse_preview_test_state(self, scheduler_state=None):
+        state = dict(scheduler_state or self.virtualdj_beat_pulse_preview_scheduler.state())
+        state["mode"] = "preview_only"
+        state["physical_dmx_output"] = False
+        return state
+
+    def _virtualdj_pulse_channels_locked(self, config, slot_id):
+        slot_config = (config.get("slots") or {}).get(slot_id)
+        if not isinstance(slot_config, dict):
+            raise ValueError("Het gekozen fixture-slot bestaat niet.")
+        if not slot_config.get("enabled"):
+            raise ValueError("Het gekozen fixture-slot is uitgeschakeld.")
+        fixture = find_fixture(FIXTURE_LIBRARY, slot_config["fixture"])
+        mode = find_mode(fixture, slot_config["mode"])
+        address = int(slot_config["address"])
+        channels = tuple(
+            address + int(channel["offset"]) - 1
+            for channel in mode["channels"]
+            if channel.get("type") == "intensity"
+        )
+        if not channels:
+            raise ValueError("Het gekozen fixtureprofiel heeft geen veilige dimmer/intensity-kanaalroute.")
+        return channels
+
+    def _observe_virtualdj_beat_pulse_test(self, playback_state):
+        self.virtualdj_beat_pulse_scheduler.observe(playback_state)
+
+    def _observe_virtualdj_beat_pulse_preview_test(self, playback_state):
+        self.virtualdj_beat_pulse_preview_scheduler.observe(playback_state)
+
+    def _apply_virtualdj_beat_pulse_overlay_locked(self, values):
+        active = self.active_virtualdj_beat_pulse
+        if not active:
+            return values
+        output = dict(values)
+        for channel in active["channels"]:
+            output[channel] = 255
+        return output
+
+    def _apply_virtualdj_beat_pulse_preview_overlay_locked(self, slot_previews):
+        active = self.active_virtualdj_beat_pulse_preview
+        if not active or time.monotonic() >= active["expires_at_monotonic_seconds"]:
+            return slot_previews
+        slot_id = active["slot_id"]
+        preview = slot_previews.get(slot_id)
+        if not isinstance(preview, dict):
+            return slot_previews
+
+        # Deliberately use an unmistakable white flash. This is a visual timing
+        # simulator only; it neither reuses nor changes the DMX output frame.
+        output = dict(slot_previews)
+        output[slot_id] = {
+            **preview,
+            "red": 255,
+            "green": 255,
+            "blue": 255,
+            "white": 255,
+            "brightness": 255,
+            "strobe": 0,
+            "strobe_active": False,
+            "strobe_external": False,
+            "developer_virtualdj_beat_pulse_preview": True,
+        }
+        return output
+
+    def _send_dmx_frame(self, dmx, values):
+        with self.dmx_send_lock:
+            dispatched_at = playback_system_monotonic_time()
+            dmx.send(values)
+            return dispatched_at
+
+    def _dispatch_virtualdj_beat_pulse(self, plan, generation, is_current):
+        if not is_current(plan, generation):
+            return None
+        slot_id = self.virtualdj_beat_pulse_scheduler.state()["slot_id"]
+        with self.lock:
+            if not is_current(plan, generation) or not self.connected or not self.running or self.dmx is None:
+                return None
+            config = self._clean_full_config(dict(self.config))
+            if config["blackout_active"]:
+                return None
+            try:
+                channels = self._virtualdj_pulse_channels_locked(config, slot_id)
+            except Exception as exc:
+                self.error = str(exc)
+                return None
+            baseline_values = dict(self.current_values)
+            if not baseline_values:
+                render_now = time.time()
+                osc = self.osc.snapshot_for_render()
+                auto_show = self._auto_show_state(osc, config["auto_show"])
+                baseline_values = self._render_values(
+                    render_now,
+                    config=config,
+                    osc=osc,
+                    auto_show=auto_show,
+                )
+                self.current_values = dict(baseline_values)
+            pulse_values = dict(baseline_values)
+            for channel in channels:
+                pulse_values[channel] = 255
+            dmx = self.dmx
+            self.active_virtualdj_beat_pulse = {
+                "identity": plan.identity,
+                "channels": channels,
+                "baseline_values": baseline_values,
+                "expires_at_monotonic_seconds": (
+                    float(plan.deadline_monotonic_seconds)
+                    + (float(plan.duration_milliseconds) / 1000.0)
+                ),
+                "restore_timer": None,
+            }
+
+            try:
+                dispatched_at = self._send_dmx_frame(dmx, pulse_values)
+            except Exception as exc:
+                if self.active_virtualdj_beat_pulse and self.active_virtualdj_beat_pulse["identity"] == plan.identity:
+                    self.active_virtualdj_beat_pulse = None
+                self.error = str(exc)
+                with suppress(Exception):
+                    self._send_dmx_frame(dmx, baseline_values)
+                self.debug_log.log("VIRTUALDJ_BEAT_PULSE_DISPATCH_FAILED", error=str(exc))
+                return None
+
+        restore_timer = threading.Timer(
+            float(plan.duration_milliseconds) / 1000.0,
+            self._restore_virtualdj_beat_pulse,
+            args=(plan.identity, "pulse_complete"),
+        )
+        restore_timer.daemon = True
+        with self.lock:
+            active = self.active_virtualdj_beat_pulse
+            if active is None or active["identity"] != plan.identity:
+                return dispatched_at
+            active["restore_timer"] = restore_timer
+        restore_timer.start()
+        self.debug_log.log(
+            "VIRTUALDJ_BEAT_PULSE_DISPATCH",
+            deck=plan.deck_number,
+            bar=plan.bar_number,
+            deadline_monotonic_milliseconds=int(round(plan.deadline_monotonic_seconds * 1000.0)),
+            dispatch_monotonic_milliseconds=int(round(dispatched_at * 1000.0)),
+            error_milliseconds=(dispatched_at - plan.deadline_monotonic_seconds) * 1000.0,
+        )
+        return dispatched_at
+
+    def _restore_virtualdj_beat_pulse(self, identity, reason):
+        with self.lock:
+            active = self.active_virtualdj_beat_pulse
+            if active is None or active["identity"] != identity:
+                return
+            self.active_virtualdj_beat_pulse = None
+            timer = active.get("restore_timer")
+            if timer is not None and timer is not threading.current_thread():
+                timer.cancel()
+            dmx = self.dmx
+            baseline_values = dict(active["baseline_values"])
+            if dmx is None or reason in {"blackout", "dmx_disconnected"}:
+                return
+            try:
+                self._send_dmx_frame(dmx, baseline_values)
+                self.debug_log.log("VIRTUALDJ_BEAT_PULSE_RESTORE", reason=reason)
+            except Exception as exc:
+                self.error = str(exc)
+                self.debug_log.log("VIRTUALDJ_BEAT_PULSE_RESTORE_FAILED", error=str(exc))
+
+    def _cancel_virtualdj_beat_pulse(self, reason):
+        with self.lock:
+            active = self.active_virtualdj_beat_pulse
+            identity = None if active is None else active["identity"]
+        if identity is not None:
+            self._restore_virtualdj_beat_pulse(identity, reason)
+
+    def _dispatch_virtualdj_beat_pulse_preview(self, plan, generation, is_current):
+        if not is_current(plan, generation):
+            return None
+        slot_id = self.virtualdj_beat_pulse_preview_scheduler.state()["slot_id"]
+        with self.lock:
+            if not is_current(plan, generation):
+                return None
+            config = self._clean_full_config(dict(self.config))
+            try:
+                self._virtualdj_pulse_channels_locked(config, slot_id)
+            except Exception as exc:
+                self.error = str(exc)
+                return None
+            dispatched_at = playback_system_monotonic_time()
+            self.active_virtualdj_beat_pulse_preview = {
+                "identity": plan.identity,
+                "slot_id": slot_id,
+                "expires_at_monotonic_seconds": (
+                    float(plan.deadline_monotonic_seconds)
+                    + (float(plan.duration_milliseconds) / 1000.0)
+                ),
+                "restore_timer": None,
+            }
+
+        restore_timer = threading.Timer(
+            float(plan.duration_milliseconds) / 1000.0,
+            self._clear_virtualdj_beat_pulse_preview,
+            args=(plan.identity, "preview_complete"),
+        )
+        restore_timer.daemon = True
+        with self.lock:
+            active = self.active_virtualdj_beat_pulse_preview
+            if active is None or active["identity"] != plan.identity:
+                return dispatched_at
+            active["restore_timer"] = restore_timer
+        restore_timer.start()
+        self.debug_log.log(
+            "VIRTUALDJ_BEAT_PULSE_PREVIEW_DISPATCH",
+            deck=plan.deck_number,
+            bar=plan.bar_number,
+            deadline_monotonic_milliseconds=int(round(plan.deadline_monotonic_seconds * 1000.0)),
+            dispatch_monotonic_milliseconds=int(round(dispatched_at * 1000.0)),
+            error_milliseconds=(dispatched_at - plan.deadline_monotonic_seconds) * 1000.0,
+        )
+        return dispatched_at
+
+    def _clear_virtualdj_beat_pulse_preview(self, identity, reason):
+        with self.lock:
+            active = self.active_virtualdj_beat_pulse_preview
+            if active is None or active["identity"] != identity:
+                return
+            self.active_virtualdj_beat_pulse_preview = None
+            timer = active.get("restore_timer")
+            if timer is not None and timer is not threading.current_thread():
+                timer.cancel()
+        self.debug_log.log("VIRTUALDJ_BEAT_PULSE_PREVIEW_CLEAR", reason=reason)
+
+    def _cancel_virtualdj_beat_pulse_preview(self, reason):
+        with self.lock:
+            active = self.active_virtualdj_beat_pulse_preview
+            identity = None if active is None else active["identity"]
+        if identity is not None:
+            self._clear_virtualdj_beat_pulse_preview(identity, reason)
+
 
     def _preview_track_candidates(self, osc):
         candidates = {}
@@ -8577,6 +9197,8 @@ class DmxController:
             self.running = False
             self.active_one_shot_cue = None
 
+        self.virtualdj_beat_pulse_scheduler.stop("dmx_disconnected")
+
         if thread and thread.is_alive():
             thread.join(timeout=1.5)
 
@@ -8584,7 +9206,7 @@ class DmxController:
             interval = 1 / fps if fps else 1 / DEFAULT_DMX_FPS
             with suppress(Exception):
                 for _ in range(5):
-                    dmx.send({})
+                    self._send_dmx_frame(dmx, {})
                     time.sleep(interval)
             with suppress(Exception):
                 dmx.close()
@@ -8598,6 +9220,7 @@ class DmxController:
             self.debug_log.log("DMX_DISCONNECT")
 
     def update_config(self, payload):
+        stop_beat_pulse_test = False
         with self.lock:
             self.config = self._merge_payload(payload)
             now = time.time()
@@ -8618,6 +9241,7 @@ class DmxController:
                 auto_show=auto_show,
             )
             self._schedule_save_locked()
+            stop_beat_pulse_test = bool(config["blackout_active"])
             self.debug_log.log(
                 "CONFIG_UPDATE",
                 active_slot=self.config.get("active_slot"),
@@ -8625,7 +9249,9 @@ class DmxController:
                 auto_show_enabled=(self.config.get("auto_show") or {}).get("enabled"),
                 auto_show_style=(self.config.get("auto_show") or {}).get("style"),
             )
-            return values
+        if stop_beat_pulse_test:
+            self.virtualdj_beat_pulse_scheduler.stop("blackout")
+        return values
 
     def trigger_one_shot_cue(self, cue_id):
         cue_name = one_shot_cue_name(cue_id)
@@ -8675,6 +9301,8 @@ class DmxController:
             self.current_values = {}
             self.current_slot_previews = {}
             self.debug_log.log("BLACKOUT", active=True)
+        self.virtualdj_beat_pulse_scheduler.stop("blackout")
+        self.virtualdj_beat_pulse_preview_scheduler.stop("blackout")
 
     def _resolved_one_shot_cue_state(self, osc, now=None):
         raw = self.active_one_shot_cue
@@ -8719,6 +9347,8 @@ class DmxController:
         }
 
     def state(self):
+        developer_playback_state = self.osc.developer_playback_state()
+        self._observe_virtualdj_beat_pulse_preview_test(developer_playback_state)
         with self.lock:
             config = self._clean_full_config(dict(self.config))
             now = time.time()
@@ -8754,6 +9384,7 @@ class DmxController:
             except Exception:
                 live_values = dict(self.current_values)
                 slot_previews = dict(self.current_slot_previews)
+            slot_previews = self._apply_virtualdj_beat_pulse_preview_overlay_locked(slot_previews)
             values = dict(sorted(live_values.items()))
             return {
                 "connected": self.connected,
@@ -8777,6 +9408,8 @@ class DmxController:
                 "slot_previews": slot_previews,
                 "conflicts": list(self.conflicts),
                 "values": values,
+                "developer_virtualdj_beat_pulse_test": self.virtualdj_beat_pulse_test_state(),
+                "developer_virtualdj_beat_pulse_preview": self.virtualdj_beat_pulse_preview_test_state(),
             }
 
     def add_slot(self, fixture_id, mode=None):
@@ -12470,6 +13103,7 @@ class DmxController:
 
     def _send_loop(self):
         while True:
+            developer_playback_state = None
             with self.lock:
                 if not self.running or not self.dmx:
                     return
@@ -12493,14 +13127,19 @@ class DmxController:
                         render_now,
                         auto_show=auto_show,
                     )
+                    developer_playback_state = self.osc.developer_playback_state()
                 except Exception as exc:
                     self.error = str(exc)
                     values = dict(self.current_values)
 
+            self._observe_virtualdj_beat_pulse_test(developer_playback_state)
             started = time.monotonic()
             try:
-                dmx.send(values)
                 with self.lock:
+                    if not self.running or self.dmx is not dmx:
+                        continue
+                    values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
+                    self._send_dmx_frame(dmx, values)
                     self.error = None
                     self.last_sent = time.time()
             except Exception as exc:
@@ -12894,6 +13533,12 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/developer/playback":
             self.send_json(TRANSPORT.developer_playback_state())
             return
+        if path == "/api/developer/virtualdj-beat-pulse":
+            self.send_json(DMX.virtualdj_beat_pulse_test_state())
+            return
+        if path == "/api/developer/virtualdj-beat-pulse-preview":
+            self.send_json(DMX.virtualdj_beat_pulse_preview_test_state())
+            return
         if path == "/api/ports":
             self.send_json({"ports": serial_ports()})
             return
@@ -12956,6 +13601,18 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/developer/playback/update":
                 TRANSPORT.update_developer_playback(payload)
                 self.send_json(full_state())
+                return
+            if path == "/api/developer/virtualdj-beat-pulse/start":
+                self.send_json(DMX.start_virtualdj_beat_pulse_test(payload))
+                return
+            if path == "/api/developer/virtualdj-beat-pulse/stop":
+                self.send_json(DMX.stop_virtualdj_beat_pulse_test())
+                return
+            if path == "/api/developer/virtualdj-beat-pulse-preview/start":
+                self.send_json(DMX.start_virtualdj_beat_pulse_preview_test(payload))
+                return
+            if path == "/api/developer/virtualdj-beat-pulse-preview/stop":
+                self.send_json(DMX.stop_virtualdj_beat_pulse_preview_test())
                 return
         except Exception as exc:
             self.send_json({"error": str(exc), "state": full_state()}, status=400)

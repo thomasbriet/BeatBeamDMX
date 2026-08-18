@@ -1,6 +1,7 @@
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,10 @@ from beatbeam_app import (
     PlaybackStateSnapshot,
     PlaybackTimingSnapshot,
     TransportController,
+    DmxController,
+    VirtualDjBeatPulsePlan,
+    VirtualDjBeatPulsePlanner,
+    VirtualDjBeatPulseScheduler,
     playback_system_monotonic_time,
 )
 
@@ -340,6 +345,468 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
 
             self.assertEqual("virtualdj", reloaded.config["developer_playback_source"])
             self.assertEqual(str(snapshot_path), reloaded.config["developer_playback_state_path"])
+
+
+def pulse_state(
+    *,
+    track_path="/Music/Track A.flac",
+    deck_number=1,
+    bar_number=8,
+    beat_number=2,
+    milliseconds_until_bar=500.0,
+    transport_state="advancing",
+    availability="available",
+    discontinuity=None,
+):
+    return {
+        "source": "virtualdj",
+        "availability": availability,
+        "transport_state": transport_state,
+        "last_discontinuity": discontinuity,
+        "timing": {"alignment": "system_monotonic"},
+        "beatbeam": {
+            "track_path": track_path,
+            "deck_number": deck_number,
+            "bar_number": bar_number,
+            "beat_number": beat_number,
+            "time_until_next_bar_milliseconds": milliseconds_until_bar,
+        },
+    }
+
+
+class FakeDmxOutput:
+    def __init__(self):
+        self.frames = []
+
+    def send(self, values):
+        self.frames.append(dict(values))
+
+    def close(self):
+        pass
+
+
+class FailFirstDmxOutput(FakeDmxOutput):
+    def __init__(self):
+        super().__init__()
+        self.fail_next_send = True
+
+    def send(self, values):
+        self.frames.append(dict(values))
+        if self.fail_next_send:
+            self.fail_next_send = False
+            raise RuntimeError("test output failure")
+
+
+class FakeDmxTransport:
+    def __init__(self, playback_state):
+        self.playback_state = playback_state
+        self.lock = threading.RLock()
+        self.decks = {}
+
+    def snapshot_for_render(self):
+        return {
+            "bpm": 120.0,
+            "beat_value": 0.0,
+            "phrase_current": "verse",
+            "strobe_active": False,
+        }
+
+    def developer_playback_state(self):
+        return self.playback_state
+
+
+class VirtualDjBeatPulseTests(unittest.TestCase):
+    def test_planner_targets_the_next_bar_beat_one_with_a_monotonic_deadline(self):
+        plan, reason = VirtualDjBeatPulsePlanner.plan(
+            pulse_state(bar_number=12, beat_number=3, milliseconds_until_bar=375.0),
+            now=10.0,
+            duration_milliseconds=100,
+        )
+
+        self.assertIsNone(reason)
+        self.assertEqual((1, "/Music/Track A.flac", 13, 1), plan.identity)
+        self.assertEqual(10.375, plan.deadline_monotonic_seconds)
+
+    def test_planner_never_schedules_the_current_beats_two_three_or_four(self):
+        for current_beat in (1, 2, 3, 4):
+            with self.subTest(current_beat=current_beat):
+                plan, reason = VirtualDjBeatPulsePlanner.plan(
+                    pulse_state(bar_number=12, beat_number=current_beat, milliseconds_until_bar=250.0),
+                    now=10.0,
+                    duration_milliseconds=100,
+                )
+
+                self.assertIsNone(reason)
+                self.assertEqual((1, "/Music/Track A.flac", 13, 1), plan.identity)
+
+    def test_planner_does_not_create_pulses_for_stationary_or_discontinuous_transport(self):
+        stationary, stationary_reason = VirtualDjBeatPulsePlanner.plan(
+            pulse_state(transport_state="stationary"), 10.0, 100
+        )
+        jumped, jumped_reason = VirtualDjBeatPulsePlanner.plan(
+            pulse_state(discontinuity="position_jump_forward"), 10.0, 100
+        )
+
+        self.assertIsNone(stationary)
+        self.assertEqual("transport_not_advancing", stationary_reason)
+        self.assertIsNone(jumped)
+        self.assertEqual("awaiting_fresh_anchor", jumped_reason)
+
+    def test_tempo_or_fresh_anchor_can_correct_the_future_deadline(self):
+        first, _ = VirtualDjBeatPulsePlanner.plan(
+            pulse_state(milliseconds_until_bar=500.0), 10.0, 100
+        )
+        corrected, _ = VirtualDjBeatPulsePlanner.plan(
+            pulse_state(milliseconds_until_bar=420.0), 10.0, 100
+        )
+
+        self.assertEqual(first.identity, corrected.identity)
+        self.assertEqual(10.500, first.deadline_monotonic_seconds)
+        self.assertEqual(10.420, corrected.deadline_monotonic_seconds)
+
+    def test_scheduler_deduplicates_multiple_updates_for_the_same_bar(self):
+        dispatched = []
+        completed = threading.Event()
+
+        def dispatch(plan, generation, is_current):
+            if not is_current(plan, generation):
+                return None
+            dispatched.append(plan.identity)
+            completed.set()
+            return time.monotonic()
+
+        scheduler = VirtualDjBeatPulseScheduler(dispatch, lambda _reason: None, clock=time.monotonic)
+        scheduler.start("par", 100)
+        state = pulse_state(milliseconds_until_bar=30.0)
+        scheduler.observe(state)
+        scheduler.observe(state)
+        scheduler.observe(state)
+
+        self.assertTrue(completed.wait(0.5))
+        scheduler.stop()
+        self.assertEqual([(1, "/Music/Track A.flac", 9, 1)], dispatched)
+        status = scheduler.state()
+        self.assertEqual(1, status["scheduled_events"])
+        self.assertEqual(1, status["executed_events"])
+        self.assertEqual(0, status["duplicate_events"])
+        self.assertEqual(1, status["last_event"]["beat_number"])
+        self.assertEqual(9, status["last_event"]["bar_number"])
+        self.assertIsNotNone(status["last_event"]["scheduler_wake_monotonic_milliseconds"])
+        self.assertIsNotNone(status["last_event"]["dmx_dispatch_monotonic_milliseconds"])
+
+    def test_scheduler_allows_the_next_bar_after_one_pulse(self):
+        dispatched = []
+        completed = threading.Event()
+
+        def dispatch(plan, generation, is_current):
+            if not is_current(plan, generation):
+                return None
+            dispatched.append(plan.identity)
+            if len(dispatched) == 2:
+                completed.set()
+            return time.monotonic()
+
+        scheduler = VirtualDjBeatPulseScheduler(dispatch, lambda _reason: None, clock=time.monotonic)
+        scheduler.start("par", 100)
+        scheduler.observe(pulse_state(bar_number=8, milliseconds_until_bar=20.0))
+        deadline = time.monotonic() + 0.5
+        while len(dispatched) < 1 and time.monotonic() < deadline:
+            completed.wait(0.01)
+        scheduler.observe(pulse_state(bar_number=9, milliseconds_until_bar=20.0))
+
+        self.assertTrue(completed.wait(0.5))
+        scheduler.stop()
+        self.assertEqual(
+            [
+                (1, "/Music/Track A.flac", 9, 1),
+                (1, "/Music/Track A.flac", 10, 1),
+            ],
+            dispatched,
+        )
+
+    def test_scheduler_dispatches_a_due_bar_before_a_refresh_can_replace_it(self):
+        clock_now = [10.0]
+        dispatched = []
+        completed = threading.Event()
+
+        def dispatch(plan, generation, is_current):
+            if not is_current(plan, generation):
+                return None
+            dispatched.append(plan.identity)
+            completed.set()
+            return clock_now[0]
+
+        scheduler = VirtualDjBeatPulseScheduler(dispatch, lambda _reason: None, clock=lambda: clock_now[0])
+        scheduler.start("par", 100)
+        scheduler.observe(pulse_state(bar_number=8, milliseconds_until_bar=500.0))
+
+        # Simulate a 30 fps UI refresh immediately after the bar boundary. The
+        # refresh naturally plans bar 10, but bar 9 must still be dispatched.
+        clock_now[0] = 10.501
+        scheduler.observe(pulse_state(bar_number=9, milliseconds_until_bar=500.0))
+
+        self.assertTrue(completed.wait(0.25))
+        scheduler.stop()
+        self.assertEqual([(1, "/Music/Track A.flac", 9, 1)], dispatched)
+
+    def test_scheduler_cancels_a_pending_event_when_playback_pauses(self):
+        dispatched = threading.Event()
+        cancelled = []
+
+        def dispatch(plan, generation, is_current):
+            if is_current(plan, generation):
+                dispatched.set()
+                return time.monotonic()
+            return None
+
+        scheduler = VirtualDjBeatPulseScheduler(dispatch, cancelled.append, clock=time.monotonic)
+        scheduler.start("par", 100)
+        scheduler.observe(pulse_state(milliseconds_until_bar=180.0))
+        scheduler.observe(pulse_state(transport_state="stationary"))
+
+        self.assertFalse(dispatched.wait(0.25))
+        self.assertIn("transport_not_advancing", cancelled)
+        self.assertGreaterEqual(scheduler.state()["cancelled_stale_events"], 1)
+        scheduler.stop()
+
+    def test_scheduler_discards_a_stale_track_plan_and_reanchors_to_the_new_deck(self):
+        dispatched = []
+        completed = threading.Event()
+
+        def dispatch(plan, generation, is_current):
+            if is_current(plan, generation):
+                dispatched.append(plan.identity)
+                completed.set()
+                return time.monotonic()
+            return None
+
+        scheduler = VirtualDjBeatPulseScheduler(dispatch, lambda _reason: None, clock=time.monotonic)
+        scheduler.start("par", 100)
+        scheduler.observe(pulse_state(milliseconds_until_bar=220.0))
+        scheduler.observe(
+            pulse_state(
+                track_path="/Music/Track B.flac",
+                deck_number=2,
+                bar_number=15,
+                milliseconds_until_bar=25.0,
+            )
+        )
+
+        self.assertTrue(completed.wait(0.5))
+        scheduler.stop()
+        self.assertEqual([(2, "/Music/Track B.flac", 16, 1)], dispatched)
+        self.assertGreaterEqual(scheduler.state()["cancelled_stale_events"], 1)
+
+    def test_scheduler_waits_for_a_fresh_plan_after_discontinuity_then_resumes(self):
+        dispatched = []
+        completed = threading.Event()
+        cancelled = []
+
+        def dispatch(plan, generation, is_current):
+            if is_current(plan, generation):
+                dispatched.append(plan.identity)
+                completed.set()
+                return time.monotonic()
+            return None
+
+        scheduler = VirtualDjBeatPulseScheduler(dispatch, cancelled.append, clock=time.monotonic)
+        scheduler.start("par", 100)
+        scheduler.observe(pulse_state(milliseconds_until_bar=180.0))
+        scheduler.observe(pulse_state(discontinuity="position_jump_backward"))
+        scheduler.observe(pulse_state(bar_number=11, milliseconds_until_bar=25.0))
+
+        self.assertTrue(completed.wait(0.5))
+        scheduler.stop()
+        self.assertEqual([(1, "/Music/Track A.flac", 12, 1)], dispatched)
+        self.assertIn("awaiting_fresh_anchor", cancelled)
+
+    def test_scheduler_cancels_pending_events_for_both_seek_directions(self):
+        for discontinuity in ("position_jump_forward", "position_jump_backward"):
+            with self.subTest(discontinuity=discontinuity):
+                cancelled = []
+                scheduler = VirtualDjBeatPulseScheduler(
+                    lambda *_args: None,
+                    cancelled.append,
+                    clock=time.monotonic,
+                )
+                scheduler.start("par", 100)
+                scheduler.observe(pulse_state(milliseconds_until_bar=180.0))
+                scheduler.observe(pulse_state(discontinuity=discontinuity))
+
+                self.assertIn("awaiting_fresh_anchor", cancelled)
+                self.assertFalse(scheduler.state()["pending"])
+                scheduler.stop()
+
+    def test_scheduler_cancels_on_disconnect_then_uses_only_a_fresh_reconnect_plan(self):
+        dispatched = []
+        completed = threading.Event()
+        cancelled = []
+
+        def dispatch(plan, generation, is_current):
+            if is_current(plan, generation):
+                dispatched.append(plan.identity)
+                completed.set()
+                return time.monotonic()
+            return None
+
+        scheduler = VirtualDjBeatPulseScheduler(dispatch, cancelled.append, clock=time.monotonic)
+        scheduler.start("par", 100)
+        scheduler.observe(pulse_state(milliseconds_until_bar=180.0))
+        scheduler.observe(pulse_state(availability="unavailable"))
+        scheduler.observe(pulse_state(bar_number=17, milliseconds_until_bar=25.0))
+
+        self.assertTrue(completed.wait(0.5))
+        scheduler.stop()
+        self.assertIn("source_unavailable", cancelled)
+        self.assertEqual([(1, "/Music/Track A.flac", 18, 1)], dispatched)
+
+    def test_scheduler_handles_deck_one_to_two_to_one_without_old_events(self):
+        dispatched = []
+        two_dispatched = threading.Event()
+        one_dispatched_again = threading.Event()
+
+        def dispatch(plan, generation, is_current):
+            if not is_current(plan, generation):
+                return None
+            dispatched.append(plan.identity)
+            if len(dispatched) == 1:
+                two_dispatched.set()
+            if len(dispatched) == 2:
+                one_dispatched_again.set()
+            return time.monotonic()
+
+        scheduler = VirtualDjBeatPulseScheduler(dispatch, lambda _reason: None, clock=time.monotonic)
+        scheduler.start("par", 100)
+        scheduler.observe(pulse_state(deck_number=1, bar_number=8, milliseconds_until_bar=220.0))
+        scheduler.observe(pulse_state(deck_number=2, bar_number=14, milliseconds_until_bar=25.0))
+        self.assertTrue(two_dispatched.wait(0.5))
+        scheduler.observe(pulse_state(deck_number=1, bar_number=20, milliseconds_until_bar=25.0))
+        self.assertTrue(one_dispatched_again.wait(0.5))
+        scheduler.stop()
+
+        self.assertEqual(
+            [
+                (2, "/Music/Track A.flac", 15, 1),
+                (1, "/Music/Track A.flac", 21, 1),
+            ],
+            dispatched,
+        )
+
+    def test_direct_dmx_pulse_attempts_to_restore_the_baseline_after_a_send_failure(self):
+        state = pulse_state()
+        transport = FakeDmxTransport(state)
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"
+        ):
+            controller = DmxController(transport)
+        controller.config = controller._clean_full_config(controller.default_config())
+        output = FailFirstDmxOutput()
+        controller.dmx = output
+        controller.connected = True
+        controller.running = True
+        controller.current_values = {1: 37, 2: 99}
+        controller.virtualdj_beat_pulse_scheduler.start("par", 100)
+        plan = VirtualDjBeatPulsePlan(
+            (1, "/Music/Track A.flac", 9, 1),
+            playback_system_monotonic_time(),
+            "/Music/Track A.flac",
+            1,
+            9,
+            100,
+        )
+
+        dispatched_at = controller._dispatch_virtualdj_beat_pulse(
+            plan,
+            1,
+            lambda _plan, _generation: True,
+        )
+        controller.virtualdj_beat_pulse_scheduler.stop()
+
+        self.assertIsNone(dispatched_at)
+        self.assertIsNone(controller.active_virtualdj_beat_pulse)
+        self.assertEqual({1: 37, 2: 99}, output.frames[-1])
+        self.assertIn("test output failure", controller.error)
+
+    def test_direct_dmx_pulse_uses_fixture_intensity_and_restores_the_previous_frame(self):
+        state = pulse_state()
+        transport = FakeDmxTransport(state)
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"
+        ):
+            controller = DmxController(transport)
+        controller.config = controller._clean_full_config(controller.default_config())
+        output = FakeDmxOutput()
+        controller.dmx = output
+        controller.connected = True
+        controller.running = True
+        controller.current_values = {1: 37, 2: 99}
+        controller.virtualdj_beat_pulse_scheduler.start("par", 100)
+        plan = VirtualDjBeatPulsePlan(
+            (1, "/Music/Track A.flac", 9, 1),
+            playback_system_monotonic_time(),
+            "/Music/Track A.flac",
+            1,
+            9,
+            100,
+        )
+
+        dispatched_at = controller._dispatch_virtualdj_beat_pulse(
+            plan,
+            1,
+            lambda _plan, _generation: True,
+        )
+        channels = controller._virtualdj_pulse_channels_locked(
+            controller._clean_full_config(dict(controller.config)), "par"
+        )
+        controller._cancel_virtualdj_beat_pulse("stopped_by_user")
+        controller.virtualdj_beat_pulse_scheduler.stop()
+
+        self.assertIsNotNone(dispatched_at)
+        self.assertTrue(all(output.frames[0][channel] == 255 for channel in channels))
+        self.assertEqual({1: 37, 2: 99}, output.frames[-1])
+
+    def test_preview_pulse_uses_the_same_scheduler_without_sending_a_dmx_frame(self):
+        state = pulse_state()
+        transport = FakeDmxTransport(state)
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"
+        ):
+            controller = DmxController(transport)
+        controller.config = controller._clean_full_config(controller.default_config())
+        output = FakeDmxOutput()
+        controller.dmx = output
+
+        controller.virtualdj_beat_pulse_preview_scheduler.start("par", 500)
+        plan = VirtualDjBeatPulsePlan(
+            (1, "/Music/Track A.flac", 9, 1),
+            playback_system_monotonic_time(),
+            "/Music/Track A.flac",
+            1,
+            9,
+            500,
+        )
+        dispatched_at = controller._dispatch_virtualdj_beat_pulse_preview(
+            plan,
+            1,
+            lambda _plan, _generation: True,
+        )
+
+        previews = controller._build_slot_previews(
+            controller._clean_full_config(dict(controller.config)),
+            transport.snapshot_for_render(),
+            time.time(),
+        )
+        pulsed = controller._apply_virtualdj_beat_pulse_preview_overlay_locked(previews)
+        controller._cancel_virtualdj_beat_pulse_preview("stopped_by_user")
+        restored = controller._apply_virtualdj_beat_pulse_preview_overlay_locked(previews)
+        controller.virtualdj_beat_pulse_preview_scheduler.stop()
+
+        self.assertIsNotNone(dispatched_at)
+        self.assertEqual([], output.frames)
+        self.assertEqual(255, pulsed["par"]["brightness"])
+        self.assertEqual(255, pulsed["par"]["red"])
+        self.assertTrue(pulsed["par"]["developer_virtualdj_beat_pulse_preview"])
+        self.assertEqual(previews, restored)
 
 
 if __name__ == "__main__":
