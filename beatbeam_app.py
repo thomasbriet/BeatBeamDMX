@@ -124,6 +124,7 @@ class SongAnalyzerStructureHandoff:
     def __init__(self, path=DEFAULT_SONG_ANALYZER_STRUCTURE_PATH, check_interval_seconds=1.0):
         self.path = Path(path)
         self.check_interval_seconds = max(0.0, float(check_interval_seconds))
+        self._lock = threading.RLock()
         self._last_check = 0.0
         self._signature = object()
         self._tracks = {}
@@ -290,84 +291,88 @@ class SongAnalyzerStructureHandoff:
         }
 
     def project(self, playback):
-        state = dict(playback or {})
-        source = state.get("_active_playback_source")
-        raw_path = state.get("track_path")
-        canonical_path = canonical_song_analyzer_track_path(raw_path)
-        track_changed = canonical_path != self._last_track_path
-        if track_changed:
-            self._last_track_path = canonical_path
-            self._metrics["track_switches"] += 1
-        self._refresh(force=track_changed)
-        result = {
-            "source": "song_analyzer" if source == "virtualdj" else "none",
-            "contract_path": str(self.path),
-            "schema_version": self._schema_version,
-            "load_status": self._load_status,
-            "load_error": self._load_error,
-            "track_match": "none",
-            "availability": "inactive" if source != "virtualdj" else "unavailable",
-            "projection_status": "unknown",
-            "canonical_track_path": canonical_path,
-            "analysis_version": None,
-            "phrase_analysis_version": None,
-            "model": None,
-            "segment_count": 0,
-            "current": None,
-            "previous": None,
-            "next": None,
-            "metrics": dict(self._metrics),
-        }
-        if source != "virtualdj" or not canonical_path:
-            return result
-        if self._load_status != "ready":
-            return result
-        track = self._tracks.get(canonical_path)
-        if track is None:
-            self._metrics["lookup_failures"] += 1
-            result["metrics"] = dict(self._metrics)
-            return result
-        result.update({
-            "track_match": "exact",
-            "availability": "available_current" if track.availability == "current" else (
-                "available_stale" if track.availability == "stale" else "unavailable"
-            ),
-            "analysis_version": track.analysis_version,
-            "phrase_analysis_version": track.phrase_analysis_version,
-            "model": track.model,
-            "segment_count": len(track.segments),
-        })
-        if track.availability == "missing":
-            return result
-        position = state.get("time_seconds")
-        if isinstance(position, bool) or not isinstance(position, (int, float)) or not math.isfinite(float(position)):
-            result["projection_status"] = "position_unavailable"
-            return result
-        position = float(position)
-        if not track.segments:
-            return result
-        if position < track.segments[0].start_seconds:
-            result["projection_status"] = "before_structure"
-            result["next"] = self._segment_state(track.segments[0], position)
-            return result
-        for index, segment in enumerate(track.segments):
-            is_final_end = index == len(track.segments) - 1 and position == segment.end_seconds
-            if segment.start_seconds <= position < segment.end_seconds or is_final_end:
-                result["projection_status"] = "in_final_segment" if is_final_end else "in_segment"
-                result["current"] = self._segment_state(segment, position)
-                if index:
-                    result["previous"] = self._segment_state(track.segments[index - 1], position)
-                if index + 1 < len(track.segments):
+        # The renderer and developer endpoint use this same cache concurrently.
+        # Serialize refresh/projection so a reload cannot expose a half-updated
+        # in-memory index to a DMX frame.
+        with self._lock:
+            state = dict(playback or {})
+            source = state.get("_active_playback_source")
+            raw_path = state.get("track_path")
+            canonical_path = canonical_song_analyzer_track_path(raw_path)
+            track_changed = canonical_path != self._last_track_path
+            if track_changed:
+                self._last_track_path = canonical_path
+                self._metrics["track_switches"] += 1
+            self._refresh(force=track_changed)
+            result = {
+                "source": "song_analyzer" if source == "virtualdj" else "none",
+                "contract_path": str(self.path),
+                "schema_version": self._schema_version,
+                "load_status": self._load_status,
+                "load_error": self._load_error,
+                "track_match": "none",
+                "availability": "inactive" if source != "virtualdj" else "unavailable",
+                "projection_status": "unknown",
+                "canonical_track_path": canonical_path,
+                "analysis_version": None,
+                "phrase_analysis_version": None,
+                "model": None,
+                "segment_count": 0,
+                "current": None,
+                "previous": None,
+                "next": None,
+                "metrics": dict(self._metrics),
+            }
+            if source != "virtualdj" or not canonical_path:
+                return result
+            if self._load_status != "ready":
+                return result
+            track = self._tracks.get(canonical_path)
+            if track is None:
+                self._metrics["lookup_failures"] += 1
+                result["metrics"] = dict(self._metrics)
+                return result
+            result.update({
+                "track_match": "exact",
+                "availability": "available_current" if track.availability == "current" else (
+                    "available_stale" if track.availability == "stale" else "unavailable"
+                ),
+                "analysis_version": track.analysis_version,
+                "phrase_analysis_version": track.phrase_analysis_version,
+                "model": track.model,
+                "segment_count": len(track.segments),
+            })
+            if track.availability == "missing":
+                return result
+            position = state.get("time_seconds")
+            if isinstance(position, bool) or not isinstance(position, (int, float)) or not math.isfinite(float(position)):
+                result["projection_status"] = "position_unavailable"
+                return result
+            position = float(position)
+            if not track.segments:
+                return result
+            if position < track.segments[0].start_seconds:
+                result["projection_status"] = "before_structure"
+                result["next"] = self._segment_state(track.segments[0], position)
+                return result
+            for index, segment in enumerate(track.segments):
+                is_final_end = index == len(track.segments) - 1 and position == segment.end_seconds
+                if segment.start_seconds <= position < segment.end_seconds or is_final_end:
+                    result["projection_status"] = "in_final_segment" if is_final_end else "in_segment"
+                    result["current"] = self._segment_state(segment, position)
+                    if index:
+                        result["previous"] = self._segment_state(track.segments[index - 1], position)
+                    if index + 1 < len(track.segments):
+                        result["next"] = self._segment_state(track.segments[index + 1], position)
+                    return result
+                if index + 1 < len(track.segments) and position < track.segments[index + 1].start_seconds:
+                    result["projection_status"] = "between_segments"
+                    result["previous"] = self._segment_state(segment, position)
                     result["next"] = self._segment_state(track.segments[index + 1], position)
-                return result
-            if index + 1 < len(track.segments) and position < track.segments[index + 1].start_seconds:
-                result["projection_status"] = "between_segments"
-                result["previous"] = self._segment_state(segment, position)
-                result["next"] = self._segment_state(track.segments[index + 1], position)
-                return result
-        result["projection_status"] = "after_structure"
-        result["previous"] = self._segment_state(track.segments[-1], position)
-        return result
+                    return result
+            result["projection_status"] = "after_structure"
+            result["previous"] = self._segment_state(track.segments[-1], position)
+            return result
 
 
 def playback_system_monotonic_time():
@@ -2903,6 +2908,154 @@ ACTIVE_PLAYBACK_SOURCES = {
     "legacy",
     "virtualdj",
 }
+
+STRUCTURE_BEHAVIOR_SOURCES = {
+    "legacy",
+    "song_analyzer",
+}
+
+# This is deliberately an explicit contract, rather than another loose
+# startswith check in the renderer. It mirrors every currently exported native
+# SongAnalyzer/Rekordbox label and leaves unknown future labels fail-closed.
+SONG_ANALYZER_BEHAVIOR_BUCKETS = {
+    "Intro 1": "intro",
+    "Intro 2": "intro",
+    "Intro": "intro",
+    "Up 1": "build",
+    "Up 2": "build",
+    "Up 3": "build",
+    "Build": "build",
+    "Down": "down",
+    "Chorus 1": "chorus",
+    "Chorus 2": "chorus",
+    "Chorus": "chorus",
+    "Outro 1": "outro",
+    "Outro 2": "outro",
+    "Outro": "outro",
+    "Verse 1": "verse",
+    "Verse 2": "verse",
+    "Verse 3": "verse",
+    "Verse 4": "verse",
+    "Verse 5": "verse",
+    "Verse 6": "verse",
+    "Verse": "verse",
+    "Bridge": "down",
+    "Drop": "drop",
+    "Break": "break",
+}
+
+
+def song_analyzer_behavior_bucket(label):
+    """Return the existing behavior bucket for one known handoff label."""
+    return SONG_ANALYZER_BEHAVIOR_BUCKETS.get(str(label or "").strip())
+
+
+@dataclass(frozen=True)
+class EffectiveBehaviorContext:
+    selected_source: str
+    effective_source: str
+    eligible: bool
+    fallback_reason: Optional[str]
+    legacy_phrase: Optional[str]
+    mapped_behavior_bucket: Optional[str]
+    song_analyzer_label: Optional[str]
+    projection: Optional[dict]
+
+    def as_dict(self):
+        return {
+            "selected_source": self.selected_source,
+            "effective_source": self.effective_source,
+            "eligible": self.eligible,
+            "fallback_reason": self.fallback_reason,
+            "legacy_phrase": self.legacy_phrase,
+            "mapped_behavior_bucket": self.mapped_behavior_bucket,
+            "song_analyzer_label": self.song_analyzer_label,
+            "projection": self.projection,
+        }
+
+
+class StructureBehaviorBridge:
+    """Fail-closed adapter from a projected SongAnalyzer segment to behavior."""
+
+    def __init__(self, handoff):
+        self.handoff = handoff
+
+    def resolve(self, selected_source, transport_state, include_shadow=False):
+        selected_source = str(selected_source or "legacy").strip().lower()
+        if selected_source not in STRUCTURE_BEHAVIOR_SOURCES:
+            selected_source = "legacy"
+
+        state = dict(transport_state or {})
+        legacy_phrase = state.get("phrase_current")
+        if selected_source == "legacy" and not include_shadow:
+            return EffectiveBehaviorContext(
+                selected_source, "legacy", False, "legacy_selected", legacy_phrase, None, None, None
+            ).as_dict()
+
+        if state.get("_active_playback_source") != "virtualdj":
+            return EffectiveBehaviorContext(
+                selected_source, "legacy", False, "legacy_selected" if selected_source == "legacy" else "virtualdj_inactive",
+                legacy_phrase, None, None, None,
+            ).as_dict()
+        track_path = canonical_song_analyzer_track_path(state.get("track_path"))
+        if not track_path:
+            return EffectiveBehaviorContext(
+                selected_source, "legacy", False, "legacy_selected" if selected_source == "legacy" else "track_unavailable",
+                legacy_phrase, None, None, None,
+            ).as_dict()
+
+        projection = self.handoff.project(state)
+        if projection.get("track_match") != "exact":
+            load_status = projection.get("load_status")
+            fallback_reason = {
+                "unsupported_schema": "unsupported_schema",
+                "invalid": "structure_invalid",
+                "unreadable": "structure_unreadable",
+                "missing": "structure_missing",
+            }.get(load_status, "track_not_exact")
+            return EffectiveBehaviorContext(
+                selected_source, "legacy", False,
+                "legacy_selected" if selected_source == "legacy" else fallback_reason,
+                legacy_phrase, None, None, projection,
+            ).as_dict()
+        if projection.get("availability") != "available_current":
+            return EffectiveBehaviorContext(
+                selected_source, "legacy", False,
+                "legacy_selected" if selected_source == "legacy" else "structure_not_current",
+                legacy_phrase, None, None, projection,
+            ).as_dict()
+        if projection.get("projection_status") not in {"in_segment", "in_final_segment"}:
+            return EffectiveBehaviorContext(
+                selected_source, "legacy", False,
+                "legacy_selected" if selected_source == "legacy" else "current_segment_unavailable",
+                legacy_phrase, None, None, projection,
+            ).as_dict()
+        if projection.get("canonical_track_path") != track_path:
+            return EffectiveBehaviorContext(
+                selected_source, "legacy", False,
+                "legacy_selected" if selected_source == "legacy" else "track_path_mismatch",
+                legacy_phrase, None, None, projection,
+            ).as_dict()
+        current = projection.get("current") or {}
+        label = current.get("label")
+        bucket = song_analyzer_behavior_bucket(label)
+        if bucket is None:
+            return EffectiveBehaviorContext(
+                selected_source, "legacy", False,
+                "legacy_selected" if selected_source == "legacy" else "unknown_song_analyzer_label",
+                legacy_phrase, None, label, projection,
+            ).as_dict()
+
+        return EffectiveBehaviorContext(
+            selected_source,
+            "legacy" if selected_source == "legacy" else "song_analyzer",
+            True,
+            "legacy_selected" if selected_source == "legacy" else None,
+            legacy_phrase,
+            bucket,
+            label,
+            projection,
+        ).as_dict()
 
 
 @dataclass(frozen=True)
@@ -8031,6 +8184,7 @@ class TransportController:
             "active_playback_source": "legacy",
             "developer_playback_source": "current",
             "developer_playback_state_path": str(DEFAULT_VIRTUALDJ_PLAYBACK_STATE_PATH),
+            "structure_behavior_source": "legacy",
         }
 
     def start(self):
@@ -8074,6 +8228,14 @@ class TransportController:
             developer_source
             if developer_source in DEVELOPER_PLAYBACK_SOURCES
             else defaults["developer_playback_source"]
+        )
+        behavior_source = str(
+            cleaned.get("structure_behavior_source", defaults["structure_behavior_source"])
+        ).strip().lower()
+        cleaned["structure_behavior_source"] = (
+            behavior_source
+            if behavior_source in STRUCTURE_BEHAVIOR_SOURCES
+            else defaults["structure_behavior_source"]
         )
         configured_path = str(
             cleaned.get("developer_playback_state_path", defaults["developer_playback_state_path"])
@@ -8512,6 +8674,10 @@ class TransportController:
         state = self.state()
         return dict(state.get("transport") or {})
 
+    def structure_behavior_source(self):
+        with self._lock:
+            return self.config.get("structure_behavior_source", "legacy")
+
     def developer_playback_state(self, current_state=None):
         with self._lock:
             source = self.config.get("developer_playback_source", "current")
@@ -8607,8 +8773,9 @@ class TransportController:
 
 
 class DmxController:
-    def __init__(self, osc_listener):
+    def __init__(self, osc_listener, structure_behavior_bridge=None):
         self.osc = osc_listener
+        self.structure_behavior_bridge = structure_behavior_bridge
         self.debug_log = TRIGGER_LOG
         self.lock = threading.Lock()
         self.dmx_send_lock = threading.Lock()
@@ -8638,6 +8805,7 @@ class DmxController:
         self.track_path_plan_cache = {}
         self.last_track_plan_prewarm_at = 0.0
         self.last_playback_generation = None
+        self.last_structure_behavior_source = None
         self.playback_runtime_resets = 0
         self.active_virtualdj_beat_pulse = None
         self.active_virtualdj_beat_pulse_preview = None
@@ -11739,6 +11907,7 @@ class DmxController:
         config = config or self._clean_full_config(dict(self.config))
         osc = osc or self.osc.snapshot_for_render()
         auto_show = auto_show or self._auto_show_state(osc, config["auto_show"])
+        osc = self._behavior_osc(osc, auto_show)
         return self._render_values_with_context(
             now,
             config,
@@ -11775,6 +11944,7 @@ class DmxController:
 
     def _build_slot_previews(self, config, osc, now, auto_show=None):
         auto_show = auto_show or self._auto_show_state(osc, config.get("auto_show", {}))
+        osc = self._behavior_osc(osc, auto_show)
         return {
             slot_id: self._preview_for_slot(
                 slot_id,
@@ -11791,6 +11961,8 @@ class DmxController:
         if config["blackout_active"]:
             self.conflicts = []
             return {}
+        osc = self._behavior_osc(osc, auto_show)
+        self._observe_structure_behavior_source(auto_show)
         self._log_auto_show_transition(auto_show, osc)
         merged_values = {}
         owners = {}
@@ -11825,6 +11997,56 @@ class DmxController:
         self.conflicts = conflicts
         return merged_values
 
+    def _structure_behavior_state(self, osc):
+        source_getter = getattr(self.osc, "structure_behavior_source", None)
+        selected_source = source_getter() if callable(source_getter) else "legacy"
+        if self.structure_behavior_bridge is None:
+            return {
+                "selected_source": selected_source,
+                "effective_source": "legacy",
+                "eligible": False,
+                "fallback_reason": "structure_bridge_unavailable",
+                "legacy_phrase": osc.get("phrase_current"),
+                "mapped_behavior_bucket": None,
+                "song_analyzer_label": None,
+                "projection": None,
+            }
+        return self.structure_behavior_bridge.resolve(selected_source, osc)
+
+    def _observe_structure_behavior_source(self, auto_show):
+        behavior = (auto_show or {}).get("structure_behavior") or {}
+        source = (
+            behavior.get("selected_source", "legacy"),
+            behavior.get("effective_source", "legacy"),
+        )
+        if self.last_structure_behavior_source == source:
+            return
+        previous = self.last_structure_behavior_source
+        self.last_structure_behavior_source = source
+        if previous is None:
+            return
+        self.motion_states.clear()
+        self.slot_rhythm_states.clear()
+        self.last_slot_trigger_signatures.clear()
+        self.last_slot_rhythm_signatures.clear()
+        self.last_slot_strobe_outputs.clear()
+        self.outro_behavior_state = None
+        self.debug_log.log(
+            "STRUCTURE_BEHAVIOR_SOURCE_RESET",
+            previous_selected=previous[0],
+            previous_effective=previous[1],
+            selected=source[0],
+            effective=source[1],
+        )
+
+    @staticmethod
+    def _behavior_osc(osc, auto_show):
+        effective = dict(osc or {})
+        behavior = (auto_show or {}).get("structure_behavior") or {}
+        if behavior.get("effective_source") == "song_analyzer":
+            effective["phrase_current"] = behavior.get("mapped_behavior_bucket")
+        return effective
+
     def _log_auto_show_transition(self, auto_show, osc):
         signature = (
             bool(auto_show.get("enabled")),
@@ -11835,6 +12057,8 @@ class DmxController:
             bool(auto_show.get("beat_pulse")),
             bool(auto_show.get("strobe_window")),
             bool(auto_show.get("external_strobe")),
+            str((auto_show.get("structure_behavior") or {}).get("effective_source")),
+            str((auto_show.get("structure_behavior") or {}).get("song_analyzer_label")),
             str((auto_show.get("waveform_analysis") or {}).get("state", "neutral")),
         )
         if signature == self.last_auto_show_signature:
@@ -11845,6 +12069,8 @@ class DmxController:
             enabled=auto_show.get("enabled"),
             style=auto_show.get("style"),
             phrase=osc.get("phrase_current"),
+            structure_source=(auto_show.get("structure_behavior") or {}).get("effective_source"),
+            structure_label=(auto_show.get("structure_behavior") or {}).get("song_analyzer_label"),
             cue=auto_show.get("cue_label"),
             rhythm=auto_show.get("rhythm_mode"),
             beat=auto_show.get("beat_pulse"),
@@ -12200,9 +12426,13 @@ class DmxController:
         style_name = config["style"]
         style = auto_show_style(style_name)
         osc_effective = dict(osc)
+        structure_behavior = self._structure_behavior_state(osc)
         if override_phrase != "none":
             osc_effective["phrase_current"] = override_phrase
-        self._prewarm_track_show_plans(style_name, osc_effective)
+        elif structure_behavior["effective_source"] == "song_analyzer":
+            osc_effective["phrase_current"] = structure_behavior["mapped_behavior_bucket"]
+        if structure_behavior["effective_source"] != "song_analyzer":
+            self._prewarm_track_show_plans(style_name, osc_effective)
         section = (
             override_phrase
             if override_phrase != "none"
@@ -12250,7 +12480,13 @@ class DmxController:
             drum_profile=drum_profile,
             waveform_analysis=waveform_analysis,
         )
-        planned_scene = self._planned_scene_variants(style_name, osc_effective)
+        # A current exact SongAnalyzer segment is the structure authority. Do
+        # not let the older preview-derived plan replace that same input.
+        planned_scene = (
+            None
+            if structure_behavior["effective_source"] == "song_analyzer"
+            else self._planned_scene_variants(style_name, osc_effective)
+        )
         behavior_section = (
             str(planned_scene.get("section") or live_behavior_section)
             if planned_scene
@@ -12434,6 +12670,7 @@ class DmxController:
             "audience_turn_pan_max": audience_turn_pan_max,
             "audience_tilt_split": audience_tilt_split,
             "phrase_bucket": section,
+            "structure_behavior": structure_behavior,
             "override_phrase": override_phrase,
             "override_phrase_label": auto_show_phrase_override_label(override_phrase),
             "behavior_bucket": behavior_section,
@@ -13747,8 +13984,9 @@ class DmxController:
 
 OSC = OscListener()
 TRANSPORT = TransportController(OSC)
-DMX = DmxController(TRANSPORT)
 SONG_ANALYZER_STRUCTURE = SongAnalyzerStructureHandoff()
+STRUCTURE_BEHAVIOR = StructureBehaviorBridge(SONG_ANALYZER_STRUCTURE)
+DMX = DmxController(TRANSPORT, STRUCTURE_BEHAVIOR)
 
 
 def serial_ports():
@@ -14036,11 +14274,19 @@ def full_state():
         "source": TRANSPORT.source_state(),
         "transport": TRANSPORT.transport_state(),
         "developer_playback": TRANSPORT.developer_playback_state(osc_state),
+        "developer_structure_behavior": structure_behavior_state(osc_state),
     }
 
 
 def song_analyzer_structure_state():
     return SONG_ANALYZER_STRUCTURE.project(TRANSPORT.state())
+
+
+def structure_behavior_state(osc_state=None):
+    state = TRANSPORT.state() if osc_state is None else osc_state
+    return STRUCTURE_BEHAVIOR.resolve(
+        TRANSPORT.structure_behavior_source(), state, include_shadow=True
+    )
 
 
 def remote_state():
@@ -14136,6 +14382,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/developer/structure":
             self.send_json(song_analyzer_structure_state())
             return
+        if path == "/api/developer/structure-behavior":
+            self.send_json(structure_behavior_state())
+            return
         if path == "/api/developer/virtualdj-beat-pulse":
             self.send_json(DMX.virtualdj_beat_pulse_test_state())
             return
@@ -14204,6 +14453,13 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/developer/playback/update":
                 TRANSPORT.update_developer_playback(payload)
                 self.send_json(full_state())
+                return
+            if path == "/api/developer/structure-behavior":
+                source = payload.get("source")
+                if source not in STRUCTURE_BEHAVIOR_SOURCES:
+                    raise ValueError("source must be legacy or song_analyzer")
+                TRANSPORT.update_config({"structure_behavior_source": source})
+                self.send_json(structure_behavior_state())
                 return
             if path == "/api/developer/virtualdj-beat-pulse/start":
                 self.send_json(DMX.start_virtualdj_beat_pulse_test(payload))

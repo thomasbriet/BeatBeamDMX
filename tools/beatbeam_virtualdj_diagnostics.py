@@ -64,7 +64,8 @@ class TransitionObserver:
         observed_monotonic = time.monotonic() if observed_monotonic is None else observed_monotonic
         current = (structure or {}).get("current") or None
         path = (structure or {}).get("canonical_track_path")
-        position = number((playback or {}).get("beatbeam", {}).get("estimated_position_milliseconds")) / 1000.0
+        beatbeam = (playback or {}).get("beatbeam") or {}
+        position = number(beatbeam.get("estimated_position_milliseconds")) / 1000.0
         current_key = None if current is None else (current.get("index"), current.get("label"))
         if self._last_path == path and self._last_current is not None and current_key != self._last_current:
             jumped = bool((playback or {}).get("last_discontinuity")) or position < (self._last_position or 0.0)
@@ -84,9 +85,10 @@ class TransitionObserver:
         self._last_current = current_key
 
 
-def render_dashboard(playback, structure, observer=None):
+def render_dashboard(playback, structure, behavior=None, observer=None):
     playback = playback or {}
     structure = structure or {}
+    behavior = behavior or {}
     if observer is not None:
         observer.observe(playback, structure)
 
@@ -124,6 +126,20 @@ def render_dashboard(playback, structure, observer=None):
             value(structure, "analysis_version"), value(structure, "phrase_analysis_version"), value(structure, "segment_count")
         ),
         "",
+        "Behavior Control",
+        "----------------",
+        "Selected: {} | Effective: {} | Eligible: {}".format(
+            value(behavior, "selected_source").upper(),
+            value(behavior, "effective_source").upper(),
+            "YES" if behavior.get("eligible") else "NO",
+        ),
+        "Legacy phrase: {} | SongAnalyzer label: {} | Mapped behavior: {}".format(
+            value(behavior, "legacy_phrase"),
+            value(behavior, "song_analyzer_label"),
+            value(behavior, "mapped_behavior_bucket"),
+        ),
+        "Fallback: {}".format(value(behavior, "fallback_reason")),
+        "",
         "Previous",
         "--------",
         segment_line(previous),
@@ -160,7 +176,9 @@ def render_dashboard(playback, structure, observer=None):
             value(metrics, "structure_loads"), value(metrics, "cache_hits"),
             value(metrics, "parse_failures"), value(metrics, "schema_failures"),
         ),
-        "Lighting affected: NO | VirtualDJ writes: NO",
+        "Behavior input: {} | VirtualDJ writes: NO".format(
+            value(behavior, "effective_source").upper()
+        ),
     ])
     return "\n".join(lines)
 
@@ -176,13 +194,15 @@ def run_dashboard(args, output=None, opener=urlopen, is_tty=None, sleep_fn=time.
     should_clear = is_tty and not args.no_clear and not args.once
     endpoint = "http://{}:{}/api/developer/playback".format(args.host, args.port)
     structure_endpoint = "http://{}:{}/api/developer/structure".format(args.host, args.port)
+    behavior_endpoint = "http://{}:{}/api/developer/structure-behavior".format(args.host, args.port)
     observer = TransitionObserver()
     iteration = 0
     while maximum_iterations is None or iteration < maximum_iterations:
         try:
             playback = fetch_json(endpoint, opener)
             structure = fetch_json(structure_endpoint, opener)
-            dashboard = render_dashboard(playback, structure, observer)
+            behavior = fetch_json(behavior_endpoint, opener)
+            dashboard = render_dashboard(playback, structure, behavior, observer)
         except Exception as exc:
             dashboard = "BeatBeam M19F Structure Diagnostics\n\nBeatBeam diagnostics unavailable: {}".format(type(exc).__name__)
         if should_clear:

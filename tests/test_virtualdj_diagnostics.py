@@ -25,13 +25,18 @@ def response(payload):
     return Response()
 
 
-def opener_for(playbacks, structures):
+def opener_for(playbacks, structures, behaviors=None):
     calls = {"count": 0}
+    behaviors = behaviors or [behavior()]
 
     def opener(url, timeout):
-        index = calls["count"] // 2
+        index = calls["count"] // 3
         calls["count"] += 1
-        return response(playbacks[min(index, len(playbacks) - 1)] if url.endswith("playback") else structures[min(index, len(structures) - 1)])
+        if url.endswith("playback"):
+            return response(playbacks[min(index, len(playbacks) - 1)])
+        if url.endswith("structure-behavior"):
+            return response(behaviors[min(index, len(behaviors) - 1)])
+        return response(structures[min(index, len(structures) - 1)])
 
     return opener
 
@@ -61,29 +66,58 @@ def playback(position=83400, discontinuity=None):
     }
 
 
+def behavior(selected="song_analyzer", effective="song_analyzer", eligible=True, fallback=None):
+    return {
+        "selected_source": selected,
+        "effective_source": effective,
+        "eligible": eligible,
+        "fallback_reason": fallback,
+        "legacy_phrase": "verse",
+        "song_analyzer_label": "Up 3" if eligible else None,
+        "mapped_behavior_bucket": "build" if eligible else None,
+    }
+
+
 class VirtualDjDiagnosticsTests(unittest.TestCase):
     def test_known_track_renders_current_previous_and_next(self):
-        text = DIAGNOSTICS.render_dashboard(playback(), structure())
+        text = DIAGNOSTICS.render_dashboard(playback(), structure(), behavior())
         self.assertIn("Match: EXACT | Status: CURRENT | Schema: 1", text)
         self.assertIn(">>> CURRENT: BUILD <<<", text)
         self.assertIn("#2 Build", text)
         self.assertIn("#4 Break", text)
+        self.assertIn("Selected: SONG_ANALYZER | Effective: SONG_ANALYZER | Eligible: YES", text)
+        self.assertIn("Mapped behavior: build", text)
 
     def test_unknown_and_stale_structure_are_explicit(self):
         unknown = structure(availability="unavailable", previous=False, following=False)
         unknown["track_match"] = "none"
         unknown["current"] = None
-        self.assertIn("Match: NONE | Status: UNAVAILABLE", DIAGNOSTICS.render_dashboard(playback(), unknown))
-        self.assertIn("Status: STALE", DIAGNOSTICS.render_dashboard(playback(), structure(availability="stale")))
+        fallback = behavior(effective="legacy", eligible=False, fallback="structure_not_current")
+        self.assertIn("Match: NONE | Status: UNAVAILABLE", DIAGNOSTICS.render_dashboard(playback(), unknown, fallback))
+        stale_text = DIAGNOSTICS.render_dashboard(playback(), structure(availability="stale"), fallback)
+        self.assertIn("Status: STALE", stale_text)
+        self.assertIn("Fallback: structure_not_current", stale_text)
+
+    def test_unavailable_playback_snapshot_keeps_diagnostics_available(self):
+        unavailable_playback = {
+            "availability": "available",
+            "virtualdj": None,
+            "beatbeam": None,
+            "last_discontinuity": "source_unavailable",
+        }
+        fallback = behavior(effective="legacy", eligible=False, fallback="track_unavailable")
+        text = DIAGNOSTICS.render_dashboard(unavailable_playback, structure(availability="unavailable"), fallback, DIAGNOSTICS.TransitionObserver())
+        self.assertIn("Fallback: track_unavailable", text)
+        self.assertIn("Track: -", text)
 
     def test_natural_and_seek_transitions_are_distinguished(self):
         observer = DIAGNOSTICS.TransitionObserver()
-        DIAGNOSTICS.render_dashboard(playback(60000), structure("Build", index=3), observer)
-        natural = DIAGNOSTICS.render_dashboard(playback(63000), structure("Drop", index=4), observer)
+        DIAGNOSTICS.render_dashboard(playback(60000), structure("Build", index=3), behavior(), observer)
+        natural = DIAGNOSTICS.render_dashboard(playback(63000), structure("Drop", index=4), behavior(), observer)
         self.assertIn("Build -> Drop", natural)
         observer = DIAGNOSTICS.TransitionObserver()
-        DIAGNOSTICS.render_dashboard(playback(60000), structure("Build", index=3), observer)
-        jumped = DIAGNOSTICS.render_dashboard(playback(30000, {"reason": "seek"}), structure("Chorus", index=5), observer)
+        DIAGNOSTICS.render_dashboard(playback(60000), structure("Build", index=3), behavior(), observer)
+        jumped = DIAGNOSTICS.render_dashboard(playback(30000, {"reason": "seek"}), structure("Chorus", index=5), behavior(), observer)
         self.assertIn("SEEK/JUMP -> Chorus", jumped)
 
     def test_once_and_no_clear_output_modes(self):

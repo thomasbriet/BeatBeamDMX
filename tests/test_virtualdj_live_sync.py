@@ -346,6 +346,23 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
             self.assertEqual("virtualdj", reloaded.config["developer_playback_source"])
             self.assertEqual(str(snapshot_path), reloaded.config["developer_playback_state_path"])
 
+    def test_structure_behavior_source_is_separate_from_playback_source_and_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "transport.json"
+            fake_osc = FakeLegacyPlaybackSource()
+            with patch("beatbeam_app.TRANSPORT_CONFIG_PATH", config_path):
+                first = TransportController(fake_osc)
+                first.update_config({
+                    "active_playback_source": "virtualdj",
+                    "structure_behavior_source": "song_analyzer",
+                })
+                reloaded = TransportController(fake_osc)
+
+            self.assertEqual("virtualdj", reloaded.config["active_playback_source"])
+            self.assertEqual("song_analyzer", reloaded.structure_behavior_source())
+            reloaded.update_config({"structure_behavior_source": "not-a-source"})
+            self.assertEqual("legacy", reloaded.structure_behavior_source())
+
 
 def pulse_state(
     *,
