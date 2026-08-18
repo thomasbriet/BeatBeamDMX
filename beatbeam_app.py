@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from enttec_open_dmx import (
@@ -70,11 +71,303 @@ MAXIMUM_VIRTUALDJ_BEAT_PULSE_LATE_DISPATCH_MILLISECONDS = 100
 DEFAULT_VIRTUALDJ_PLAYBACK_STATE_PATH = (
     Path.home() / "Library/Application Support/MusicAnalyzer/virtualdj-playback.json"
 )
+SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION = 1
+DEFAULT_SONG_ANALYZER_STRUCTURE_PATH = Path(
+    os.environ.get("BEATBEAM_SONG_ANALYZER_STRUCTURE_PATH")
+    or (Path.home() / "Library/Application Support/MusicAnalyzer/beatbeam-structure-plan.json")
+)
 FIXTURE_LIBRARY = load_fixture_profiles()
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = DEFAULT_HTTP_PORT
 REMOTE_ACCESS_CONFIG = None
 REMOTE_ADDRESS_CACHE = {"updated_at": 0.0, "state": None}
+
+
+def canonical_song_analyzer_track_path(value):
+    """Mirror the handoff's absolute lexical path contract without resolving symlinks or case."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return os.path.normpath(os.path.abspath(os.path.expanduser(text)))
+
+
+@dataclass(frozen=True)
+class SongAnalyzerStructureSegment:
+    index: int
+    start_seconds: float
+    end_seconds: float
+    label: str
+    confidence: Optional[float] = None
+    start_bar: Optional[int] = None
+    end_bar: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class SongAnalyzerStructureTrack:
+    canonical_path: str
+    content_sha256: Optional[str]
+    analysis_hash: Optional[str]
+    analysis_version: Optional[str]
+    phrase_analysis_version: Optional[str]
+    availability: str
+    model: str
+    segments: tuple
+
+
+class SongAnalyzerStructureHandoff:
+    """Read-only cached consumer for SongAnalyzer's small versioned structure index.
+
+    This class has no link to the renderer or DMX controller. It is queried only
+    by developer diagnostics, while the existing transport remains authoritative.
+    """
+
+    def __init__(self, path=DEFAULT_SONG_ANALYZER_STRUCTURE_PATH, check_interval_seconds=1.0):
+        self.path = Path(path)
+        self.check_interval_seconds = max(0.0, float(check_interval_seconds))
+        self._last_check = 0.0
+        self._signature = object()
+        self._tracks = {}
+        self._schema_version = None
+        self._load_status = "missing"
+        self._load_error = None
+        self._last_track_path = None
+        self._metrics = {
+            "structure_loads": 0,
+            "cache_hits": 0,
+            "lookup_failures": 0,
+            "parse_failures": 0,
+            "schema_failures": 0,
+            "track_switches": 0,
+        }
+
+    @staticmethod
+    def _number(value, name, minimum=None):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ValueError(f"{name} is invalid")
+        number = float(value)
+        if minimum is not None and number < minimum:
+            raise ValueError(f"{name} is invalid")
+        return number
+
+    @staticmethod
+    def _optional_text(value, name):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"{name} is invalid")
+        value = value.strip()
+        return value or None
+
+    @classmethod
+    def _parse_document(cls, raw):
+        if not isinstance(raw, dict):
+            raise ValueError("document is invalid")
+        schema = raw.get("schema_version")
+        if isinstance(schema, bool) or not isinstance(schema, int) or schema != SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION:
+            raise RuntimeError("unsupported_schema")
+        tracks_raw = raw.get("tracks")
+        if not isinstance(tracks_raw, list):
+            raise ValueError("tracks is invalid")
+        tracks = {}
+        for track_raw in tracks_raw:
+            if not isinstance(track_raw, dict):
+                raise ValueError("track is invalid")
+            canonical_path = cls._optional_text(track_raw.get("canonical_path"), "canonical_path")
+            if not canonical_path or canonical_song_analyzer_track_path(canonical_path) != canonical_path:
+                raise ValueError("canonical_path is not canonical")
+            if canonical_path in tracks:
+                raise ValueError("canonical_path is duplicated")
+            availability = track_raw.get("availability")
+            if availability not in {"current", "stale", "missing"}:
+                raise ValueError("availability is invalid")
+            structure = track_raw.get("structure")
+            if not isinstance(structure, dict):
+                raise ValueError("structure is invalid")
+            model = cls._optional_text(structure.get("model"), "structure.model")
+            segments_raw = structure.get("segments")
+            if not model or not isinstance(segments_raw, list):
+                raise ValueError("structure is incomplete")
+            if availability in {"current", "stale"} and not segments_raw:
+                raise ValueError("available structure is empty")
+            segments = []
+            previous_end = -math.inf
+            for expected_index, segment_raw in enumerate(segments_raw):
+                if not isinstance(segment_raw, dict) or segment_raw.get("index") != expected_index:
+                    raise ValueError("segment index is invalid")
+                start = cls._number(segment_raw.get("start_seconds"), "segment.start_seconds", 0.0)
+                end = cls._number(segment_raw.get("end_seconds"), "segment.end_seconds", 0.0)
+                label = cls._optional_text(segment_raw.get("label"), "segment.label")
+                if not label or end <= start or start < previous_end:
+                    raise ValueError("segment timing is invalid")
+                confidence = segment_raw.get("confidence")
+                if confidence is not None:
+                    confidence = cls._number(confidence, "segment.confidence", 0.0)
+                    if confidence > 100.0:
+                        raise ValueError("segment.confidence is invalid")
+                start_bar = segment_raw.get("start_bar")
+                end_bar = segment_raw.get("end_bar")
+                if start_bar is not None and (isinstance(start_bar, bool) or not isinstance(start_bar, int) or start_bar < 1):
+                    raise ValueError("segment.start_bar is invalid")
+                if end_bar is not None and (isinstance(end_bar, bool) or not isinstance(end_bar, int) or end_bar <= 1):
+                    raise ValueError("segment.end_bar is invalid")
+                segments.append(SongAnalyzerStructureSegment(
+                    expected_index, start, end, label, confidence, start_bar, end_bar
+                ))
+                previous_end = end
+            tracks[canonical_path] = SongAnalyzerStructureTrack(
+                canonical_path,
+                cls._optional_text(track_raw.get("content_sha256"), "content_sha256"),
+                cls._optional_text(track_raw.get("analysis_hash"), "analysis_hash"),
+                cls._optional_text(track_raw.get("analysis_version"), "analysis_version"),
+                cls._optional_text(track_raw.get("phrase_analysis_version"), "phrase_analysis_version"),
+                availability,
+                model,
+                tuple(segments),
+            )
+        return schema, tracks
+
+    def _file_signature(self):
+        try:
+            stat = self.path.stat()
+            return stat.st_mtime_ns, stat.st_size
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            return ("error", type(exc).__name__)
+
+    def _refresh(self, force=False):
+        now = time.monotonic()
+        if not force and now - self._last_check < self.check_interval_seconds:
+            return
+        self._last_check = now
+        signature = self._file_signature()
+        if signature == self._signature:
+            self._metrics["cache_hits"] += 1
+            return
+        self._signature = signature
+        self._tracks = {}
+        self._schema_version = None
+        self._load_error = None
+        if signature is None:
+            self._load_status = "missing"
+            return
+        if isinstance(signature, tuple) and signature[0] == "error":
+            self._load_status = "unreadable"
+            self._load_error = signature[1]
+            self._metrics["parse_failures"] += 1
+            return
+        self._metrics["structure_loads"] += 1
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                schema, tracks = self._parse_document(json.load(handle))
+            self._schema_version = schema
+            self._tracks = tracks
+            self._load_status = "ready"
+        except RuntimeError as exc:
+            self._load_status = "unsupported_schema"
+            self._load_error = str(exc)
+            self._metrics["schema_failures"] += 1
+        except Exception as exc:
+            self._load_status = "invalid"
+            self._load_error = type(exc).__name__
+            self._metrics["parse_failures"] += 1
+
+    @staticmethod
+    def _segment_state(segment, position):
+        duration = max(0.0, segment.end_seconds - segment.start_seconds)
+        return {
+            "index": segment.index,
+            "label": segment.label,
+            "start_seconds": segment.start_seconds,
+            "end_seconds": segment.end_seconds,
+            "start_bar": segment.start_bar,
+            "end_bar": segment.end_bar,
+            "confidence": segment.confidence,
+            "elapsed_seconds": max(0.0, position - segment.start_seconds),
+            "remaining_seconds": max(0.0, segment.end_seconds - position),
+            "starts_in_seconds": max(0.0, segment.start_seconds - position),
+            "progress": min(1.0, max(0.0, (position - segment.start_seconds) / duration)) if duration else 0.0,
+        }
+
+    def project(self, playback):
+        state = dict(playback or {})
+        source = state.get("_active_playback_source")
+        raw_path = state.get("track_path")
+        canonical_path = canonical_song_analyzer_track_path(raw_path)
+        track_changed = canonical_path != self._last_track_path
+        if track_changed:
+            self._last_track_path = canonical_path
+            self._metrics["track_switches"] += 1
+        self._refresh(force=track_changed)
+        result = {
+            "source": "song_analyzer" if source == "virtualdj" else "none",
+            "contract_path": str(self.path),
+            "schema_version": self._schema_version,
+            "load_status": self._load_status,
+            "load_error": self._load_error,
+            "track_match": "none",
+            "availability": "inactive" if source != "virtualdj" else "unavailable",
+            "projection_status": "unknown",
+            "canonical_track_path": canonical_path,
+            "analysis_version": None,
+            "phrase_analysis_version": None,
+            "model": None,
+            "segment_count": 0,
+            "current": None,
+            "previous": None,
+            "next": None,
+            "metrics": dict(self._metrics),
+        }
+        if source != "virtualdj" or not canonical_path:
+            return result
+        if self._load_status != "ready":
+            return result
+        track = self._tracks.get(canonical_path)
+        if track is None:
+            self._metrics["lookup_failures"] += 1
+            result["metrics"] = dict(self._metrics)
+            return result
+        result.update({
+            "track_match": "exact",
+            "availability": "available_current" if track.availability == "current" else (
+                "available_stale" if track.availability == "stale" else "unavailable"
+            ),
+            "analysis_version": track.analysis_version,
+            "phrase_analysis_version": track.phrase_analysis_version,
+            "model": track.model,
+            "segment_count": len(track.segments),
+        })
+        if track.availability == "missing":
+            return result
+        position = state.get("time_seconds")
+        if isinstance(position, bool) or not isinstance(position, (int, float)) or not math.isfinite(float(position)):
+            result["projection_status"] = "position_unavailable"
+            return result
+        position = float(position)
+        if not track.segments:
+            return result
+        if position < track.segments[0].start_seconds:
+            result["projection_status"] = "before_structure"
+            result["next"] = self._segment_state(track.segments[0], position)
+            return result
+        for index, segment in enumerate(track.segments):
+            is_final_end = index == len(track.segments) - 1 and position == segment.end_seconds
+            if segment.start_seconds <= position < segment.end_seconds or is_final_end:
+                result["projection_status"] = "in_final_segment" if is_final_end else "in_segment"
+                result["current"] = self._segment_state(segment, position)
+                if index:
+                    result["previous"] = self._segment_state(track.segments[index - 1], position)
+                if index + 1 < len(track.segments):
+                    result["next"] = self._segment_state(track.segments[index + 1], position)
+                return result
+            if index + 1 < len(track.segments) and position < track.segments[index + 1].start_seconds:
+                result["projection_status"] = "between_segments"
+                result["previous"] = self._segment_state(segment, position)
+                result["next"] = self._segment_state(track.segments[index + 1], position)
+                return result
+        result["projection_status"] = "after_structure"
+        result["previous"] = self._segment_state(track.segments[-1], position)
+        return result
 
 
 def playback_system_monotonic_time():
@@ -13455,6 +13748,7 @@ class DmxController:
 OSC = OscListener()
 TRANSPORT = TransportController(OSC)
 DMX = DmxController(TRANSPORT)
+SONG_ANALYZER_STRUCTURE = SongAnalyzerStructureHandoff()
 
 
 def serial_ports():
@@ -13745,6 +14039,10 @@ def full_state():
     }
 
 
+def song_analyzer_structure_state():
+    return SONG_ANALYZER_STRUCTURE.project(TRANSPORT.state())
+
+
 def remote_state():
     osc_state = TRANSPORT.state()
     dmx_state = DMX.state()
@@ -13834,6 +14132,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/developer/playback":
             self.send_json(TRANSPORT.developer_playback_state())
+            return
+        if path == "/api/developer/structure":
+            self.send_json(song_analyzer_structure_state())
             return
         if path == "/api/developer/virtualdj-beat-pulse":
             self.send_json(DMX.virtualdj_beat_pulse_test_state())
