@@ -395,6 +395,7 @@ struct DmxState: Decodable {
     let slotPreviews: [String: SlotPreview]
     let conflicts: [ChannelConflict]
     let values: [String: Int]
+    let developerVirtualdjBeatPulsePreview: VirtualDjBeatPulsePreviewState?
 
     private enum CodingKeys: String, CodingKey {
         case connected
@@ -412,6 +413,7 @@ struct DmxState: Decodable {
         case slotPreviews
         case conflicts
         case values
+        case developerVirtualdjBeatPulsePreview
     }
 
     init(from decoder: Decoder) throws {
@@ -431,7 +433,19 @@ struct DmxState: Decodable {
         slotPreviews = try container.decodeIfPresent([String: SlotPreview].self, forKey: .slotPreviews) ?? [:]
         conflicts = try container.decode([ChannelConflict].self, forKey: .conflicts)
         values = try container.decode([String: Int].self, forKey: .values)
+        developerVirtualdjBeatPulsePreview = try container.decodeIfPresent(
+            VirtualDjBeatPulsePreviewState.self,
+            forKey: .developerVirtualdjBeatPulsePreview
+        )
     }
+}
+
+struct VirtualDjBeatPulsePreviewState: Decodable {
+    let enabled: Bool
+    let pending: Bool
+    let lastReason: String
+    let mode: String
+    let physicalDmxOutput: Bool
 }
 
 struct SlotState: Decodable {
@@ -1672,6 +1686,11 @@ struct ConnectRequest: Encodable {
 
 struct EmptyRequest: Encodable {}
 
+struct VirtualDjBeatPulsePreviewRequest: Encodable {
+    let slotID: String
+    let durationMilliseconds: Int
+}
+
 struct AddSlotRequest: Encodable {
     let fixtureID: String
     let mode: String?
@@ -2161,6 +2180,8 @@ final class AppModel: ObservableObject {
     @Published var universeSummary = "Geen actieve kanalen"
     @Published var conflictSummary = "Geen kanaalconflicten"
     @Published var rawValuesText = "Geen actieve DMX-waarden."
+    @Published var virtualDjBeatPulsePreviewEnabled = false
+    @Published var virtualDjBeatPulsePreviewStatus = "Visuele VirtualDJ-test uit"
     @Published var activeLivePreset: LivePreset?
     @Published var autoShowEnabled = false
     @Published var autoShowAvailable = false
@@ -2493,6 +2514,47 @@ final class AppModel: ObservableObject {
                 errorText = ""
             } catch {
                 errorText = "Blackout mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func startVirtualDjBeatPulsePreview() {
+        let slotID = selectedSlotID.isEmpty ? (slotEditors.first?.id ?? "") : selectedSlotID
+        guard !slotID.isEmpty else {
+            errorText = "Kies eerst een fixture voor de visuele VirtualDJ-test."
+            return
+        }
+        Task {
+            do {
+                let request = VirtualDjBeatPulsePreviewRequest(
+                    slotID: slotID,
+                    durationMilliseconds: 100
+                )
+                let state: VirtualDjBeatPulsePreviewState = try await post(
+                    "/api/developer/virtualdj-beat-pulse-preview/start",
+                    body: request,
+                    as: VirtualDjBeatPulsePreviewState.self
+                )
+                applyVirtualDjBeatPulsePreview(state)
+                errorText = ""
+            } catch {
+                errorText = "Visuele VirtualDJ-test starten mislukt: (error.localizedDescription)"
+            }
+        }
+    }
+
+    func stopVirtualDjBeatPulsePreview() {
+        Task {
+            do {
+                let state: VirtualDjBeatPulsePreviewState = try await post(
+                    "/api/developer/virtualdj-beat-pulse-preview/stop",
+                    body: EmptyRequest(),
+                    as: VirtualDjBeatPulsePreviewState.self
+                )
+                applyVirtualDjBeatPulsePreview(state)
+                errorText = ""
+            } catch {
+                errorText = "Visuele VirtualDJ-test stoppen mislukt: (error.localizedDescription)"
             }
         }
     }
@@ -3667,6 +3729,9 @@ final class AppModel: ObservableObject {
             return (channel, value)
         })
         dmxConflicts = state.dmx.conflicts
+        if let previewState = state.dmx.developerVirtualdjBeatPulsePreview {
+            applyVirtualDjBeatPulsePreview(previewState)
+        }
         liveOneShotCue = state.dmx.autoShow.oneShotCue
         liveOneShotCueLabel = state.dmx.autoShow.oneShotLabel
         liveOneShotCueProgress = state.dmx.autoShow.oneShotProgress
@@ -3873,6 +3938,17 @@ final class AppModel: ObservableObject {
             }.joined(separator: "\n")
         }
         advanceStageSimulation(forceSnapIfNeeded: false)
+    }
+
+    private func applyVirtualDjBeatPulsePreview(_ state: VirtualDjBeatPulsePreviewState) {
+        virtualDjBeatPulsePreviewEnabled = state.enabled
+        if state.enabled {
+            virtualDjBeatPulsePreviewStatus = state.pending
+                ? "Virtuele VirtualDJ-puls wacht op de volgende maat"
+                : "Virtuele VirtualDJ-puls actief"
+        } else {
+            virtualDjBeatPulsePreviewStatus = "Visuele VirtualDJ-test uit"
+        }
     }
 
     private func syncEditors(from state: AppState, forceSelectionToActiveSlot: Bool) {
@@ -4526,7 +4602,16 @@ final class AppModel: ObservableObject {
 
     private func startBackend() throws {
         let root = backendRootURL()
-        let pythonURL = root.appendingPathComponent(".venv/bin/python")
+        let bundledPythonRuntimeURL = root.appendingPathComponent("python-runtime", isDirectory: true)
+        let bundledPythonURL = bundledPythonRuntimeURL.appendingPathComponent("bin/python3")
+        let legacyPythonURL = root.appendingPathComponent(".venv/bin/python")
+        let pythonURL: URL
+        let bundledRuntimeAvailable = FileManager.default.isExecutableFile(atPath: bundledPythonURL.path)
+        if bundledRuntimeAvailable {
+            pythonURL = bundledPythonURL
+        } else {
+            pythonURL = legacyPythonURL
+        }
         let scriptURL = root.appendingPathComponent("beatbeam_app.py")
         let appSupportURL = backendSupportDirectoryURL()
         let configURL = appSupportURL.appendingPathComponent("beatbeam_config.json")
@@ -4542,7 +4627,7 @@ final class AppModel: ObservableObject {
         nativeLog("script path: \(scriptURL.path)")
         guard FileManager.default.isExecutableFile(atPath: pythonURL.path) else {
             throw NSError(domain: "BeatBeamDMX", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "Geen bruikbare Python venv gevonden op \(pythonURL.path)"
+                NSLocalizedDescriptionKey: "Geen bruikbare Python runtime gevonden op \(pythonURL.path)"
             ])
         }
         guard FileManager.default.fileExists(atPath: scriptURL.path) else {
@@ -4569,6 +4654,13 @@ final class AppModel: ObservableObject {
         environment["BEATBEAM_REMOTE_ACCESS_PATH"] = remoteAccessURL.path
         environment["BEATBEAM_TRIGGER_LOG_PATH"] = triggerLogURL.path
         environment["BEATBEAM_TRACK_PREVIEW_CACHE_DIR"] = previewCacheURL.path
+        if bundledRuntimeAvailable {
+            environment["PYTHONHOME"] = bundledPythonRuntimeURL.path
+            if let bundledSitePackages = bundledPythonSitePackagesURL(runtimeRoot: bundledPythonRuntimeURL) {
+                environment["PYTHONPATH"] = bundledSitePackages.path
+            }
+            environment["PYTHONNOUSERSITE"] = "1"
+        }
         process.environment = environment
         FileManager.default.createFile(atPath: backendLogURL.path, contents: nil)
         let handle = try FileHandle(forWritingTo: backendLogURL)
@@ -4591,6 +4683,22 @@ final class AppModel: ObservableObject {
         throw NSError(domain: "BeatBeamDMX", code: 3, userInfo: [
             NSLocalizedDescriptionKey: "Backend startte niet binnen de timeout"
         ])
+    }
+
+    private func bundledPythonSitePackagesURL(runtimeRoot: URL) -> URL? {
+        let libURL = runtimeRoot.appendingPathComponent("lib", isDirectory: true)
+        guard let versionDirectories = try? FileManager.default.contentsOfDirectory(
+            at: libURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        let versionDirectory = versionDirectories.first {
+            $0.lastPathComponent.hasPrefix("python3.")
+        }
+        return versionDirectory?.appendingPathComponent("site-packages", isDirectory: true)
     }
 
     private func backendRootURL() -> URL {
@@ -5216,6 +5324,38 @@ struct ContentView: View {
 
                 LabeledStatusRow(title: "DMX", text: model.dmxStatus)
                 LabeledStatusRow(title: "OSC", text: model.oscStatus)
+
+                Divider()
+
+                HStack(spacing: 8) {
+                    Button {
+                        if model.virtualDjBeatPulsePreviewEnabled {
+                            model.stopVirtualDjBeatPulsePreview()
+                        } else {
+                            model.startVirtualDjBeatPulsePreview()
+                        }
+                    } label: {
+                        Label(
+                            model.virtualDjBeatPulsePreviewEnabled
+                                ? "Stop VirtualDJ-preview"
+                                : "Test VirtualDJ-preview",
+                            systemImage: model.virtualDjBeatPulsePreviewEnabled
+                                ? "stop.fill"
+                                : "sparkles"
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(model.virtualDjBeatPulsePreviewEnabled ? .red : BeatBeamPalette.brandCyan)
+
+                    Text(model.virtualDjBeatPulsePreviewStatus)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(BeatBeamPalette.secondaryText)
+                        .lineLimit(2)
+                }
+
+                Text("Alleen in de app-preview; er wordt geen DMX-signaal verstuurd.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(BeatBeamPalette.secondaryText)
             }
         }
     }
