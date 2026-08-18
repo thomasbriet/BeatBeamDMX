@@ -2606,6 +2606,11 @@ DEVELOPER_PLAYBACK_SOURCES = {
     "virtualdj",
 }
 
+ACTIVE_PLAYBACK_SOURCES = {
+    "legacy",
+    "virtualdj",
+}
+
 
 @dataclass(frozen=True)
 class PlaybackQueryTiming:
@@ -2948,6 +2953,20 @@ class PlaybackClock:
             self.invalid_snapshot_count += 1
             self.last_source_error = source_read.error
         return self._estimated_state(now, source_read)
+
+    def reset(self):
+        """Discard an old transport anchor before a source is made active again."""
+        self.anchor = None
+        self.anchor_at = None
+        self.anchor_sample_age_milliseconds = 0.0
+        self.previous = None
+        self.previous_at = None
+        self.last_fingerprint = None
+        self.availability = "unavailable"
+        self.transport_state = "unknown"
+        self.last_discontinuity = None
+        self.was_disconnected = False
+        self.last_source_error = None
 
     def _accept(self, snapshot, now):
         if snapshot.status != "available" or not snapshot.is_connected:
@@ -3534,6 +3553,9 @@ class DeveloperPlaybackController:
 
     def state(self):
         return self.clock.state()
+
+    def reset(self):
+        self.clock.reset()
 
 MANUAL_TRANSPORT_PROFILES = {
     "intro": {
@@ -7699,6 +7721,12 @@ class TransportController:
         self.manual_clock_time_at_anchor = 0.0
         self.manual_tap_locked = False
         self.last_tap_at = None
+        self._active_playback_generation = 0
+        self._active_playback_signature = None
+        self._active_playback_event = "initial"
+        self._active_playback_source_switches = 0
+        self._active_playback_discontinuities = 0
+        self._last_active_playback_source = None
 
     @staticmethod
     def default_config():
@@ -7707,6 +7735,7 @@ class TransportController:
             "manual_bpm": DEFAULT_MANUAL_BPM,
             "manual_phrase": DEFAULT_MANUAL_PHRASE,
             "idle_animation_enabled": True,
+            "active_playback_source": "legacy",
             "developer_playback_source": "current",
             "developer_playback_state_path": str(DEFAULT_VIRTUALDJ_PLAYBACK_STATE_PATH),
         }
@@ -7736,6 +7765,14 @@ class TransportController:
         )
         cleaned["idle_animation_enabled"] = bool(
             cleaned.get("idle_animation_enabled", defaults["idle_animation_enabled"])
+        )
+        active_source = str(
+            cleaned.get("active_playback_source", defaults["active_playback_source"])
+        ).strip().lower()
+        cleaned["active_playback_source"] = (
+            active_source
+            if active_source in ACTIVE_PLAYBACK_SOURCES
+            else defaults["active_playback_source"]
         )
         developer_source = str(
             cleaned.get("developer_playback_source", defaults["developer_playback_source"])
@@ -7806,6 +7843,7 @@ class TransportController:
         now = time.time()
         persist_config = None
         with self._lock:
+            previous_active_source = self.config.get("active_playback_source", "legacy")
             merged = {**self.config, **payload}
             cleaned = self._clean_config(merged)
             manual_bpm_changed = (
@@ -7820,6 +7858,10 @@ class TransportController:
                     align_downbeat=not self.manual_tap_locked,
                 )
                 self.manual_tap_locked = True
+            if cleaned["active_playback_source"] != previous_active_source:
+                self.developer_playback.reset()
+                self._active_playback_signature = None
+                self._active_playback_event = "source_switched"
             persist_config = dict(self.config)
         self._save_config(persist_config)
         return self.transport_state()
@@ -7833,8 +7875,15 @@ class TransportController:
                 merged["developer_playback_source"] = payload["source"]
             if "snapshot_path" in payload:
                 merged["developer_playback_state_path"] = payload["snapshot_path"]
+            if "active_playback_source" in payload:
+                merged["active_playback_source"] = payload["active_playback_source"]
+            previous_active_source = self.config.get("active_playback_source", "legacy")
             self.config = self._clean_config(merged)
             self.developer_playback.configure(self.config["developer_playback_state_path"])
+            if self.config["active_playback_source"] != previous_active_source:
+                self.developer_playback.reset()
+                self._active_playback_signature = None
+                self._active_playback_event = "source_switched"
             persist_config = dict(self.config)
         self._save_config(persist_config)
         return self.developer_playback_state()
@@ -7992,12 +8041,179 @@ class TransportController:
     def snapshot_for_render(self):
         now = time.time()
         external_snapshot = self.osc.snapshot_for_render()
-        return self._active_snapshot(now, external_snapshot)
+        return self._active_render_snapshot(now, external_snapshot)
 
     def state(self):
         now = time.time()
         external_state = self.osc.state()
-        return self._active_snapshot(now, external_state)
+        return self._active_render_snapshot(now, external_state)
+
+    def _active_render_snapshot(self, now, legacy_snapshot):
+        with self._lock:
+            active_source = self.config.get("active_playback_source", "legacy")
+        if active_source == "virtualdj":
+            playback_state = self.developer_playback.state()
+            # Start with the existing transport contract so native clients keep
+            # receiving its required mode and manual-clock fields. VirtualDJ
+            # below replaces only the active timing source.
+            snapshot = self._virtualdj_render_snapshot(
+                self._active_snapshot(now, legacy_snapshot), playback_state
+            )
+        else:
+            snapshot = self._active_snapshot(now, legacy_snapshot)
+        return self._annotate_active_playback(snapshot, active_source)
+
+    @staticmethod
+    def _virtualdj_track_title(track_path):
+        path = str(track_path or "").strip()
+        if not path:
+            return None
+        return Path(path).stem or None
+
+    def _virtualdj_render_snapshot(self, legacy_snapshot, playback_state):
+        """Project the accepted generic clock onto the existing render contract.
+
+        The legacy snapshot still owns fresh waveform and phrase inputs. A
+        VirtualDJ path has no safe metadata-to-analysis mapping in the current cache, so
+        track-specific plans stay disabled unless a future cache stores that
+        exact path.
+        """
+        snapshot = dict(legacy_snapshot or {})
+        legacy_structure_available = not bool(snapshot.get("stale"))
+        beatbeam = dict((playback_state or {}).get("beatbeam") or {})
+        available = (
+            (playback_state or {}).get("availability") == "available"
+            and bool(beatbeam.get("track_path"))
+            and isinstance(beatbeam.get("bpm"), (int, float))
+        )
+        transport = dict(snapshot.get("transport") or {})
+        transport.update(
+            {
+                "active_playback_source": "virtualdj",
+                "active_source_available": available,
+                "active_source_transport_state": (playback_state or {}).get("transport_state"),
+                "active_source_selection": (playback_state or {}).get("selection"),
+            }
+        )
+        if not available:
+            snapshot.update(
+                {
+                    "bpm": None,
+                    "beat": None,
+                    "beat_value": None,
+                    "beat_display": None,
+                    "beat_phase_age_seconds": None,
+                    "time_seconds": None,
+                    "time_display_seconds": None,
+                    "track_path": None,
+                    "track_title": None,
+                    "track_artist": None,
+                    "track_album": None,
+                    "phrase_current": None,
+                    "phrase_next": None,
+                    "strobe_active": False,
+                    "strobe_count_in": None,
+                    "stale": True,
+                    "transport": transport,
+                    "playback_state": playback_state,
+                }
+            )
+            return snapshot
+
+        bpm = float(beatbeam["bpm"])
+        beat_value = beatbeam.get("beat_position")
+        beat_number = beatbeam.get("beat_number")
+        beat_phase = beatbeam.get("beat_phase")
+        if not isinstance(beat_phase, (int, float)):
+            try:
+                beat_phase = float(beat_value) % 1.0
+            except (TypeError, ValueError):
+                beat_phase = 0.0
+        beat_display = (
+            beat_number + float(beat_phase)
+            if isinstance(beat_number, int) and 1 <= beat_number <= 4
+            else None
+        )
+        position_milliseconds = beatbeam.get("estimated_position_milliseconds")
+        time_seconds = (
+            float(position_milliseconds) / 1000.0
+            if isinstance(position_milliseconds, (int, float))
+            else None
+        )
+        track_path = str(beatbeam.get("track_path") or "").strip()
+        transport.update(
+            {
+                "resolved_mode": "virtualdj",
+                "effective_bpm": bpm,
+                "virtualdj_deck_number": beatbeam.get("deck_number"),
+                "virtualdj_track_path": track_path,
+                "virtualdj_bar_number": beatbeam.get("bar_number"),
+                "virtualdj_beat_number": beat_number,
+            }
+        )
+        snapshot.update(
+            {
+                "bpm": bpm,
+                "beat": beat_display,
+                "beat_value": beat_value,
+                "beat_display": beat_display,
+                "beat_phase_age_seconds": float(beat_phase) * 60.0 / max(1e-6, bpm),
+                "time_seconds": time_seconds,
+                "time_display_seconds": time_seconds,
+                "track_path": track_path,
+                "track_title": self._virtualdj_track_title(track_path),
+                "track_artist": None,
+                "track_album": None,
+                # Preserve the existing structure source only while it is fresh.
+                # A stale source must never leak an old track's phrase state.
+                "phrase_current": snapshot.get("phrase_current") if legacy_structure_available else None,
+                "phrase_next": snapshot.get("phrase_next") if legacy_structure_available else None,
+                "stale": False,
+                "transport": transport,
+                "playback_state": playback_state,
+            }
+        )
+        return snapshot
+
+    def _annotate_active_playback(self, snapshot, active_source):
+        playback_state = snapshot.get("playback_state") or {}
+        if active_source == "virtualdj":
+            beatbeam = playback_state.get("beatbeam") or {}
+            signature = (
+                active_source,
+                playback_state.get("availability"),
+                beatbeam.get("deck_number"),
+                beatbeam.get("track_path"),
+                playback_state.get("last_discontinuity"),
+            )
+            event = playback_state.get("last_discontinuity") or "virtualdj_active"
+        else:
+            signature = (
+                active_source,
+                snapshot.get("track_title"),
+                snapshot.get("track_artist"),
+                snapshot.get("track_album"),
+            )
+            event = "legacy_active"
+        with self._lock:
+            if signature != self._active_playback_signature:
+                if (
+                    self._last_active_playback_source is not None
+                    and active_source != self._last_active_playback_source
+                ):
+                    self._active_playback_source_switches += 1
+                if event not in {"legacy_active", "virtualdj_active", "source_switched"}:
+                    self._active_playback_discontinuities += 1
+                self._active_playback_generation += 1
+                self._active_playback_signature = signature
+                self._active_playback_event = event
+                self._last_active_playback_source = active_source
+            generation = self._active_playback_generation
+            current_event = self._active_playback_event
+        snapshot["_active_playback_source"] = active_source
+        snapshot["_playback_generation"] = generation
+        snapshot["_playback_event"] = current_event
+        return snapshot
 
     def transport_state(self):
         state = self.state()
@@ -8054,6 +8270,25 @@ class TransportController:
     def source_state(self):
         state = self.state()
         transport = state.get("transport") or {}
+        active_source = str(transport.get("active_playback_source") or "legacy")
+        if active_source == "virtualdj":
+            playback = state.get("playback_state") or {}
+            beatbeam = playback.get("beatbeam") or {}
+            return {
+                "mode": transport.get("mode") or "auto",
+                "resolved_mode": "virtualdj",
+                "active_playback_source": "virtualdj",
+                "app": "VirtualDJ",
+                "port": None,
+                "expected_destination": "MusicAnalyzer playback snapshot",
+                "last_source": None,
+                "available": playback.get("availability") == "available",
+                "deck_number": beatbeam.get("deck_number"),
+                "track_path": beatbeam.get("track_path"),
+                "playback_generation": state.get("_playback_generation"),
+                "source_switches": self._active_playback_source_switches,
+                "discontinuities": self._active_playback_discontinuities,
+            }
         resolved_mode = str(transport.get("resolved_mode") or "external_osc")
         if resolved_mode == "external_osc":
             app = "External OSC / Rekordbox"
@@ -8070,6 +8305,11 @@ class TransportController:
             "port": self.osc.port,
             "expected_destination": expected_destination,
             "last_source": last_source,
+            "active_playback_source": "legacy",
+            "available": not bool(state.get("stale")),
+            "playback_generation": state.get("_playback_generation"),
+            "source_switches": self._active_playback_source_switches,
+            "discontinuities": self._active_playback_discontinuities,
         }
 
 
@@ -8086,6 +8326,7 @@ class DmxController:
         self.port = None
         self.fps = DEFAULT_DMX_FPS
         self.error = None
+        self.dmx_dispatch_failures = 0
         self.last_sent = None
         self.current_values = {}
         self.current_slot_previews = {}
@@ -8101,7 +8342,10 @@ class DmxController:
         self.active_one_shot_cue = None
         self.track_preview_summaries = {}
         self.track_show_plans = {}
+        self.track_path_plan_cache = {}
         self.last_track_plan_prewarm_at = 0.0
+        self.last_playback_generation = None
+        self.playback_runtime_resets = 0
         self.active_virtualdj_beat_pulse = None
         self.active_virtualdj_beat_pulse_preview = None
         self.config = self._load_config()
@@ -8591,6 +8835,10 @@ class DmxController:
             )
 
         return list(candidates.values())
+
+    @staticmethod
+    def _same_track_path(left, right):
+        return str(left or "").strip() == str(right or "").strip()
 
     def _load_track_preview_summary(
         self,
@@ -9091,6 +9339,24 @@ class DmxController:
         return self._track_show_plan_for_summary(preview_summary, style_name)
 
     def _track_show_plan_for_osc(self, osc, style_name):
+        if osc.get("_active_playback_source") == "virtualdj":
+            track_path = str(osc.get("track_path") or "").strip()
+            if not track_path:
+                return None
+            cache_key = (track_path, style_name)
+            if cache_key in self.track_path_plan_cache:
+                return self.track_path_plan_cache[cache_key]
+            plan = None
+            for summary in self._all_track_preview_summaries():
+                candidate_path = summary.get("track_path") or summary.get("source_path")
+                if self._same_track_path(candidate_path, track_path):
+                    plan = self._track_show_plan_for_summary(summary, style_name)
+                    break
+            # Existing cache files have no path field. Do not guess from title
+            # or waveform data: an unknown VDJ track must not inherit another
+            # track's structure.
+            self.track_path_plan_cache[cache_key] = plan
+            return plan
         title = str(osc.get("track_title") or "").strip()
         artist = str(osc.get("track_artist") or "").strip()
         album = str(osc.get("track_album") or "").strip()
@@ -9353,6 +9619,7 @@ class DmxController:
             config = self._clean_full_config(dict(self.config))
             now = time.time()
             osc = self.osc.snapshot_for_render()
+            self._observe_active_playback_generation(osc)
             auto_show = self._auto_show_state(osc, config["auto_show"])
             try:
                 if self.connected and self.running:
@@ -9410,6 +9677,13 @@ class DmxController:
                 "values": values,
                 "developer_virtualdj_beat_pulse_test": self.virtualdj_beat_pulse_test_state(),
                 "developer_virtualdj_beat_pulse_preview": self.virtualdj_beat_pulse_preview_test_state(),
+                "playback": {
+                    "source": osc.get("_active_playback_source", "legacy"),
+                    "generation": osc.get("_playback_generation"),
+                    "event": osc.get("_playback_event"),
+                    "runtime_resets": self.playback_runtime_resets,
+                    "dmx_dispatch_failures": self.dmx_dispatch_failures,
+                },
             }
 
     def add_slot(self, fixture_id, mode=None):
@@ -11178,6 +11452,32 @@ class DmxController:
             osc,
             auto_show,
             advance_motion=advance_motion,
+        )
+
+    def _observe_active_playback_generation(self, osc):
+        generation = osc.get("_playback_generation")
+        if not isinstance(generation, int):
+            return
+        if self.last_playback_generation == generation:
+            return
+        previous_generation = self.last_playback_generation
+        self.last_playback_generation = generation
+        if previous_generation is None:
+            return
+        self.motion_states.clear()
+        self.slot_rhythm_states.clear()
+        self.last_slot_trigger_signatures.clear()
+        self.last_slot_rhythm_signatures.clear()
+        self.last_slot_strobe_outputs.clear()
+        self.last_auto_show_signature = None
+        self.outro_behavior_state = None
+        self.active_one_shot_cue = None
+        self.playback_runtime_resets += 1
+        self.debug_log.log(
+            "PLAYBACK_SOURCE_RESET",
+            source=osc.get("_active_playback_source"),
+            generation=generation,
+            transition=osc.get("_playback_event"),
         )
 
     def _build_slot_previews(self, config, osc, now, auto_show=None):
@@ -13113,6 +13413,7 @@ class DmxController:
                     render_now = time.time()
                     config = self._clean_full_config(dict(self.config))
                     osc = self.osc.snapshot_for_render()
+                    self._observe_active_playback_generation(osc)
                     auto_show = self._auto_show_state(osc, config["auto_show"])
                     values = self._render_values(
                         render_now,
@@ -13145,6 +13446,7 @@ class DmxController:
             except Exception as exc:
                 with self.lock:
                     self.error = str(exc)
+                    self.dmx_dispatch_failures += 1
                 time.sleep(0.25)
             elapsed = time.monotonic() - started
             time.sleep(max(0, (1 / fps) - elapsed))

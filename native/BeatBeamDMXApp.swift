@@ -1109,9 +1109,20 @@ struct SourceState: Decodable {
     let mode: String
     let resolvedMode: String?
     let app: String
-    let port: Int
+    // VirtualDJ is consumed through MusicAnalyzer's local snapshot, so it has
+    // no backend listener port of its own.
+    let port: Int?
     let expectedDestination: String
     let lastSource: String?
+}
+
+private struct BackendResponseDecodeFailure: LocalizedError {
+    let requestPath: String
+    let underlyingError: Error
+
+    var errorDescription: String? {
+        "Backendstatus kon niet worden gelezen."
+    }
 }
 
 struct TransportState: Decodable {
@@ -3566,6 +3577,9 @@ final class AppModel: ObservableObject {
             refreshBridgeStatus(force: true)
             startStageSimulation()
             startPolling()
+        } catch let error as BackendResponseDecodeFailure {
+            nativeLog("bootstrap backend response decode failure for \(error.requestPath): \(describeDecodingError(error.underlyingError))")
+            errorText = "Native app kon backendstatus niet lezen. Zie het lokale logbestand."
         } catch {
             nativeLog("bootstrap error: \(error.localizedDescription)")
             errorText = "Native app kon backend niet starten: \(error.localizedDescription)"
@@ -4695,7 +4709,7 @@ final class AppModel: ObservableObject {
         request.timeoutInterval = 5.0
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
-        return try decoder().decode(Response.self, from: data)
+        return try decodeBackendResponse(Response.self, from: data, requestPath: path)
     }
 
     private func post<Body: Encodable, Response: Decodable>(_ path: String, body: Body, as type: Response.Type) async throws -> Response {
@@ -4706,7 +4720,40 @@ final class AppModel: ObservableObject {
         request.httpBody = try encoder().encode(body)
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
-        return try decoder().decode(Response.self, from: data)
+        return try decodeBackendResponse(Response.self, from: data, requestPath: path)
+    }
+
+    private func decodeBackendResponse<Response: Decodable>(
+        _ type: Response.Type,
+        from data: Data,
+        requestPath: String
+    ) throws -> Response {
+        do {
+            return try decoder().decode(Response.self, from: data)
+        } catch {
+            nativeLog("backend response decode failure path=\(requestPath) \(describeDecodingError(error))")
+            throw BackendResponseDecodeFailure(requestPath: requestPath, underlyingError: error)
+        }
+    }
+
+    private func describeDecodingError(_ error: Error) -> String {
+        switch error {
+        case let DecodingError.keyNotFound(key, context):
+            return "keyNotFound key=\(key.stringValue) codingPath=\(codingPathDescription(context.codingPath)) detail=\(context.debugDescription)"
+        case let DecodingError.valueNotFound(type, context):
+            return "valueNotFound type=\(type) codingPath=\(codingPathDescription(context.codingPath)) detail=\(context.debugDescription)"
+        case let DecodingError.typeMismatch(type, context):
+            return "typeMismatch type=\(type) codingPath=\(codingPathDescription(context.codingPath)) detail=\(context.debugDescription)"
+        case let DecodingError.dataCorrupted(context):
+            return "dataCorrupted codingPath=\(codingPathDescription(context.codingPath)) detail=\(context.debugDescription)"
+        default:
+            return "error=\(error.localizedDescription)"
+        }
+    }
+
+    private func codingPathDescription(_ codingPath: [CodingKey]) -> String {
+        let path = codingPath.map(\.stringValue).joined(separator: " -> ")
+        return path.isEmpty ? "<root>" : path
     }
 
     private func validate(response: URLResponse, data: Data) throws {

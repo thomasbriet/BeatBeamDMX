@@ -415,6 +415,289 @@ class FakeDmxTransport:
         return self.playback_state
 
 
+class FakeLegacyPlaybackSource:
+    def __init__(self, render_snapshot=None):
+        self.lock = threading.RLock()
+        self.decks = {}
+        self.render_snapshot = dict(render_snapshot or {
+            "bpm": 128.0,
+            "beat": 1.5,
+            "beat_value": 0.5,
+            "beat_display": 1.5,
+            "time_seconds": 12.5,
+            "time_display_seconds": 12.5,
+            "phrase_current": "chorus",
+            "phrase_next": "chorus",
+            "track_title": "Legacy Track",
+            "track_artist": "Legacy Artist",
+            "track_album": "Legacy Album",
+            "waveform_energy": 0.7,
+            "waveform_bands": {"low": 0.7, "mid": 0.5, "high": 0.3},
+            "waveform_lookahead": {"2": {}, "4": {}},
+            "waveform_analysis": {},
+            "audio_bands": {"low": 0.7, "mid": 0.5, "high": 0.3},
+            "audio_drums": {},
+            "drum_signals": {},
+            "strobe_active": False,
+            "strobe_count_in": None,
+            "stale": False,
+        })
+
+    def snapshot_for_render(self):
+        return dict(self.render_snapshot)
+
+    def state(self):
+        return dict(self.render_snapshot)
+
+
+class FakeDeveloperPlayback:
+    def __init__(self, state):
+        self.current_state = state
+        self.reset_count = 0
+
+    def state(self):
+        return self.current_state
+
+    def reset(self):
+        self.reset_count += 1
+
+
+def virtualdj_state(
+    *,
+    path="/Music/Track A.flac",
+    deck=1,
+    position=12_500,
+    bpm=128.0,
+    beat_position=0.5,
+    beat_number=1,
+    bar_number=4,
+    transport_state="advancing",
+    availability="available",
+    discontinuity=None,
+):
+    return {
+        "source": "virtualdj",
+        "availability": availability,
+        "transport_state": transport_state,
+        "last_discontinuity": discontinuity,
+        "selection": "active_deck",
+        "beatbeam": (
+            {
+                "track_path": path,
+                "deck_number": deck,
+                "estimated_position_milliseconds": position,
+                "bpm": bpm,
+                "beat_position": beat_position,
+                "beat_number": beat_number,
+                "bar_number": bar_number,
+                "beat_phase": beat_position % 1.0,
+            }
+            if availability == "available"
+            else None
+        ),
+    }
+
+
+class ActivePlaybackSourceTests(unittest.TestCase):
+    def make_transport(self, virtualdj=None):
+        legacy = FakeLegacyPlaybackSource()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "transport.json"
+            with patch("beatbeam_app.TRANSPORT_CONFIG_PATH", config_path):
+                transport = TransportController(legacy)
+        transport.config = transport._clean_config(transport.default_config())
+        transport._save_config = lambda _config: None
+        transport.developer_playback = FakeDeveloperPlayback(
+            virtualdj or virtualdj_state()
+        )
+        return transport, legacy
+
+    def test_exactly_one_active_source_is_persisted_and_switching_resets_old_clock(self):
+        transport, _legacy = self.make_transport()
+
+        self.assertEqual("legacy", transport.config["active_playback_source"])
+        transport.update_config({"active_playback_source": "virtualdj"})
+        self.assertEqual("virtualdj", transport.config["active_playback_source"])
+        self.assertEqual(1, transport.developer_playback.reset_count)
+
+        transport.update_config({"active_playback_source": "legacy"})
+        self.assertEqual("legacy", transport.config["active_playback_source"])
+        self.assertEqual(2, transport.developer_playback.reset_count)
+
+    def test_equivalent_legacy_and_virtualdj_trace_has_the_same_transport_values(self):
+        transport, _legacy = self.make_transport()
+        legacy = transport.snapshot_for_render()
+
+        transport.update_config({"active_playback_source": "virtualdj"})
+        virtualdj = transport.snapshot_for_render()
+
+        for key in ("bpm", "beat", "beat_value", "beat_display", "time_seconds"):
+            self.assertEqual(legacy[key], virtualdj[key], key)
+        self.assertEqual("virtualdj", virtualdj["_active_playback_source"])
+        self.assertEqual("/Music/Track A.flac", virtualdj["track_path"])
+
+    def test_equivalent_trace_preserves_existing_beat_driven_rendering(self):
+        transport, _legacy = self.make_transport()
+        legacy = transport.snapshot_for_render()
+        transport.update_config({"active_playback_source": "virtualdj"})
+        virtualdj = transport.snapshot_for_render()
+
+        legacy_controller = DmxController(transport)
+        virtualdj_controller = DmxController(transport)
+        config = legacy_controller._clean_full_config(legacy_controller.default_config())
+        auto_show = legacy_controller._auto_show_state(legacy, config["auto_show"])
+        legacy_values = legacy_controller._render_values(
+            1000.0, config=config, osc=legacy, auto_show=auto_show
+        )
+        virtual_values = virtualdj_controller._render_values(
+            1000.0,
+            config=config,
+            osc=virtualdj,
+            auto_show=virtualdj_controller._auto_show_state(virtualdj, config["auto_show"]),
+        )
+
+        self.assertEqual(legacy_values, virtual_values)
+
+    def test_virtualdj_pause_keeps_the_timeline_stationary(self):
+        paused = virtualdj_state(position=55_000, beat_position=16.0, beat_number=1, transport_state="stationary")
+        transport, _legacy = self.make_transport(paused)
+        transport.update_config({"active_playback_source": "virtualdj"})
+
+        first = transport.snapshot_for_render()
+        second = transport.snapshot_for_render()
+        self.assertEqual(55.0, first["time_display_seconds"])
+        self.assertEqual(first["time_display_seconds"], second["time_display_seconds"])
+        self.assertEqual(16.0, second["beat_value"])
+
+    def test_seek_track_and_deck_changes_create_new_engine_generations(self):
+        transport, _legacy = self.make_transport()
+        transport.update_config({"active_playback_source": "virtualdj"})
+        first = transport.snapshot_for_render()
+
+        transport.developer_playback.current_state = virtualdj_state(
+            position=120_000,
+            beat_position=256.0,
+            bar_number=65,
+            discontinuity="position_jump_forward",
+        )
+        jumped = transport.snapshot_for_render()
+        self.assertGreater(jumped["_playback_generation"], first["_playback_generation"])
+        self.assertEqual("position_jump_forward", jumped["_playback_event"])
+
+        transport.developer_playback.current_state = virtualdj_state(
+            path="/Music/Deck B.flac",
+            deck=2,
+            position=2_000,
+            bar_number=2,
+            discontinuity="deck_changed",
+        )
+        switched = transport.snapshot_for_render()
+        self.assertGreater(switched["_playback_generation"], jumped["_playback_generation"])
+        self.assertEqual("/Music/Deck B.flac", switched["track_path"])
+
+    def test_current_virtualdj_bpm_is_the_only_active_tempo(self):
+        transport, _legacy = self.make_transport(virtualdj_state(bpm=126.0))
+        transport.update_config({"active_playback_source": "virtualdj"})
+        self.assertEqual(126.0, transport.snapshot_for_render()["bpm"])
+
+        transport.developer_playback.current_state = virtualdj_state(bpm=131.0)
+        self.assertEqual(131.0, transport.snapshot_for_render()["bpm"])
+
+    def test_virtualdj_keeps_the_existing_native_transport_contract(self):
+        transport, _legacy = self.make_transport(virtualdj_state(bpm=125.0))
+        transport.update_config({"active_playback_source": "virtualdj"})
+
+        state = transport.transport_state()
+        for key in (
+            "mode",
+            "resolved_mode",
+            "manual_bpm",
+            "effective_bpm",
+            "manual_phrase",
+            "manual_phrase_label",
+            "idle_animation_enabled",
+            "tap_count",
+            "tap_locked",
+            "external_available",
+        ):
+            self.assertIn(key, state)
+        self.assertEqual("virtualdj", state["resolved_mode"])
+        self.assertEqual(125.0, state["effective_bpm"])
+
+        source = transport.source_state()
+        self.assertEqual("virtualdj", source["resolved_mode"])
+        self.assertIsNone(source["port"])
+
+    def test_virtualdj_disconnect_stops_music_timeline_and_clears_track_identity(self):
+        transport, _legacy = self.make_transport()
+        transport.update_config({"active_playback_source": "virtualdj"})
+        transport.snapshot_for_render()
+        transport.developer_playback.current_state = virtualdj_state(
+            availability="disconnected",
+            discontinuity="disconnected",
+        )
+
+        stopped = transport.snapshot_for_render()
+        self.assertTrue(stopped["stale"])
+        self.assertIsNone(stopped["bpm"])
+        self.assertIsNone(stopped["track_path"])
+        self.assertEqual("disconnected", stopped["_playback_event"])
+
+    def test_unknown_virtualdj_track_cannot_fall_back_to_another_tracks_structure(self):
+        transport, _legacy = self.make_transport()
+        transport.update_config({"active_playback_source": "virtualdj"})
+        controller = DmxController(transport)
+        controller._all_track_preview_summaries = lambda: [
+            {
+                "title": "Different Track",
+                "artist": "Someone Else",
+                "segments": [{"index": 0}],
+            }
+        ]
+
+        self.assertIsNone(
+            controller._track_show_plan_for_osc(
+                transport.snapshot_for_render(), "adaptive"
+            )
+        )
+
+    def test_virtualdj_reuses_only_an_exact_path_matched_track_plan(self):
+        transport, _legacy = self.make_transport()
+        transport.update_config({"active_playback_source": "virtualdj"})
+        controller = DmxController(transport)
+        expected = {"segments": [{"section": "chorus"}]}
+        controller._all_track_preview_summaries = lambda: [
+            {"track_path": "/Music/Track A.flac", "segments": [{"index": 0}]},
+            {"track_path": "/Music/Other.flac", "segments": [{"index": 0}]},
+        ]
+        controller._track_show_plan_for_summary = lambda summary, _style: (
+            expected if summary.get("track_path") == "/Music/Track A.flac" else None
+        )
+
+        self.assertIs(
+            expected,
+            controller._track_show_plan_for_osc(
+                transport.snapshot_for_render(), "adaptive"
+            ),
+        )
+
+    def test_engine_runtime_is_reset_once_for_a_new_active_generation(self):
+        transport, _legacy = self.make_transport()
+        controller = DmxController(transport)
+        controller.motion_states["head"] = {"value": 1}
+        controller.slot_rhythm_states["head"] = {"mode": "beat_flash"}
+        controller.active_one_shot_cue = {"id": "hit"}
+
+        controller._observe_active_playback_generation(transport.snapshot_for_render())
+        transport.update_config({"active_playback_source": "virtualdj"})
+        controller._observe_active_playback_generation(transport.snapshot_for_render())
+
+        self.assertEqual({}, controller.motion_states)
+        self.assertEqual({}, controller.slot_rhythm_states)
+        self.assertIsNone(controller.active_one_shot_cue)
+        self.assertEqual(1, controller.playback_runtime_resets)
+
+
 class VirtualDjBeatPulseTests(unittest.TestCase):
     def test_planner_targets_the_next_bar_beat_one_with_a_monotonic_deadline(self):
         plan, reason = VirtualDjBeatPulsePlanner.plan(
