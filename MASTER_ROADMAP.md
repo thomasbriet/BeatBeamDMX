@@ -1,6 +1,6 @@
-# BeatBeam + SongAnalyzer — Master Backlog
+# BeatBeam + SongAnalyzer — Master Roadmap
 
-> Centrale, levende backlog voor de ontwikkeling van **SongAnalyzer** en **BeatBeam**.
+> Centrale, levende product- en ontwikkelroadmap voor **SongAnalyzer** en **BeatBeam**.
 > Dit bestand moet tijdens programmeerwerk actief worden geraadpleegd en bijgewerkt.
 
 ## Werkwijze voor Codex / programmeersessies
@@ -8,13 +8,13 @@
 Bij iedere programmeertaak:
 
 1. Lees dit bestand vóórdat je wijzigingen maakt.
-2. Controleer of de taak al in deze backlog staat.
+2. Controleer of de taak al in deze roadmap staat.
 3. Werk uitsluitend aan onderdelen die passen binnen de vastgelegde productrichting.
 4. Werk de status van relevante taken bij zodra werk aantoonbaar is afgerond.
 5. Voeg nieuwe concrete vervolgpunten toe als tijdens implementatie nieuwe noodzakelijke taken ontstaan.
 6. Verwijder geen productbeslissingen zonder expliciete opdracht.
 7. Markeer twijfel of onderzoek als `ONDERZOEK`, niet als afgerond.
-8. Houd de backlog compact: technische implementatiedetails horen primair in commits/issues/documentatie, niet in deze hoofdlijst.
+8. Houd de roadmap compact: technische implementatiedetails horen primair in commits/issues/documentatie, niet in deze hoofdlijst.
 
 ### Statussen
 
@@ -24,6 +24,93 @@ Bij iedere programmeertaak:
 - `GEBLOKKEERD` — kan nog niet verder
 - `GEREED` — geïmplementeerd en gevalideerd
 - `VERVALLEN` — bewust niet meer uitvoeren
+
+---
+
+# M22A — Actuele status
+
+`BEZIG` — de technische integratie is grotendeels geïmplementeerd en een gedeeltelijke end-to-end runtime-PASS is bewezen. De resterende handmatige checks staan onder “Nog open voor volledige M22A-PASS”.
+
+## M22A — Performancebaseline
+
+- Cold analysis: circa 6,212 s.
+- Rhythm: circa 4,082 s.
+- Persistente AnalysisLibrary-cache-hit: circa 7 ms.
+- Atomische rich handoff/projectie: circa 12–33 ms.
+- BeatBeam fixture/projectie: sub-millisecond.
+
+Er is geen Essentia-optimalisatie uitgevoerd. Cold analysis is relatief zwaar, maar playlist-preanalyse, cache-hit en live-consumptie zijn voldoende snel. Performance-optimalisatie blijft meetgedreven.
+
+## M22A — Canoniek rich-analysiscontract
+
+Schema v2 bevat optioneel `rich_analysis` per track/segment, met waar beschikbaar model/source, duration, confidence, beat- en bar-timing/context, segmentindex, start/einde, semantic/native label, `level = phrase` en energy.
+
+Schema v1 blijft backward-compatible leesbaar. Rich analysis vereist schema v2.
+
+De eerste rich field die BeatBeam daadwerkelijk gebruikt is `PhraseNativeClassificationFeatures.Energy` met semantiek `segment-normalized-rms-z-score`. De bestaande Auto Show-modifier is `clamp(energy_z_score × 0,04, -0,08, +0,08)`. Er is geen pseudo-energyalgoritme toegevoegd; phrase/section-logica, fixture bounds en strobe safety blijven leidend.
+
+## M22A — V1 → V2 en activeTrack-safety
+
+- Een bestaand v1-handoffdocument promoveert bij een rich-analysis-write atomisch naar v2.
+- Bestaande tracks en legacy phrase/structuredata blijven behouden.
+- Identity-only `activeTrack` blijft behouden.
+- Een v1-document zonder rich write mag v1 blijven; cache-hit blijft cache-hit.
+- Exact canonical filepath matching, generation-safety en de statussen `ready/pending/unavailable` zijn actief.
+- Pending of mismatch projecteert nooit rich-data van de vorige track.
+- Een persistent ready `activeTrack` mag tijdelijk de ontbrekende live `track_path` aanvullen; zodra een live pad aanwezig is, blijft exacte matching verplicht.
+
+## M22A — Automatische VirtualDJ-activatie
+
+Runtime bewezen: lifecycle poller, plugin/left/right deckselectors, deck candidates, playing, filepath, selected deck, selection reason, activate/deactivate en echte bridge response.
+
+Voor de gecachte track `Calvin Harris, Clementine Douglas - Blessings.flac`: `VirtualDJ deck 1 → juiste filepath → playing → selected deck 1 → activate → bridge accepted → cache hit/current → activeTrack ready → generation 1`.
+
+Normaal gebruik vereist geen handmatige Connect-knop; de integratie functioneert automatisch.
+
+## M22A — Realtime VirtualDJ-transport
+
+De actuele route is: `VirtualDJ native plugin → bridge transport → begrensde in-memory transport snapshot → BeatBeam transportSnapshot → bestaande PlaybackClock → bestaande NOW / Auto Show`.
+
+Cadans: native circa 200 ms / 5 Hz, BeatBeam maximaal circa 10 Hz read, met de bestaande clock/interpolatie. De transportfeed doet geen audio-callbackwerk, zware analyse, AnalysisLibrary-lookup, handoff-write, generation bump of filesystem-polling.
+
+Transportbron en structuurbron blijven onafhankelijk: transport `Auto / OSC / Tap`; structuurbron `Legacy / SongAnalyzer`. `Auto` kiest VirtualDJ automatisch bij geldige live state, valt veilig terug bij verdwijnen en herstelt automatisch bij terugkeer.
+
+## M22A — Gedeeltelijke end-to-end runtime-PASS
+
+Bewezen met `Calvin Harris, Clementine Douglas - Blessings.flac`:
+
+- Live/VirtualDJ: `virtualdj`, bridge connected, deck 1, exacte track, playing ja, positie circa 9684 ms, positie-leeftijd circa 245 ms, advancing.
+- Status ready, generation 1.
+- Analyse: schema v2, model `PhraseAnalysisResult`, segment `Intro 1`, energy z-score `-1,12`, modifier `-0,04`, confidence `39`.
+- Handoff: exact, `available_current`, rich analysis ja, rich current ja, source `song_analyzer`, geen fallback.
+- Queue: 0 NORMAL, 0 HIGH, running 0.
+
+Dit bewijst de keten VirtualDJ playback position → activeTrack → schema-v2 rich analysis → current segment → energy → BeatBeam Auto Show-modifier. M22A als geheel blijft `BEZIG`.
+
+## M22A — Debug-richting
+
+BeatBeam heeft een afzonderlijke native Debug-laag: globale knop, apart niet-modaal verplaatsbaar/resizable/sluitbaar macOS-venster, singleton/focusgedrag en `BEATBEAM_DEBUG_UI=0` als centrale hide-flag. Debug is uitsluitend observability; normale functionaliteit mag ervan niet afhankelijk zijn.
+
+Huidige secties zijn Live / VirtualDJ, Analyse, Queue / Cache / Playlist, Handoff / BeatBeam, Native VDJ Plugin en Bridge Control. De laag toont onder meer deck, track, playing, positie/leeftijd, status/generatie, rich current, energy/modifier/confidence, queue/cache/playlist, selectors/candidates, selectie, IPC, bridge-mutaties en fallback reason. Nieuwe technische diagnose hoort waar redelijk in deze laag terecht te komen, zonder secrets of onbeperkte dumps.
+
+## M22A — Relevante runtime-lessons
+
+Opgelost: stale Python-backend in de Beta-bundle; onvoldoende native deckcandidate-resolutie; bounded native deckselection-telemetry; v1/rich-analysis schemafout; activeTrack te vroeg ready; persistent activeTrack genegeerd zonder live pad; ontbrekende live VirtualDJ-positie voor PlaybackClock/NOW; en de foutieve `track_unavailable`-fallback wanneer alleen positie of current segment ontbrak.
+
+## M22A — Nog open voor volledige runtime-PASS
+
+1. Segmentgrens: positie, segment, energy en modifier moeten zonder refresh wisselen.
+2. Seek: positie, beat/bar/phrase en rich current moeten direct volgen zonder oude data.
+3. Normale NOW-hoofdinterface: deck, track, positie, BPM, beat, bar, phrase en next; Auto Show mag niet op Waiting blijven door ontbrekende transportfeed.
+4. Ongecacheerde Track B: pending/HIGH, geen Track A-rich-data, daarna ready met eigen NOW/rich current/energy/modifier.
+5. VirtualDJ stop/restart: veilige waiting/fallback en automatische reconnect zonder Connect-knop.
+6. Perceptuele beoordeling van de energy modifier; dit blokkeert de technische M22A-status niet zolang modifier, determinisme en safety bounds aantoonbaar blijven. Tuning van schaalfactor 0,04 wordt apart gepland.
+
+## M22A — Toekomstige rich-analysisuitbreiding
+
+Behoud hetzelfde canonical rich-analysiscontract voor hiërarchische segmentatie, events, builds, drops, breakdowns, transitions, tension, transition strength, novelty en rijkere confidence/quality. Ontwikkel geen parallel analysecontract.
+
+Essentia-optimalisatie zonder meting, een volledig nieuwe hiërarchische analyzer/eventdetector, VirtualDJ-waveform overlays, verplichte Connect, fixture-redesign en een volledige Auto Show-rewrite blijven buiten de huidige M22A-scope.
 
 ---
 
@@ -341,7 +428,7 @@ Deze punten zijn bewust geschrapt en mogen niet zonder expliciete productbesliss
 
 Aanbevolen volgorde vanaf de huidige productrichting:
 
-1. `TODO` Canoniek BeatBeam Analysis Model definiëren.
+1. `BEZIG` M22A: Canoniek BeatBeam Analysis Model definiëren en eerste begrensde Auto Show-consument toevoegen.
 2. `TODO` Inventariseren welke diepere audiofeatures met de huidige Essentia/Python-pipeline haalbaar zijn.
 3. `TODO` Nieuwe hiërarchische segmentatie ontwerpen.
 4. `TODO` Drops/build-ups/breakdowns/transitions als eerste rijke events implementeren.
@@ -374,4 +461,4 @@ Aanbevolen volgorde vanaf de huidige productrichting:
 
 ---
 
-_Last updated: 2026-08-19_
+_Last updated: 2026-08-20_
