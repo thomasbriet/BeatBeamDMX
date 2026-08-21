@@ -129,6 +129,17 @@ class SongAnalyzerRichSegment:
 
 
 @dataclass(frozen=True)
+class SongAnalyzerRichEvent:
+    type: str
+    start_seconds: float
+    target_seconds: Optional[float] = None
+    end_seconds: Optional[float] = None
+    start_bar: Optional[int] = None
+    target_bar: Optional[int] = None
+    confidence: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class SongAnalyzerStructureTrack:
     canonical_path: str
     content_sha256: Optional[str]
@@ -141,6 +152,7 @@ class SongAnalyzerStructureTrack:
     rich_model: Optional[str] = None
     rich_energy_scale: Optional[str] = None
     rich_segments: tuple = ()
+    rich_events: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -259,6 +271,7 @@ class SongAnalyzerStructureHandoff:
             rich_model = None
             rich_energy_scale = None
             rich_segments = ()
+            rich_events = ()
             rich = track_raw.get("rich_analysis")
             if rich is not None:
                 if schema != SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION or not isinstance(rich, dict):
@@ -293,6 +306,24 @@ class SongAnalyzerStructureHandoff:
                     ))
                     rich_previous_end = end
                 rich_segments = tuple(rich_values)
+                event_values = []
+                for event_raw in rich.get("events") or []:
+                    if not isinstance(event_raw, dict) or event_raw.get("type") not in {
+                        "BUILD", "DROP", "CHORUS", "BREAKDOWN", "TRANSITION"
+                    }:
+                        raise ValueError("rich event is invalid")
+                    start = cls._number(event_raw.get("start_seconds"), "rich event.start_seconds", 0.0)
+                    confidence = cls._number(event_raw.get("confidence"), "rich event.confidence", 0.0)
+                    target = event_raw.get("target_seconds")
+                    end = event_raw.get("end_seconds")
+                    if target is not None:
+                        target = cls._number(target, "rich event.target_seconds", start)
+                    if end is not None:
+                        end = cls._number(end, "rich event.end_seconds", start)
+                    event_values.append(SongAnalyzerRichEvent(
+                        event_raw["type"], start, target, end, event_raw.get("start_bar"),
+                        event_raw.get("target_bar"), confidence))
+                rich_events = tuple(event_values)
             tracks[canonical_path] = SongAnalyzerStructureTrack(
                 canonical_path,
                 cls._optional_text(track_raw.get("content_sha256"), "content_sha256"),
@@ -301,7 +332,7 @@ class SongAnalyzerStructureHandoff:
                 cls._optional_text(track_raw.get("phrase_analysis_version"), "phrase_analysis_version"),
                 availability,
                 model,
-                tuple(segments), rich_model, rich_energy_scale, rich_segments,
+                tuple(segments), rich_model, rich_energy_scale, rich_segments, rich_events,
             )
         active_raw = raw.get("active_track")
         active = None
@@ -401,6 +432,20 @@ class SongAnalyzerStructureHandoff:
             "progress": min(1.0, max(0.0, (position - segment.start_seconds) / duration)) if duration else 0.0,
         }
 
+    @staticmethod
+    def _event_state(event, position):
+        return {
+            "type": event.type,
+            "start_seconds": event.start_seconds,
+            "target_seconds": event.target_seconds,
+            "end_seconds": event.end_seconds,
+            "start_bar": event.start_bar,
+            "target_bar": event.target_bar,
+            "confidence": event.confidence,
+            "seconds_to_target": None if event.target_seconds is None else max(0.0, event.target_seconds - position),
+            "bars_to_target": None if event.target_bar is None or event.start_bar is None else max(0, event.target_bar - event.start_bar),
+        }
+
     def project(self, playback):
         # The renderer and developer endpoint use this same cache concurrently.
         # Serialize refresh/projection so a reload cannot expose a half-updated
@@ -431,6 +476,8 @@ class SongAnalyzerStructureHandoff:
                 "active_track": None,
                 "rich_analysis": None,
                 "rich_current": None,
+                "current_event": None,
+                "next_event": None,
                 "segment_count": 0,
                 "current": None,
                 "previous": None,
@@ -486,6 +533,7 @@ class SongAnalyzerStructureHandoff:
                     "model": track.rich_model,
                     "energy_scale": track.rich_energy_scale,
                     "segment_count": len(track.rich_segments),
+                    "event_count": len(track.rich_events),
                 }
             if track.availability == "missing":
                 return result
@@ -494,6 +542,13 @@ class SongAnalyzerStructureHandoff:
                 result["projection_status"] = "position_unavailable"
                 return result
             position = float(position)
+            active_events = [event for event in track.rich_events
+                             if event.start_seconds <= position <= (event.end_seconds or event.target_seconds or event.start_seconds)]
+            upcoming_events = [event for event in track.rich_events if event.start_seconds > position]
+            if active_events:
+                result["current_event"] = self._event_state(active_events[-1], position)
+            if upcoming_events:
+                result["next_event"] = self._event_state(upcoming_events[0], position)
             if not track.segments:
                 return result
             if position < track.segments[0].start_seconds:
@@ -14798,6 +14853,8 @@ def beatbeam_debug_state(osc_state=None):
     bridge = SONG_ANALYZER_BRIDGE_DIAGNOSTICS.snapshot()
     current = projection.get("current") or {}
     rich = projection.get("rich_current") or {}
+    current_event = projection.get("current_event") or {}
+    next_event = projection.get("next_event") or {}
     active = projection.get("active_track") or {}
     fallback = behavior.get("fallback_reason")
     return {
@@ -14817,6 +14874,8 @@ def beatbeam_debug_state(osc_state=None):
             "model": projection.get("model"),
             "segment": current or None,
             "rich_current": rich or None,
+            "current_event": current_event or None,
+            "next_event": next_event or None,
             "energy_modifier": auto_show.get("song_analyzer_energy_modifier"),
         },
         "handoff": {

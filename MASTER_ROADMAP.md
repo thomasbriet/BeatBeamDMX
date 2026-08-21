@@ -35,6 +35,12 @@ De PASS omvat phrase boundary, seek, normale NOW/Auto Show, rich current, energy
 
 De bestaande `build_native_app.sh` developmentroute heeft een Python 3.14 `site-packages`-pad/reproduceerbaarheidsprobleem. De actuele Beta-app is via de directe development packaging-route opnieuw gebouwd, gebundeld en strikt ad-hoc gesigned. Dit is technische schuld voor een aparte cleanup en geen M22A-productfailure.
 
+---
+
+# M23A — Rich Musical Events voor BeatBeam
+
+`BEZIG` — backward-compatible uitbreiding van het canonical rich-analysiscontract met een conservatieve eerste eventset: BUILD, DROP, CHORUS, BREAKDOWN en TRANSITION. Scope: confidence-gating, bar-alignment waar beschikbaar, current/next-eventprojectie en read-only BeatBeam Debug-zichtbaarheid. Smart Hot Cues en een uitgebreide event-driven Auto Show blijven toekomstig.
+
 ## M22A — Performancebaseline
 
 - Cold analysis: circa 6,212 s.

@@ -420,9 +420,10 @@ struct DebugActiveTrack: Decodable {
         activatedAtUnixMilliseconds = try container.decodeIfPresent(Int.self, forKey: .activatedAtUnixMilliseconds)
     }
 }
-struct DebugAnalysisState: Decodable { let schemaVersion: Int?; let model: String?; let segment: DebugSegment?; let richCurrent: DebugRichSegment?; let energyModifier: Double? }
+struct DebugAnalysisState: Decodable { let schemaVersion: Int?; let model: String?; let segment: DebugSegment?; let richCurrent: DebugRichSegment?; let currentEvent: DebugRichEvent?; let nextEvent: DebugRichEvent?; let energyModifier: Double? }
 struct DebugSegment: Decodable { let index: Int?; let label: String?; let startSeconds: Double?; let endSeconds: Double?; let confidence: Double? }
 struct DebugRichSegment: Decodable { let index: Int?; let label: String?; let level: String?; let energy: Double?; let confidence: Double? }
+struct DebugRichEvent: Decodable { let type: String?; let confidence: Double?; let startSeconds: Double?; let targetSeconds: Double?; let startBar: Int?; let targetBar: Int?; let barsToTarget: Int? }
 struct DebugHandoffState: Decodable { let trackMatch: String?; let availability: String?; let richAnalysis: DebugRichAnalysis?; let fallbackReason: String?; let effectiveSource: String?; let selectedSource: String? }
 struct DebugRichAnalysis: Decodable { let model: String?; let energyScale: String?; let segmentCount: Int? }
 struct DebugBridgeDiagnostics: Decodable { let status: String?; let error: String?; let diagnostics: DebugBridgeDetails? }
@@ -6879,6 +6880,10 @@ struct DebugInspectorView: View {
                         row("Energy z-score", signed(model.debugState?.analysis?.richCurrent?.energy))
                         row("Auto Show modifier", signed(model.debugState?.analysis?.energyModifier))
                         row("Confidence", model.debugState?.analysis?.richCurrent?.confidence.map { String(format: "%.0f", $0) })
+                        row("Current event", model.debugState?.analysis?.currentEvent?.type)
+                        row("Event confidence", model.debugState?.analysis?.currentEvent?.confidence.map { String(format: "%.0f", $0) })
+                        row("Next event", model.debugState?.analysis?.nextEvent?.type)
+                        row("Bars to next", model.debugState?.analysis?.nextEvent?.barsToTarget.map(String.init))
                     }
                     debugCard("Queue / Cache / Playlist") {
                         let diag = model.debugState?.bridgeDiagnostics?.diagnostics

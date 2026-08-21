@@ -141,6 +141,31 @@ class SongAnalyzerStructureHandoffTests(unittest.TestCase):
             self.assertEqual(9, state["active_track"]["generation"])
             self.assertEqual(2.0, state["rich_current"]["energy"])
 
+    def test_v2_events_project_current_next_and_safe_empty_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            payload["schema_version"] = 2
+            payload["tracks"][0]["rich_analysis"] = {
+                "model": "SongAnalyzerRichAnalysis",
+                "energy_scale": "segment-normalized-rms-z-score",
+                "segments": [
+                    {"index": 0, "start_seconds": 0, "end_seconds": 16, "label": "Build", "level": "phrase", "energy": 0.2},
+                    {"index": 1, "start_seconds": 16, "end_seconds": 32, "label": "Drop", "level": "phrase", "energy": 1.1},
+                ],
+                "events": [
+                    {"type": "BUILD", "start_seconds": 0, "target_seconds": 16, "end_seconds": 16,
+                     "start_bar": 1, "target_bar": 5, "confidence": 88},
+                    {"type": "DROP", "start_seconds": 16, "start_bar": 5, "confidence": 91},
+                ],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            handoff = SongAnalyzerStructureHandoff(path, check_interval_seconds=0)
+            before = handoff.project(playback(TRACK, 8))
+            self.assertEqual("BUILD", before["current_event"]["type"])
+            self.assertEqual("DROP", before["next_event"]["type"])
+            self.assertEqual("DROP", handoff.project(playback(TRACK, 16))["current_event"]["type"])
+
     def test_ready_active_track_is_used_when_virtualdj_live_state_has_no_track_path(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "handoff.json"
