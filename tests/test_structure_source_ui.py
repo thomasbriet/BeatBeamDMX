@@ -56,6 +56,14 @@ class StructureSourceUiTests(unittest.TestCase):
         self.assertIn('row("Activate received"', native)
         self.assertIn('row("Mutation reason"', native)
 
+    def test_debug_position_uses_readable_milliseconds_and_missing_placeholder(self):
+        native = (ROOT / "native" / "BeatBeamDMXApp.swift").read_text(encoding="utf-8")
+        self.assertIn("func formatDebugTrackPosition(_ milliseconds: Int?) -> String", native)
+        self.assertIn('String(format: "%02d:%02d.%03d", totalSeconds / 60, seconds, millis)', native)
+        self.assertIn('String(format: "%02d:%02d:%02d.%03d", hours, minutes, seconds, millis)', native)
+        self.assertIn('return "—"', native)
+        self.assertIn('row("Position", formatDebugTrackPosition(model.debugState?.virtualdj?.positionMilliseconds))', native)
+
 
 if __name__ == "__main__":
     unittest.main()

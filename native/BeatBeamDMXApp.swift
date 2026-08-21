@@ -350,6 +350,19 @@ func nativeLog(_ text: String) {
     }
 }
 
+func formatDebugTrackPosition(_ milliseconds: Int?) -> String {
+    guard let milliseconds, milliseconds >= 0 else { return "—" }
+    let totalSeconds = milliseconds / 1000
+    let hours = totalSeconds / 3600
+    let minutes = (totalSeconds / 60) % 60
+    let seconds = totalSeconds % 60
+    let millis = milliseconds % 1000
+    let readable = hours > 0
+        ? String(format: "%02d:%02d:%02d.%03d", hours, minutes, seconds, millis)
+        : String(format: "%02d:%02d.%03d", totalSeconds / 60, seconds, millis)
+    return "\(readable) · \(milliseconds) ms"
+}
+
 func redactedRemoteURL(_ value: String?) -> String {
     guard let value, !value.isEmpty, var components = URLComponents(string: value) else {
         return value ?? "nil"
@@ -6866,7 +6879,7 @@ struct DebugInspectorView: View {
                         row("Deck", model.debugState?.virtualdj?.activeDeck.map(String.init))
                         row("Track", model.debugState?.activeTrack?.canonicalPath ?? model.debugState?.virtualdj?.trackPath)
                         row("Playing", model.debugState?.virtualdj?.playing.map { $0 ? "Ja" : "Nee" })
-                        row("Position", model.debugState?.virtualdj?.positionMilliseconds.map { "\($0) ms" })
+                        row("Position", formatDebugTrackPosition(model.debugState?.virtualdj?.positionMilliseconds))
                         row("Position age", model.debugState?.virtualdj?.positionAgeMilliseconds.map { "\($0) ms" })
                         row("Live state", model.debugState?.virtualdj?.transportState)
                         row("Status", model.debugState?.activeTrack?.status)
