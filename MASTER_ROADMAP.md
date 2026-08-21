@@ -55,6 +55,8 @@ V14 onderscheidt repeat-family-membership van canonical role activation en voegt
 
 V15 veralgemeniseert canonical family-/sequence-role-intelligence naar High, Mid en Low. De native High `Up`/`Down`-labels zijn voortaan evidence en geen harde canonical Verse/Bridge-mapping: lokale native-scorecompetitie, repeat/contour, arrival, salience en sequence-context bepalen de canonical rol. Een brede family mag meerdere canonical rollen bevatten; dit bewaart onder meer New Religion Verse/Chorus en voorkomt dat High-herhaling automatisch Chorus wordt. De gerichte v15-reanalyse herstelt Magnetic naar Verse vanaf 00:09.258, Chorus op 00:38.797 en 01:52.645, en twee Outro-occurrences vanaf 02:36.954 en 02:51.723. De menselijke v15-acceptatie voor Magnetic blijft open; de ontbrekende High raw boundaries rond circa 00:35, 01:49 en 02:22 blijven bewust een afzonderlijke boundary-quality-pass.
 
+V16 vult die drie Magnetic-gaten met een begrensde structural/context-route, zonder de normale noveltyselectie te verlagen. Twee korte, grid-aligned PreChorus-aanlopen blijven semantic trajectories omdat een raw split hun native classifiervenster zou verstoren; de ondersteunde family-exit op 02:22.184 is een raw boundary. Bounded source/route/combined-evidence diagnostics blijven in het canonical contract beschikbaar. De V15 Verse-/Chorus-/Outro-posities en de Midnight Sun-, New Religion- en Free Your Mind-regressies blijven technisch behouden. Menselijke V16-audioacceptatie staat nog open; M23A blijft `BEZIG`.
+
 ## M22A — Performancebaseline
 
 - Cold analysis: circa 6,212 s.
