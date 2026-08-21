@@ -47,6 +47,8 @@ Menselijke runtimeacceptatie identificeerde daarnaast dat scalar recurrence een 
 
 De vervolgpass voegt compacte repeat-pairs, repeat-end- en membership-exit-evidence toe. Daarmee kan een vloeiende structurele overgang met een aantoonbare profielwissel ook zonder lokale novelty-piek worden gesplitst; de diagnose- en show-readinessgegevens tonen nu tevens bounded repeat-, cache-status- en failure-reasoninformatie. M23A blijft `BEZIG`: de definitieve v11-analyseroute moet nog handmatig muzikaal worden gevalideerd.
 
+De v12-quality-pass corrigeert vervolgens een dominante vaste Verse-family-prior: reeds geaccepteerde repeat-pairs worden begrensd samengevoegd tot section-families met overlap per segment en doorlopende Chorus-/Verse-evidence. Dit maakt de rolkeuze family-bewust zonder `repeat = Chorus` te maken of een tweede similarity-engine toe te voegen. De gerichte stale-route voor Midnight Sun en New Religion is technisch groen; menselijke muzikale v12-acceptatie blijft open. M23A blijft `BEZIG`.
+
 ## M22A — Performancebaseline
 
 - Cold analysis: circa 6,212 s.
