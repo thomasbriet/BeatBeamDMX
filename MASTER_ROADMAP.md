@@ -575,6 +575,8 @@ _Last updated: 2026-08-21_
 M23A-runtimetests hebben track-specifieke analyzerfailures blootgelegd terwijl
 HIGH-prioriteit, queuegezondheid en v14-voortgang correct werken. De bridge
 bevat nu bounded running-job- en failurediagnostics, inclusief fase, veilige
-foutdetails, optionele stderr-tail en active-track filtering. De concrete
-oorzaak van een falende track wordt in een volgende runtime-retest vastgesteld;
-M23A blijft BEZIG.
+foutdetails, optionele stderr-tail en active-track filtering. De eerste
+concrete v14-oorzaak is vastgesteld: semantic_sections behandelt een lege
+trusted-family-set als dictionary en roept .values() aan; dit veroorzaakt
+AttributeError: 'set' object has no attribute 'values' in phrase_analysis. De
+analyzerfix volgt als afzonderlijke stap; M23A blijft BEZIG.
