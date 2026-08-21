@@ -64,6 +64,13 @@ class StructureSourceUiTests(unittest.TestCase):
         self.assertIn('return "—"', native)
         self.assertIn('row("Position", formatDebugTrackPosition(model.debugState?.virtualdj?.positionMilliseconds))', native)
 
+    def test_debug_analysis_exposes_both_analysis_versions(self):
+        native = (ROOT / "native" / "BeatBeamDMXApp.swift").read_text(encoding="utf-8")
+        self.assertIn("let analysisVersion: String?", native)
+        self.assertIn("let phraseAnalysisVersion: String?", native)
+        self.assertIn('row("Analysis version", model.debugState?.analysis?.analysisVersion)', native)
+        self.assertIn('row("Phrase analysis", model.debugState?.analysis?.phraseAnalysisVersion)', native)
+
 
 if __name__ == "__main__":
     unittest.main()

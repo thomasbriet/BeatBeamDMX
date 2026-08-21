@@ -433,7 +433,17 @@ struct DebugActiveTrack: Decodable {
         activatedAtUnixMilliseconds = try container.decodeIfPresent(Int.self, forKey: .activatedAtUnixMilliseconds)
     }
 }
-struct DebugAnalysisState: Decodable { let schemaVersion: Int?; let model: String?; let segment: DebugSegment?; let richCurrent: DebugRichSegment?; let currentEvent: DebugRichEvent?; let nextEvent: DebugRichEvent?; let energyModifier: Double? }
+struct DebugAnalysisState: Decodable {
+    let schemaVersion: Int?
+    let analysisVersion: String?
+    let phraseAnalysisVersion: String?
+    let model: String?
+    let segment: DebugSegment?
+    let richCurrent: DebugRichSegment?
+    let currentEvent: DebugRichEvent?
+    let nextEvent: DebugRichEvent?
+    let energyModifier: Double?
+}
 struct DebugSegment: Decodable { let index: Int?; let label: String?; let startSeconds: Double?; let endSeconds: Double?; let confidence: Double? }
 struct DebugRichSegment: Decodable { let index: Int?; let label: String?; let level: String?; let energy: Double?; let confidence: Double? }
 struct DebugRichEvent: Decodable { let type: String?; let confidence: Double?; let startSeconds: Double?; let targetSeconds: Double?; let startBar: Int?; let targetBar: Int?; let barsToNext: Int? }
@@ -6888,6 +6898,8 @@ struct DebugInspectorView: View {
                     }
                     debugCard("Analyse") {
                         row("Schema", model.debugState?.analysis?.schemaVersion.map { "v\($0)" })
+                        row("Analysis version", model.debugState?.analysis?.analysisVersion)
+                        row("Phrase analysis", model.debugState?.analysis?.phraseAnalysisVersion)
                         row("Model", model.debugState?.analysis?.model)
                         row("Segment", model.debugState?.analysis?.segment?.label)
                         row("Energy z-score", signed(model.debugState?.analysis?.richCurrent?.energy))
