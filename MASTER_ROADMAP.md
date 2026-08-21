@@ -57,6 +57,8 @@ V15 veralgemeniseert canonical family-/sequence-role-intelligence naar High, Mid
 
 V16 vult die drie Magnetic-gaten met een begrensde structural/context-route, zonder de normale noveltyselectie te verlagen. Twee korte, grid-aligned PreChorus-aanlopen blijven semantic trajectories omdat een raw split hun native classifiervenster zou verstoren; de ondersteunde family-exit op 02:22.184 is een raw boundary. Bounded source/route/combined-evidence diagnostics blijven in het canonical contract beschikbaar. De V15 Verse-/Chorus-/Outro-posities en de Midnight Sun-, New Religion- en Free Your Mind-regressies blijven technisch behouden. Menselijke V16-audioacceptatie staat nog open; M23A blijft `BEZIG`.
 
+De V16-human check bevestigt de Magnetic Bridge-boundary op 02:22.184, maar canonical semantics classificeerde het nieuwe deel nog als Verse. V17 verfijnt daarom uitsluitend de canonical Bridge-role: een family-exit is aanvullende evidence en promoveert alleen met afgeronde main-cycle-context en een structurele resolutie naar Outro of terugkerend Chorus. Menselijke V17-acceptatie blijft open; M23A blijft `BEZIG`.
+
 ## M22A — Performancebaseline
 
 - Cold analysis: circa 6,212 s.
