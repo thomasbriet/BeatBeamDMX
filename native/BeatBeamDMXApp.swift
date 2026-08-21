@@ -352,15 +352,19 @@ func nativeLog(_ text: String) {
 
 func formatDebugTrackPosition(_ milliseconds: Int?) -> String {
     guard let milliseconds, milliseconds >= 0 else { return "—" }
+    return "\(formatDebugClock(milliseconds)) · \(milliseconds) ms"
+}
+
+func formatDebugClock(_ milliseconds: Int?) -> String {
+    guard let milliseconds, milliseconds >= 0 else { return "—" }
     let totalSeconds = milliseconds / 1000
     let hours = totalSeconds / 3600
     let minutes = (totalSeconds / 60) % 60
     let seconds = totalSeconds % 60
     let millis = milliseconds % 1000
-    let readable = hours > 0
+    return hours > 0
         ? String(format: "%02d:%02d:%02d.%03d", hours, minutes, seconds, millis)
         : String(format: "%02d:%02d.%03d", totalSeconds / 60, seconds, millis)
-    return "\(readable) · \(milliseconds) ms"
 }
 
 func redactedRemoteURL(_ value: String?) -> String {
@@ -448,7 +452,22 @@ struct DebugSegment: Decodable { let index: Int?; let label: String?; let startS
 struct DebugRichSegment: Decodable { let index: Int?; let label: String?; let level: String?; let energy: Double?; let confidence: Double? }
 struct DebugRichEvent: Decodable { let type: String?; let confidence: Double?; let startSeconds: Double?; let targetSeconds: Double?; let startBar: Int?; let targetBar: Int?; let barsToNext: Int? }
 struct DebugHandoffState: Decodable { let trackMatch: String?; let availability: String?; let richAnalysis: DebugRichAnalysis?; let fallbackReason: String?; let effectiveSource: String?; let selectedSource: String? }
-struct DebugRichAnalysis: Decodable { let model: String?; let energyScale: String?; let segmentCount: Int? }
+struct DebugRichAnalysis: Decodable {
+    let model: String?
+    let energyScale: String?
+    let segmentCount: Int?
+    let eventCount: Int?
+    let segments: [DebugTrackStructureSegment]?
+    let events: [DebugTrackStructureEvent]?
+}
+struct DebugTrackStructureSegment: Decodable {
+    let index: Int?; let startSeconds: Double?; let endSeconds: Double?; let label: String?
+    let level: String?; let energy: Double?; let confidence: Double?; let startBar: Int?; let endBar: Int?
+}
+struct DebugTrackStructureEvent: Decodable {
+    let type: String?; let startSeconds: Double?; let targetSeconds: Double?; let endSeconds: Double?
+    let startBar: Int?; let targetBar: Int?; let confidence: Double?
+}
 struct DebugBridgeDiagnostics: Decodable { let status: String?; let error: String?; let diagnostics: DebugBridgeDetails? }
 struct DebugBridgeDetails: Decodable { let playlistWatcher: DebugPlaylistWatcher?; let analysisQueue: DebugQueue?; let activeTrack: DebugActiveTrack?; let nativePlugin: DebugNativePlugin?; let control: DebugBridgeControl? }
 struct DebugPlaylistWatcher: Decodable { let enabled: Bool?; let playlistDirectory: String?; let playlistCount: Int?; let discoveredTrackCount: Int?; let cacheHitsThisSession: Int?; let lastReconcileUtc: String?; let lastError: String? }
@@ -6872,6 +6891,7 @@ struct TransportModePill: View {
 
 struct DebugInspectorView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var showFullStructure = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -6909,6 +6929,10 @@ struct DebugInspectorView: View {
                         row("Event confidence", model.debugState?.analysis?.currentEvent?.confidence.map { String(format: "%.0f", $0) })
                         row("Next event", model.debugState?.analysis?.nextEvent?.type)
                         row("Bars to next", model.debugState?.analysis?.nextEvent?.barsToNext.map(String.init))
+                        DisclosureGroup("Volledige trackstructuur", isExpanded: $showFullStructure) {
+                            fullTrackStructure
+                        }
+                        .font(.system(size: 12, weight: .semibold))
                     }
                     debugCard("Queue / Cache / Playlist") {
                         let diag = model.debugState?.bridgeDiagnostics?.diagnostics
@@ -6982,6 +7006,71 @@ struct DebugInspectorView: View {
     private func selector(_ deck: Int?, _ raw: Double?, _ succeeded: Bool?) -> String? {
         guard let succeeded else { return nil }
         return "\(deck.map(String.init) ?? "—") (raw \(raw.map { String(format: "%.0f", $0) } ?? "—"), \(succeeded ? "ok" : "failed"))"
+    }
+
+    @ViewBuilder
+    private var fullTrackStructure: some View {
+        let rich = model.debugState?.handoff?.richAnalysis
+        if let segments = rich?.segments, !segments.isEmpty {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(segments.enumerated()), id: \.offset) { offset, segment in
+                        structureSegmentRow(segment, fallbackIndex: offset)
+                    }
+                    if let events = rich?.events, !events.isEmpty {
+                        Divider().padding(.vertical, 3)
+                        Text("Rich Musical Events")
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundStyle(BeatBeamPalette.secondaryText)
+                        ForEach(Array(events.enumerated()), id: \.offset) { offset, event in
+                            structureEventRow(event, fallbackIndex: offset)
+                        }
+                    }
+                }
+                .padding(.vertical, 5)
+            }
+            .frame(maxHeight: 280)
+        } else {
+            Text("Geen volledige structuur beschikbaar")
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(BeatBeamPalette.secondaryText)
+                .padding(.vertical, 5)
+        }
+    }
+
+    private func structureSegmentRow(_ segment: DebugTrackStructureSegment, fallbackIndex: Int) -> some View {
+        let currentIndex = model.debugState?.analysis?.richCurrent?.index
+        let isCurrent = segment.index == currentIndex || (segment.index == nil && fallbackIndex == currentIndex)
+        let bars = "Bar \(segment.startBar.map(String.init) ?? "—")–\(segment.endBar.map(String.init) ?? "—")"
+        let times = "\(formatDebugClock(milliseconds(segment.startSeconds)))–\(formatDebugClock(milliseconds(segment.endSeconds)))"
+        return VStack(alignment: .leading, spacing: 2) {
+            Text("\(bars)   \(times)")
+            Text("\(segment.label ?? "—") · Conf \(segment.confidence.map { String(format: "%.0f", $0) } ?? "—") · E \(signed(segment.energy) ?? "—")")
+        }
+        .font(.system(size: 11, design: .monospaced))
+        .foregroundStyle(isCurrent ? Color.black : Color.white)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(isCurrent ? BeatBeamPalette.brandCyan : BeatBeamPalette.mutedBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private func structureEventRow(_ event: DebugTrackStructureEvent, fallbackIndex: Int) -> some View {
+        let current = model.debugState?.analysis?.currentEvent
+        let isCurrent = event.type == current?.type && event.startSeconds == current?.startSeconds
+        let start = "Bar \(event.startBar.map(String.init) ?? "—") · \(formatDebugClock(milliseconds(event.startSeconds)))"
+        let end = event.targetSeconds ?? event.endSeconds
+        let interval = end.map { " → Bar \(event.targetBar.map(String.init) ?? "—") · \(formatDebugClock(milliseconds($0)))" } ?? ""
+        return Text("EVENT \(event.type ?? "—")  \(start)\(interval) · Conf \(event.confidence.map { String(format: "%.0f", $0) } ?? "—")")
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(isCurrent ? BeatBeamPalette.brandCyan : BeatBeamPalette.secondaryText)
+            .padding(.leading, 12)
+    }
+
+    private func milliseconds(_ seconds: Double?) -> Int? {
+        guard let seconds, seconds.isFinite, seconds >= 0 else { return nil }
+        return Int((seconds * 1000).rounded())
     }
 
     private func bool(_ value: Bool?) -> String { value == true ? "yes" : value == false ? "no" : "—" }

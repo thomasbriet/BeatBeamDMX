@@ -535,6 +535,21 @@ class SongAnalyzerStructureHandoff:
                     "energy_scale": track.rich_energy_scale,
                     "segment_count": len(track.rich_segments),
                     "event_count": len(track.rich_events),
+                    "segments": [
+                        {"index": segment.index, "start_seconds": segment.start_seconds,
+                         "end_seconds": segment.end_seconds, "label": segment.label,
+                         "level": segment.level, "energy": segment.energy,
+                         "confidence": segment.confidence, "start_bar": segment.start_bar,
+                         "end_bar": segment.end_bar}
+                        for segment in track.rich_segments
+                    ],
+                    "events": [
+                        {"type": event.type, "start_seconds": event.start_seconds,
+                         "target_seconds": event.target_seconds, "end_seconds": event.end_seconds,
+                         "start_bar": event.start_bar, "target_bar": event.target_bar,
+                         "confidence": event.confidence}
+                        for event in track.rich_events
+                    ],
                 }
             if track.availability == "missing":
                 return result

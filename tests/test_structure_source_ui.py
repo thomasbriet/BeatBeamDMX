@@ -71,6 +71,15 @@ class StructureSourceUiTests(unittest.TestCase):
         self.assertIn('row("Analysis version", model.debugState?.analysis?.analysisVersion)', native)
         self.assertIn('row("Phrase analysis", model.debugState?.analysis?.phraseAnalysisVersion)', native)
 
+    def test_debug_contains_bounded_full_structure_with_current_highlights(self):
+        native = (ROOT / "native" / "BeatBeamDMXApp.swift").read_text(encoding="utf-8")
+        self.assertIn('DisclosureGroup("Volledige trackstructuur"', native)
+        self.assertIn("let segments: [DebugTrackStructureSegment]?", native)
+        self.assertIn("let events: [DebugTrackStructureEvent]?", native)
+        self.assertIn("frame(maxHeight: 280)", native)
+        self.assertIn("let isCurrent = segment.index == currentIndex", native)
+        self.assertIn('Text("EVENT \\(event.type ?? "—")', native)
+
 
 if __name__ == "__main__":
     unittest.main()

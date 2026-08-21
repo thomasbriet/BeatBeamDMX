@@ -166,6 +166,10 @@ class SongAnalyzerStructureHandoffTests(unittest.TestCase):
             self.assertEqual("DROP", before["next_event"]["type"])
             self.assertEqual(2, before["next_event"]["bars_to_next"])
             self.assertEqual("DROP", handoff.project(playback(TRACK, 16))["current_event"]["type"])
+            self.assertEqual(2, before["rich_analysis"]["segment_count"])
+            self.assertEqual(2, len(before["rich_analysis"]["segments"]))
+            self.assertEqual("BUILD", before["rich_analysis"]["events"][0]["type"])
+            self.assertEqual("DROP", before["rich_analysis"]["events"][1]["type"])
 
     def test_ready_active_track_is_used_when_virtualdj_live_state_has_no_track_path(self):
         with tempfile.TemporaryDirectory() as directory:
