@@ -53,6 +53,8 @@ De v13-semantic-pass maakt de canonical section role los van de legacy Verse-num
 
 V14 onderscheidt repeat-family-membership van canonical role activation en voegt een begrensde multi-chunk PreChorus-trajectory-pass toe. De pass hergebruikt bestaande bar-, boundary-, contour- en family-evidence; family-entry is niet langer zelfstandig bewijs voor directe Chorus-role-activatie. Midnight Sun en New Religion blijven de gerichte menselijke regressietracks; v14-acceptatie blijft open.
 
+V15 veralgemeniseert canonical family-/sequence-role-intelligence naar High, Mid en Low. De native High `Up`/`Down`-labels zijn voortaan evidence en geen harde canonical Verse/Bridge-mapping: lokale native-scorecompetitie, repeat/contour, arrival, salience en sequence-context bepalen de canonical rol. Een brede family mag meerdere canonical rollen bevatten; dit bewaart onder meer New Religion Verse/Chorus en voorkomt dat High-herhaling automatisch Chorus wordt. De gerichte v15-reanalyse herstelt Magnetic naar Verse vanaf 00:09.258, Chorus op 00:38.797 en 01:52.645, en twee Outro-occurrences vanaf 02:36.954 en 02:51.723. De menselijke v15-acceptatie voor Magnetic blijft open; de ontbrekende High raw boundaries rond circa 00:35, 01:49 en 02:22 blijven bewust een afzonderlijke boundary-quality-pass.
+
 ## M22A — Performancebaseline
 
 - Cold analysis: circa 6,212 s.
