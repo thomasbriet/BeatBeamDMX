@@ -51,6 +51,8 @@ De v12-quality-pass corrigeert vervolgens een dominante vaste Verse-family-prior
 
 De v13-semantic-pass maakt de canonical section role los van de legacy Verse-nummers, voegt PreChorus als optionele role toe, consolideert veilige aangrenzende Verse-fragmenten en projecteert sterke late Chorus-family-occurrences proportioneel. De gerichte v13-route is technisch groen; menselijke muzikale v13-acceptatie blijft open. M23A blijft `BEZIG`.
 
+V14 onderscheidt repeat-family-membership van canonical role activation en voegt een begrensde multi-chunk PreChorus-trajectory-pass toe. De pass hergebruikt bestaande bar-, boundary-, contour- en family-evidence; family-entry is niet langer zelfstandig bewijs voor directe Chorus-role-activatie. Midnight Sun en New Religion blijven de gerichte menselijke regressietracks; v14-acceptatie blijft open.
+
 ## M22A — Performancebaseline
 
 - Cold analysis: circa 6,212 s.
