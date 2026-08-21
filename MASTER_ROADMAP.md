@@ -569,3 +569,12 @@ van beide systemen krijgt een verborgen afhankelijkheid van het andere.
 - De VirtualDJ-workflow vereist zo weinig mogelijk handmatige voorbereiding.
 
 _Last updated: 2026-08-21_
+
+## 13.6 M23A runtime failure diagnostics
+
+M23A-runtimetests hebben track-specifieke analyzerfailures blootgelegd terwijl
+HIGH-prioriteit, queuegezondheid en v14-voortgang correct werken. De bridge
+bevat nu bounded running-job- en failurediagnostics, inclusief fase, veilige
+foutdetails, optionele stderr-tail en active-track filtering. De concrete
+oorzaak van een falende track wordt in een volgende runtime-retest vastgesteld;
+M23A blijft BEZIG.

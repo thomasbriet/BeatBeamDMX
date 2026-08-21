@@ -417,6 +417,7 @@ struct DebugActiveTrack: Decodable {
     let status: String
     let generation: Int
     let activatedAtUnixMilliseconds: Int?
+    let lastFailure: DebugFailure?
 
     private enum CodingKeys: String, CodingKey {
         case canonicalPath
@@ -425,6 +426,7 @@ struct DebugActiveTrack: Decodable {
         case status
         case generation
         case activatedAtUnixMilliseconds
+        case lastFailure
     }
 
     init(from decoder: Decoder) throws {
@@ -435,7 +437,12 @@ struct DebugActiveTrack: Decodable {
         status = try container.decode(String.self, forKey: .status)
         generation = try container.decode(Int.self, forKey: .generation)
         activatedAtUnixMilliseconds = try container.decodeIfPresent(Int.self, forKey: .activatedAtUnixMilliseconds)
+        lastFailure = try container.decodeIfPresent(DebugFailure.self, forKey: .lastFailure)
     }
+}
+struct DebugFailure: Decodable {
+    let filePath: String?; let timestampUtc: String?; let priority: String?; let phase: String?
+    let message: String?; let exitCode: Int?; let timedOut: Bool?; let stderr: String?
 }
 struct DebugAnalysisState: Decodable {
     let schemaVersion: Int?
@@ -476,7 +483,12 @@ struct DebugTrackStructureEvent: Decodable {
     let startBar: Int?; let targetBar: Int?; let confidence: Double?
 }
 struct DebugBridgeDiagnostics: Decodable { let status: String?; let error: String?; let diagnostics: DebugBridgeDetails? }
-struct DebugBridgeDetails: Decodable { let playlistWatcher: DebugPlaylistWatcher?; let analysisQueue: DebugQueue?; let activeTrack: DebugActiveTrack?; let nativePlugin: DebugNativePlugin?; let control: DebugBridgeControl? }
+struct DebugBridgeDetails: Decodable { let playlistWatcher: DebugPlaylistWatcher?; let analysisQueue: DebugQueue?; let activeTrack: DebugActiveTrack?; let nativePlugin: DebugNativePlugin?; let control: DebugBridgeControl?; let runningJob: DebugRunningJob?; let recentFailures: [DebugFailure]? }
+struct DebugRunningJob: Decodable {
+    let filePath: String?; let priority: String?; let enqueuedAtUtc: String?; let startedAtUtc: String?
+    let elapsedMilliseconds: Int?; let analysisVersion: String?; let phraseAnalysisVersion: String?
+    let source: String?; let generation: Int?
+}
 struct DebugPlaylistWatcher: Decodable { let enabled: Bool?; let playlistDirectory: String?; let playlistCount: Int?; let discoveredTrackCount: Int?; let cacheHitsThisSession: Int?; let lastReconcileUtc: String?; let lastError: String?; let currentTrackCount: Int?; let staleTrackCount: Int?; let needsAnalysisTrackCount: Int?; let failedKnownTrackCount: Int? }
 struct DebugQueue: Decodable { let capacity: Int?; let queuedNormal: Int?; let queuedHigh: Int?; let running: Int?; let analyzing: Int?; let completedThisSession: Int?; let failedThisSession: Int?; let oldestQueuedMilliseconds: Int?; let failedRunner: Int?; let failedInvalidResult: Int?; let evictedNormalForHigh: Int?; let otherFailed: Int?; let uniqueFailedTracks: Int?; let uniqueFailureTrackingSaturated: Bool? }
 struct DebugNativePlugin: Decodable {
@@ -6951,10 +6963,29 @@ struct DebugInspectorView: View {
                         row("Invalid / evicted", diag.map { "\($0.analysisQueue?.failedInvalidResult ?? 0) / \($0.analysisQueue?.evictedNormalForHigh ?? 0)" })
                         row("Other / unique", diag.map { "\($0.analysisQueue?.otherFailed ?? 0) / \($0.analysisQueue?.uniqueFailedTracks ?? 0)" })
                         row("Oldest queued", diag?.analysisQueue?.oldestQueuedMilliseconds.map { "\($0) ms" })
+                        row("Running job", diag?.runningJob?.filePath.map { URL(fileURLWithPath: $0).lastPathComponent })
+                        row("Priority", diag?.runningJob?.priority)
+                        row("Running for", diag?.runningJob?.elapsedMilliseconds.map { "\($0) ms" })
+                        if let failure = diag?.activeTrack?.lastFailure {
+                            row("Analysis failure", [failure.phase, failure.message].compactMap { $0 }.joined(separator: " · "))
+                        }
                         row("Cache hits", diag?.playlistWatcher?.cacheHitsThisSession.map(String.init))
                         row("Playlist", diag?.playlistWatcher?.playlistCount.map { "\($0) playlists · \(diag?.playlistWatcher?.discoveredTrackCount ?? 0) tracks" })
                         row("Library current / stale", diag.map { "\($0.playlistWatcher?.currentTrackCount ?? 0) / \($0.playlistWatcher?.staleTrackCount ?? 0)" })
                         row("Needs / failed-known", diag.map { "\($0.playlistWatcher?.needsAnalysisTrackCount ?? 0) / \($0.playlistWatcher?.failedKnownTrackCount ?? 0)" })
+                        DisclosureGroup("Recente analysefouten") {
+                            if let failures = diag?.recentFailures, !failures.isEmpty {
+                                ForEach(Array(failures.enumerated()), id: \.offset) { _, failure in
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(failure.filePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "—")
+                                        Text([failure.phase, failure.message].compactMap { $0 }.joined(separator: " · "))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            } else {
+                                Text("Geen recente analysefouten").foregroundStyle(.secondary)
+                            }
+                        }
                     }
                     debugCard("Handoff / BeatBeam") {
                         row("Track match", model.debugState?.handoff?.trackMatch)
