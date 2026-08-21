@@ -33,7 +33,7 @@ Bij iedere programmeertaak:
 
 De PASS omvat phrase boundary, seek, normale NOW/Auto Show, rich current, energy modifier, uncached live track met HIGH-prioriteit, pending/stale-data-safety, exacte Track A/Track B matching, VirtualDJ stop/restart, automatische reconnect en live transport zonder handmatige Connect-knop.
 
-De bestaande `build_native_app.sh` developmentroute heeft een Python 3.14 `site-packages`-pad/reproduceerbaarheidsprobleem. De actuele Beta-app is via de directe development packaging-route opnieuw gebouwd, gebundeld en strikt ad-hoc gesigned. Dit is technische schuld voor een aparte cleanup en geen M22A-productfailure.
+De eerdere Python 3.14 `site-packages`-reproduceerbaarheidskwestie in `build_native_app.sh` is opgelost. De route ontdekt nu de werkelijke venv-dependencies, weigert ABI-onveilige native extensies bij een afwijkende Python-minorversie en bouwt de Beta-bundle zelfstandig inclusief backend-smoke en strict ad-hoc signing. Dit is geen M22A-productfailure.
 
 ---
 
