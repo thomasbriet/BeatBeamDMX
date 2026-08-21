@@ -61,30 +61,59 @@ De V16-human check bevestigt de Magnetic Bridge-boundary op 02:22.184, maar cano
 
 ---
 
-# M24A — ArrangementProfile-architectuur
+# M24A — ArrangementProfile-architectuur en shadow-calibratie
 
-`BEZIG` — ArrangementProfile-architectuur is gestart. SongAnalyzer blijft op
-`analysis_version = m14-v5` en `phrase_analysis_version = phrase-analysis-v17`;
-M23A blijft `BEZIG` en The Bausa - Magnetic blijft menselijke runtime-PASS op
-v17.
+`BEZIG` — De onafhankelijke High/Mid/Low-onafhankelijke analysearchitectuur is
+uitgebouwd tot een volledige, menselijke calibratie-infrastructuur. Baseline:
+`analysis_version = m14-v5`, `phrase_analysis_version = phrase-analysis-v17`;
+M23A blijft `BEZIG` en v17 blijft veilige fallback.
 
-M24A-1 en M24A-2 vormen samen een veilig foundation-checkpoint. M24A-1 voegt
-shadow-profielen toe met nullable `Value` + `Confidence` (`unknown` = null/0),
-waarbij alleen VocalPresence en InstrumentalDominance voorlopig worden gevuld.
-M24A-2 voegt additive, in-memory RawSectionObservations toe op het bestaande
-pre-native aftakpunt, zonder tweede segmentation-/similarity-engine,
-nieuwe heuristieken, thresholds, features, version/cache bump of wijziging van
-canonical output, boundaries, classificatie of runtimecontract. Alle overige
-profilewaarden en sectionvelden blijven bewust unknown.
+M24A-1/M24A-2 vormen de veilige foundation: nullable shadow-profielen en
+additive, in-memory pre-native `RawSectionObservations`, zonder nieuwe
+segmentation-engine, thresholds, cache/version bump of canonical wijziging.
 
-Validatie M24A-2: Python 17/17 gericht en 177/177 volledig; .NET 8/8 gericht
-en 824/824 volledig; build, diff-check, ARM64-bundles, plugin/bridge-installatie,
-codesign, worker-identiteit en runtime-smoke zijn groen.
+`GEREED` M24A-3 — `SectionCharacterProfileShadow` projecteert uitsluitend uit
+raw observations: recurrence uit `StrongestSimilarity`, family salience uit
+`Coverage`, entry/exit contrast uit boundary scores, build momentum uitsluitend
+bij `StructuralRoute = trajectory` en structural novelty uit entry
+`Boundary.Novelty`. RelativeEnergy, VocalEvidence en DropImpact blijven
+bewust unknown; confidence is nog niet gekalibreerd. Geen High/Mid/Low-, native-,
+canonical-role- of Rich Musical Event-input.
 
-`GEPAKKEERD` — M24A-3 en verdere SectionCharacterProfile-/ArrangementProfile-
-calibratie worden pas vóór het optreden hervat als concrete playlist- of
-runtimeproblemen dit aantoonbaar noodzakelijk maken. Geen High/Mid/Low-removal
-of phrase-analysis-v18 vóór show-readiness zonder dergelijke noodzaak.
+`GEREED` M24A-4 — Additieve, optionele `shadow_analysis` in handoff schema v2
+maakt shadowdata zichtbaar in BeatBeam Debug. Shadow blijft diagnostics-only,
+niet persistent in AnalysisLibrary, niet cachebepalend en niet gebruikt door
+canonical analyse, Rich Musical Events of Auto Show. AnalysisHash-safety blijft
+actief.
+
+`GEREED` M24A-4A — De expliciete Debugactie `Actieve track heranalyseren` voert
+een HIGH force-job uit op de exact gevalideerde actieve path/deck, met normale
+atomic canonical save en ephemeral shadowpublicatie naar de actieve handoff.
+Completion geeft verse snapshot en shadowprojectie veilig door; normale
+cache-hit, failure-safety en productie-isolatie blijven intact. De menselijke
+runtimeketen eindigt op `completed` zonder failure.
+
+`GEREED` M24A-4B — BeatBeam Debug heeft lokaal persistent inklapbare groepen
+voor live, canonical, rich events, shadow, queue/cache/playlist, failures,
+handoff en legacy/native diagnostics. Shadow toont de actuele observation plus
+de volledige actieve shadowstructuur; The Bausa - Magnetic bevat 9 observations
+in tijdvolgorde. Dit is observability-only.
+
+Eerste menselijke Magnetic-calibratie toont bij de Chorus-starts 38.797 s en
+112.645 s vergelijkbare onafhankelijke raw evidence: recurrence circa 0.95,
+hoge family salience, duidelijk entry contrast en zeer hoge boundary novelty.
+Dit is positief bewijs voor muzikaal relevante herhaling/contrast zonder
+canonical Chorus als input. Recurrence/family betekent niet automatisch Chorus;
+BuildMomentum blijft vrijwel unknown. `StructuralNovelty` moet verder worden
+onderscheiden als boundary/acoustic novelty versus structural/context evidence;
+de volledige shadowstructuur toont momenteel de barrange dubbel als kleine
+toekomstige UI-polish. Nog geen thresholds of eventclassifierwijziging.
+
+Volgende actieve stap: `MUZIKALE SHADOW-CALIBRATIE` op een kleine
+representatieve trackset, met nadruk op trajectory/build evidence, boundary
+versus structural novelty, recurrence/family, entry/exit contrast en ontbrekende
+DropImpact-evidence. Daarna pas beoordelen welke signalen geschikt zijn voor
+ArrangementProfile, Rich Musical Events v2 en uiteindelijk Auto Show.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
@@ -494,7 +523,7 @@ Aanbevolen volgorde vanaf de huidige productrichting:
 
 1. `BEZIG` Volledige VirtualDJ-playlist show-readiness, daarna feature freeze.
 2. `BEZIG` M23A: menselijke runtimevalidatie van phrase-analysis-v17.
-3. `GEPAKKEERD` M24A-3 en verdere ArrangementProfile-calibratie tot concrete playlist-/runtime-evidence dit vereist.
+3. `BEZIG` M24A: muzikale shadow-calibratie op een kleine representatieve trackset.
 4. `TODO` Rich Musical Events en verdere hiërarchische analyse na show-readiness.
 5. `TODO` Geen nieuwe Essentia-features zonder aantoonbare evidence gap.
 
