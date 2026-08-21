@@ -444,6 +444,7 @@ class SongAnalyzerStructureHandoff:
             "confidence": event.confidence,
             "seconds_to_target": None if event.target_seconds is None else max(0.0, event.target_seconds - position),
             "bars_to_target": None if event.target_bar is None or event.start_bar is None else max(0, event.target_bar - event.start_bar),
+            "bars_to_next": None,
         }
 
     def project(self, playback):

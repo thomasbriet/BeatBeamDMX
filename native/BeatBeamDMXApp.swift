@@ -423,7 +423,7 @@ struct DebugActiveTrack: Decodable {
 struct DebugAnalysisState: Decodable { let schemaVersion: Int?; let model: String?; let segment: DebugSegment?; let richCurrent: DebugRichSegment?; let currentEvent: DebugRichEvent?; let nextEvent: DebugRichEvent?; let energyModifier: Double? }
 struct DebugSegment: Decodable { let index: Int?; let label: String?; let startSeconds: Double?; let endSeconds: Double?; let confidence: Double? }
 struct DebugRichSegment: Decodable { let index: Int?; let label: String?; let level: String?; let energy: Double?; let confidence: Double? }
-struct DebugRichEvent: Decodable { let type: String?; let confidence: Double?; let startSeconds: Double?; let targetSeconds: Double?; let startBar: Int?; let targetBar: Int?; let barsToTarget: Int? }
+struct DebugRichEvent: Decodable { let type: String?; let confidence: Double?; let startSeconds: Double?; let targetSeconds: Double?; let startBar: Int?; let targetBar: Int?; let barsToNext: Int? }
 struct DebugHandoffState: Decodable { let trackMatch: String?; let availability: String?; let richAnalysis: DebugRichAnalysis?; let fallbackReason: String?; let effectiveSource: String?; let selectedSource: String? }
 struct DebugRichAnalysis: Decodable { let model: String?; let energyScale: String?; let segmentCount: Int? }
 struct DebugBridgeDiagnostics: Decodable { let status: String?; let error: String?; let diagnostics: DebugBridgeDetails? }
@@ -6883,7 +6883,7 @@ struct DebugInspectorView: View {
                         row("Current event", model.debugState?.analysis?.currentEvent?.type)
                         row("Event confidence", model.debugState?.analysis?.currentEvent?.confidence.map { String(format: "%.0f", $0) })
                         row("Next event", model.debugState?.analysis?.nextEvent?.type)
-                        row("Bars to next", model.debugState?.analysis?.nextEvent?.barsToTarget.map(String.init))
+                        row("Bars to next", model.debugState?.analysis?.nextEvent?.barsToNext.map(String.init))
                     }
                     debugCard("Queue / Cache / Playlist") {
                         let diag = model.debugState?.bridgeDiagnostics?.diagnostics
