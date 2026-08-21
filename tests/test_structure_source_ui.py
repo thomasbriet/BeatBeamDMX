@@ -65,11 +65,22 @@ class StructureSourceUiTests(unittest.TestCase):
         self.assertIn('row("Position", formatDebugTrackPosition(model.debugState?.virtualdj?.positionMilliseconds))', native)
 
     def test_debug_analysis_exposes_both_analysis_versions(self):
+        backend = (ROOT / "beatbeam_app.py").read_text(encoding="utf-8")
         native = (ROOT / "native" / "BeatBeamDMXApp.swift").read_text(encoding="utf-8")
+        self.assertIn('"analysis_version": projection.get("analysis_version")', backend)
+        self.assertIn('"phrase_analysis_version": projection.get("phrase_analysis_version")', backend)
         self.assertIn("let analysisVersion: String?", native)
         self.assertIn("let phraseAnalysisVersion: String?", native)
         self.assertIn('row("Analysis version", model.debugState?.analysis?.analysisVersion)', native)
         self.assertIn('row("Phrase analysis", model.debugState?.analysis?.phraseAnalysisVersion)', native)
+
+    def test_debug_queue_keeps_failure_reasons_and_library_status_separate(self):
+        native = (ROOT / "native" / "BeatBeamDMXApp.swift").read_text(encoding="utf-8")
+        self.assertIn("let failedRunner: Int?", native)
+        self.assertIn("let uniqueFailedTracks: Int?", native)
+        self.assertIn("let currentTrackCount: Int?", native)
+        self.assertIn('row("Failed runner"', native)
+        self.assertIn('row("Library current / stale"', native)
 
     def test_debug_contains_bounded_full_structure_with_current_highlights(self):
         native = (ROOT / "native" / "BeatBeamDMXApp.swift").read_text(encoding="utf-8")

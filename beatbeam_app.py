@@ -14895,6 +14895,8 @@ def beatbeam_debug_state(osc_state=None):
         "active_track": active or None,
         "analysis": {
             "schema_version": projection.get("schema_version"),
+            "analysis_version": projection.get("analysis_version"),
+            "phrase_analysis_version": projection.get("phrase_analysis_version"),
             "model": projection.get("model"),
             "segment": current or None,
             "rich_current": rich or None,

@@ -45,6 +45,8 @@ De phrase-quality-pass vond een systematische early-Outro-zwakte. SongAnalyzer h
 
 Menselijke runtimeacceptatie identificeerde daarnaast dat scalar recurrence een duidelijke Chorus binnen een lang Mid-segment kon missen. SongAnalyzer bevat nu bar-aligned section similarity met niet-lokale 4/8/16-bar herhalingsparen, interne energie/onset/spectral-contourvergelijking en conservatieve herhaalde-sectiestart-evidence voor segmentation en native Chorus-classificatie. M23A blijft `BEZIG`: de bijgewerkte runtime vereist opnieuw menselijke muzikale acceptatie.
 
+De vervolgpass voegt compacte repeat-pairs, repeat-end- en membership-exit-evidence toe. Daarmee kan een vloeiende structurele overgang met een aantoonbare profielwissel ook zonder lokale novelty-piek worden gesplitst; de diagnose- en show-readinessgegevens tonen nu tevens bounded repeat-, cache-status- en failure-reasoninformatie. M23A blijft `BEZIG`: de definitieve v11-analyseroute moet nog handmatig muzikaal worden gevalideerd.
+
 ## M22A — Performancebaseline
 
 - Cold analysis: circa 6,212 s.
