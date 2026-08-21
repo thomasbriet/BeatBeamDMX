@@ -59,6 +59,42 @@ V16 vult die drie Magnetic-gaten met een begrensde structural/context-route, zon
 
 De V16-human check bevestigt de Magnetic Bridge-boundary op 02:22.184, maar canonical semantics classificeerde het nieuwe deel nog als Verse. V17 verfijnt daarom uitsluitend de canonical Bridge-role: een family-exit is aanvullende evidence en promoveert alleen met afgeronde main-cycle-context en een structurele resolutie naar Outro of terugkerend Chorus. Menselijke V17-acceptatie blijft open; M23A blijft `BEZIG`.
 
+---
+
+# M24A — ArrangementProfile-architectuur
+
+`BEZIG` — ArrangementProfile-architectuur is gestart. SongAnalyzer blijft op
+`analysis_version = m14-v5` en `phrase_analysis_version = phrase-analysis-v17`;
+M23A blijft `BEZIG` en The Bausa - Magnetic blijft menselijke runtime-PASS op
+v17.
+
+M24A-1 en M24A-2 vormen samen een veilig foundation-checkpoint. M24A-1 voegt
+shadow-profielen toe met nullable `Value` + `Confidence` (`unknown` = null/0),
+waarbij alleen VocalPresence en InstrumentalDominance voorlopig worden gevuld.
+M24A-2 voegt additive, in-memory RawSectionObservations toe op het bestaande
+pre-native aftakpunt, zonder tweede segmentation-/similarity-engine,
+nieuwe heuristieken, thresholds, features, version/cache bump of wijziging van
+canonical output, boundaries, classificatie of runtimecontract. Alle overige
+profilewaarden en sectionvelden blijven bewust unknown.
+
+Validatie M24A-2: Python 17/17 gericht en 177/177 volledig; .NET 8/8 gericht
+en 824/824 volledig; build, diff-check, ARM64-bundles, plugin/bridge-installatie,
+codesign, worker-identiteit en runtime-smoke zijn groen.
+
+`GEPAKKEERD` — M24A-3 en verdere SectionCharacterProfile-/ArrangementProfile-
+calibratie worden pas vóór het optreden hervat als concrete playlist- of
+runtimeproblemen dit aantoonbaar noodzakelijk maken. Geen High/Mid/Low-removal
+of phrase-analysis-v18 vóór show-readiness zonder dergelijke noodzaak.
+
+## M24A — Show-readiness als eerstvolgende hoofdprioriteit
+
+De volledige relevante VirtualDJ-playlist moet worden geanalyseerd en current
+en ready zijn, zonder runner/analyzer-failures of stale relevante analyses.
+Canonical structuur en de keten VirtualDJ → SongAnalyzer/bridge → BeatBeam
+moeten betrouwbaar zijn; verdachte tracks worden gericht menselijk gecontroleerd
+en BeatBeam/Auto Show moet optredenwaardig zijn. Daarna volgt feature freeze:
+voornamelijk testen, repeteren en noodzakelijke bugfix/tuning.
+
 ## M22A — Performancebaseline
 
 - Cold analysis: circa 6,212 s.
@@ -157,7 +193,7 @@ Essentia-optimalisatie zonder meting, een volledig nieuwe hiërarchische analyze
 
 ## 1.2 Rekordbox
 
-**Besluit:** Rekordbox-specifieke phrase-analyse is niet langer het primaire productdoel.
+**Besluit:** Rekordbox is legacy en geen actief doelplatform.
 
 - `VERVALLEN` Rekordbox phrase-analyse verder uitbouwen als kernfunctie.
 - `VERVALLEN` Eigen phrase-structuur beperken tot Rekordbox native phrase-types.
@@ -166,7 +202,7 @@ Essentia-optimalisatie zonder meting, een volledig nieuwe hiërarchische analyze
 
 ## 1.3 VirtualDJ
 
-**Doel:** VirtualDJ is primair de playback-/DJ-laag.
+**Doel:** VirtualDJ is de playback-/live-DJ-integratie.
 
 - `VERVALLEN` Eigen SongAnalyzer/BeatBeam phrases zichtbaar proberen te maken in de VirtualDJ-waveform.
 - `TODO` SongAnalyzer-analyse vanuit de VirtualDJ-workflow bereikbaar maken.
@@ -456,16 +492,11 @@ Deze punten zijn bewust geschrapt en mogen niet zonder expliciete productbesliss
 
 Aanbevolen volgorde vanaf de huidige productrichting:
 
-1. `GEREED` M22A: Canoniek BeatBeam Analysis Model en eerste begrensde Auto Show-consument, inclusief echte VirtualDJ-liveketen.
-2. `TODO` Volgende toekomstige richting: Rich Musical Events voor BeatBeam — build, drop, chorus, breakdown, transition, confidence en bar alignment.
-3. `TODO` Inventariseren welke diepere audiofeatures met de huidige Essentia/Python-pipeline haalbaar zijn.
-4. `TODO` Nieuwe hiërarchische segmentatie ontwerpen.
-5. `TODO` Analyse-output verder koppelen aan BeatBeam Auto Show.
-6. `TODO` Live BeatBeam UI herontwerpen rond visualisatie + overrides.
-7. `TODO` Moving-head snelheidsmodifier toevoegen.
-8. `TODO` VirtualDJ analyseworkflow/status integreren voor zover de SDK dit ondersteunt.
-9. `TODO` Simulator bouwen om showlogica sneller te testen.
-10. `TODO` Finder-startbare macOS `.app` en productisering afronden.
+1. `BEZIG` Volledige VirtualDJ-playlist show-readiness, daarna feature freeze.
+2. `BEZIG` M23A: menselijke runtimevalidatie van phrase-analysis-v17.
+3. `GEPAKKEERD` M24A-3 en verdere ArrangementProfile-calibratie tot concrete playlist-/runtime-evidence dit vereist.
+4. `TODO` Rich Musical Events en verdere hiërarchische analyse na show-readiness.
+5. `TODO` Geen nieuwe Essentia-features zonder aantoonbare evidence gap.
 
 ---
 
