@@ -576,7 +576,8 @@ M23A-runtimetests hebben track-specifieke analyzerfailures blootgelegd terwijl
 HIGH-prioriteit, queuegezondheid en v14-voortgang correct werken. De bridge
 bevat nu bounded running-job- en failurediagnostics, inclusief fase, veilige
 foutdetails, optionele stderr-tail en active-track filtering. De eerste
-concrete v14-oorzaak is vastgesteld: semantic_sections behandelt een lege
-trusted-family-set als dictionary en roept .values() aan; dit veroorzaakt
-AttributeError: 'set' object has no attribute 'values' in phrase_analysis. De
-analyzerfix volgt als afzonderlijke stap; M23A blijft BEZIG.
+concrete v14-oorzaak is vastgesteld en in SongAnalyzer verholpen: semantic_sections
+behandelde een lege trusted-family-set als dictionary en riep .values() aan;
+dit veroorzaakte AttributeError: 'set' object has no attribute 'values' in
+phrase_analysis. De failure diagnostics bewezen de oorzaak; menselijke
+muzikale acceptatie van M23A loopt door. M23A blijft BEZIG.
