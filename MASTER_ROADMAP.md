@@ -461,4 +461,89 @@ Aanbevolen volgorde vanaf de huidige productrichting:
 
 ---
 
-_Last updated: 2026-08-20_
+# 13. Smart Hot Cues / DJ Preparation voor VirtualDJ
+
+`TODO` — toekomstige VirtualDJ-richting, na of naast de fundamenten voor rijke
+analyse. Dit is geen uitbreiding van de huidige M22A-runtimeacceptatie.
+
+VirtualDJ is het enige actieve DJ-doel. SongAnalyzer blijft de analyse- en
+preparation-engine, VirtualDJ de playback-/DJ-interface en BeatBeam de live
+lighting/show-engine.
+
+## 13.1 Semantische cue-basis
+
+- `A = MIX IN`: phrasegrenzen, maat/downbeat, intro, bruikbaar ritmisch
+  materiaal, energie en ruimte vóór het doel; vocals later alleen wanneer die
+  betrouwbaar zijn.
+- `B = MAIN`: hoofd- of impactmoment.
+- `C = BREAK`: breakdown/break.
+- `D = MIX OUT`: outro met phrase/maat/downbeats, laatste chorus/drop,
+  afnemende energie, overgang en mixruimte.
+
+Chorus, drop, build-up, breakdown, transitie en event-hiërarchie kunnen deze
+basis later verfijnen.
+
+## 13.2 Smart countdowns en cueplan
+
+Rond drops, chorussen, sterke transities en andere betrouwbare events kan een
+praktische countdown worden gepland, conceptueel bijvoorbeeld `16 / 12 / 8 / 4 /
+target` maten. De planner gebruikt alleen intervallen die passen bij
+beschikbare lengte, phrase/downbeat, intro/outro, pickup, eerdere secties,
+tracklengte, bestaande cues, slots en confidence. Exacte maat- en
+downbeatplaatsing is vereist: dit is een muzikale mixhulp, geen overvolle
+cue-lijst.
+
+De prioriteit is deterministisch: eerst MIX IN, MAIN, BREAK en MIX OUT; daarna
+drop-/chorus-countdowns en event-cues. Dubbelen, lage-confidence events, cues
+buiten een zinvolle mixcontext en onnodige overload worden weggelaten. Bij
+beperkte slots blijven de belangrijkste cues behouden. Het conceptuele model
+bevat rol, doel-event, timestamp, beat/maat, phrasecontext,
+countdown-afstand-in-maten, confidence en prioriteit. Rollen zijn onder meer
+`MIX_IN`, `MAIN`, `BREAK`, `MIX_OUT`, `DROP_COUNTDOWN`, `CHORUS_COUNTDOWN`,
+`DROP` en `CHORUS`; dit legt nog geen implementatie vast.
+
+## 13.3 Canonieke bron en fasen
+
+Smart Hot Cues gebruikt hetzelfde canonical rich-analysis-contract als BeatBeam:
+phrase-/segmentgrenzen, maten/downbeats, energie/confidence, hiërarchie,
+builds, drops, chorussen, breakdowns, transities, sterkte en toekomstige
+events. Er komt geen parallel model.
+
+1. **Fase 1:** betrouwbare maten, downbeats, phrases en semantische segmentatie;
+   A/B/C/D; eenvoudige 4-maten-countdowns rond betrouwbare doelen.
+2. **Fase 2:** rijkere chorus-, drop-, build-, breakdown-, transitie- en
+   hiërarchische events met confidence.
+3. **Fase 3:** prioritering verfijnen op basis van DJ-tests en mixkwaliteit.
+
+Fase-2-features worden niet kunstmatig naar voren gehaald.
+
+## 13.4 VirtualDJ-workflow, cache en veiligheid
+
+De beoogde keten is: playlist → SongAnalyzer-preanalyse → canonical rich
+analysis → Smart Hot Cue Plan → beschikbaar voor VirtualDJ → DJ laadt track →
+cues zijn bruikbaar. Dit sluit aan op M21A-playlist-preanalyse en minimaliseert
+handmatige voorbereiding.
+
+Het cueplan wordt uit persistente analyse opgebouwd of hergebruikt. Een cache-hit
+start geen Essentia-heranalyse; ontbrekende of stale `AnalysisVersion` volgt de
+normale analyseflow. Onzekere cues worden weggelaten, event-cues vereisen
+voldoende confidence en dezelfde input levert altijd hetzelfde plan. Geavanceerde
+handmatige correctie is later optioneel, niet de eerste vereiste.
+
+Er komen geen custom waveform-overlays, native VirtualDJ-waveform-hacks of
+reverse-engineering. Hot Cues zijn DJ-preparation, navigatie en mixhulp;
+BeatBeam gebruikt dezelfde events voor onafhankelijke showbeslissingen. Geen
+van beide systemen krijgt een verborgen afhankelijkheid van het andere.
+
+## 13.5 Toekomstige acceptatiecriteria
+
+- MIX IN en MIX OUT zijn muzikaal bruikbaar; MAIN en BREAK zijn betekenisvol.
+- Beat- en maatplaatsing is exact wanneer de analyse betrouwbaar is.
+- Countdowns rond belangrijke events gebruiken passende 4-maten-intervallen en
+  vermijden dubbelen.
+- Deterministische prioriteit en slotbeperking bewaren de belangrijkste cues.
+- Lagere confidence leidt veilig tot minder cues, niet tot verzonnen precisie.
+- Cache-hits starten geen nieuwe zware analyse; gelijke input levert gelijk plan.
+- De VirtualDJ-workflow vereist zo weinig mogelijk handmatige voorbereiding.
+
+_Last updated: 2026-08-21_
