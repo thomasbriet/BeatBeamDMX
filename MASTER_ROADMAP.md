@@ -43,6 +43,8 @@ De bestaande `build_native_app.sh` developmentroute heeft een Python 3.14 `site-
 
 De phrase-quality-pass vond een systematische early-Outro-zwakte. SongAnalyzer heeft nu een conservatieve rescue voor aantoonbaar ondergesegmenteerde lange segmenten en positionele/sequentiële Outro-validatie. De eerste officiële heranalyse van de runtime-testtrack is technisch groen; menselijke muzikale runtimeacceptatie blijft open.
 
+Menselijke runtimeacceptatie identificeerde daarnaast dat scalar recurrence een duidelijke Chorus binnen een lang Mid-segment kon missen. SongAnalyzer bevat nu bar-aligned section similarity met niet-lokale 4/8/16-bar herhalingsparen, interne energie/onset/spectral-contourvergelijking en conservatieve herhaalde-sectiestart-evidence voor segmentation en native Chorus-classificatie. M23A blijft `BEZIG`: de bijgewerkte runtime vereist opnieuw menselijke muzikale acceptatie.
+
 ## M22A — Performancebaseline
 
 - Cold analysis: circa 6,212 s.
