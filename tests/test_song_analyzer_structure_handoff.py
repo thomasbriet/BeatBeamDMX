@@ -150,8 +150,8 @@ class SongAnalyzerStructureHandoffTests(unittest.TestCase):
                 "model": "SongAnalyzerRichAnalysis",
                 "energy_scale": "segment-normalized-rms-z-score",
                 "segments": [
-                    {"index": 0, "start_seconds": 0, "end_seconds": 16, "label": "Build", "level": "phrase", "energy": 0.2},
-                    {"index": 1, "start_seconds": 16, "end_seconds": 32, "label": "Drop", "level": "phrase", "energy": 1.1},
+                    {"index": 0, "start_seconds": 0, "end_seconds": 16, "label": "Build", "level": "phrase", "energy": 0.2, "start_bar": 1, "end_bar": 5},
+                    {"index": 1, "start_seconds": 16, "end_seconds": 32, "label": "Drop", "level": "phrase", "energy": 1.1, "start_bar": 5, "end_bar": 9},
                 ],
                 "events": [
                     {"type": "BUILD", "start_seconds": 0, "target_seconds": 16, "end_seconds": 16,
@@ -164,6 +164,7 @@ class SongAnalyzerStructureHandoffTests(unittest.TestCase):
             before = handoff.project(playback(TRACK, 8))
             self.assertEqual("BUILD", before["current_event"]["type"])
             self.assertEqual("DROP", before["next_event"]["type"])
+            self.assertEqual(2, before["next_event"]["bars_to_next"])
             self.assertEqual("DROP", handoff.project(playback(TRACK, 16))["current_event"]["type"])
 
     def test_ready_active_track_is_used_when_virtualdj_live_state_has_no_track_path(self):

@@ -564,6 +564,14 @@ class SongAnalyzerStructureHandoff:
                         rich = track.rich_segments[index]
                         if rich.start_seconds <= position <= rich.end_seconds:
                             result["rich_current"] = self._rich_segment_state(rich, position)
+                            next_event = result.get("next_event")
+                            if next_event and rich.start_bar is not None and rich.end_bar is not None \
+                                    and next_event.get("start_bar") is not None:
+                                span = max(1, rich.end_bar - rich.start_bar)
+                                progress = min(1.0, max(0.0, (position - rich.start_seconds) /
+                                    max(0.001, rich.end_seconds - rich.start_seconds)))
+                                current_bar = rich.start_bar + int(progress * span)
+                                next_event["bars_to_next"] = max(0, next_event["start_bar"] - current_bar)
                     if index:
                         result["previous"] = self._segment_state(track.segments[index - 1], position)
                     if index + 1 < len(track.segments):
