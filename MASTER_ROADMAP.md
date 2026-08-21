@@ -99,21 +99,67 @@ handoff en legacy/native diagnostics. Shadow toont de actuele observation plus
 de volledige actieve shadowstructuur; The Bausa - Magnetic bevat 9 observations
 in tijdvolgorde. Dit is observability-only.
 
-Eerste menselijke Magnetic-calibratie toont bij de Chorus-starts 38.797 s en
-112.645 s vergelijkbare onafhankelijke raw evidence: recurrence circa 0.95,
-hoge family salience, duidelijk entry contrast en zeer hoge boundary novelty.
-Dit is positief bewijs voor muzikaal relevante herhaling/contrast zonder
-canonical Chorus als input. Recurrence/family betekent niet automatisch Chorus;
-BuildMomentum blijft vrijwel unknown. `StructuralNovelty` moet verder worden
-onderscheiden als boundary/acoustic novelty versus structural/context evidence;
-de volledige shadowstructuur toont momenteel de barrange dubbel als kleine
-toekomstige UI-polish. Nog geen thresholds of eventclassifierwijziging.
+`GEREED` M24A-5A — menselijke runtime-PASS. `StructuralNovelty` is semantisch
+gecorrigeerd naar `BoundaryNovelty`, met exact dezelfde
+`EntryBoundary.Novelty`-waarde. Pre-native structural/context-diagnostics zijn
+additief en shadow-only beschikbaar: `StructuralContextChange`,
+`MembershipExitStrength`, `RepeatedSectionEnd`, `RecurrenceChange`,
+`StructuralRoute`, `StructuralEvidence` en `StructuralTargetBar`. `BarCount`
+wordt uit SongAnalyzer doorgegeven en BeatBeam toont bijvoorbeeld
+`bars 1–5 · 5 bars`, zonder dubbele barrange. Analyzerformules, boundaries en
+productieconsumptie zijn niet gewijzigd.
 
-Volgende actieve stap: `MUZIKALE SHADOW-CALIBRATIE` op een kleine
-representatieve trackset, met nadruk op trajectory/build evidence, boundary
-versus structural novelty, recurrence/family, entry/exit contrast en ontbrekende
-DropImpact-evidence. Daarna pas beoordelen welke signalen geschikt zijn voor
-ArrangementProfile, Rich Musical Events v2 en uiteindelijk Auto Show.
+`GEREED` M24A-5B — technische en menselijke runtime-PASS. `RelativeEnergy` is
+het gemiddelde van de bestaande trackrelatieve P10–P90 beat-RMS-normalisatie,
+bounded `[0,1]`, zonder classifier of threshold en met confidence 0. Bestaande
+`EnergyRise` is als signed raw diagnostic zichtbaar (laatste sectiederde minus
+eerste sectiederde `normalizedRms`) en is geen `BuildMomentum`. Voor Entry en
+Exit zijn waar beschikbaar `EnergyDelta`, `OnsetDelta` en `SilenceDelta`
+toegevoegd als onbegrensde post-minus-pre diagnostics; de bestaande absolute
+`EnergyChange`, `OnsetChange` en `SilenceChange` blijven ongewijzigd. `HarmonicDelta`
+is niet toegevoegd wegens ontbrekende eenduidige pre/post-producer.
+
+Vier-track shadowcalibratie op The Bausa — Magnetic, Prospa/Cloonee — Free Your
+Mind, Avicii — Levels en Calling (Extended Club Mix) bevestigt vijf onafhankelijke
+informatielagen:
+
+1. `Arrangement identity`: `RecurrenceStrength`, `FamilySalience`.
+2. `Local transition magnitude`: `EntryContrast`, `ExitContrast`, `BoundaryNovelty`.
+3. `Transition direction`: `EnergyDelta`, `OnsetDelta`, `SilenceDelta`.
+4. `State`: `RelativeEnergy`.
+5. `Structural departure/context`: `StructuralContextChange`,
+   `MembershipExitStrength`, `RepeatedSectionEnd`, `RecurrenceChange`,
+   `StructuralRoute`, `StructuralEvidence`.
+
+Recurrence, salience en boundary magnitude bepalen niet zelfstandig eventtype
+of event importance. Upward en downward transitions vereisen signed evidence;
+structural departure kan bestaan zonder grote acoustic boundary. `EnergyRise` is
+trajectory-evidence, maar niet gelijk aan momentum: toekomstige momentum kan
+zowel rising preparation als release/tension omvatten. `BuildMomentum`,
+`VocalEvidence` en `DropImpact` blijven unknown; `ArrivalImpact` is nog niet
+geïmplementeerd. Het generieke `ArrivalImpact`-concept blijft onderzoek, zonder
+formule of threshold; recurrence/salience zijn context, geen impactscore.
+
+De VirtualDJ lyrics/VocalEvidence-audit vond geen aantoonbare lokale lyric-
+timeline: `database.xml` bevat geen lyricdata en `extra.db`/`Cache/cache.db`
+waren gelockt; locks zijn niet omzeild. Trackidentiteit via exact pad en
+bestandsgrootte is wel mogelijk. VirtualDJ-lyrics blijven uitsluitend een
+conditionele development-only externe calibratiereferentie, nooit verplichte
+SongAnalyzer-input. De bestaande `VoiceInstrumental`-classifier produceert
+vóór `aggregate()` tijdelijke temporele output die momenteel niet wordt
+bewaard; dat is toekomstig onderzoek, zonder nieuwe Essentia-feature.
+
+Baseline blijft `analysis_version = m14-v5` en
+`phrase_analysis_version = phrase-analysis-v17`; M23A blijft `BEZIG` en v17
+blijft de veilige productionele fallback. Canonical boundaries/sections/
+confidence, Rich Musical Events, Auto Show, AnalysisLibrary en cache keys zijn
+ongewijzigd. M24A-5A/5B blijven shadow/diagnostics-only.
+
+Volgende actieve ontwikkelstap: `M24A-5C — Momentum / Arrival semantics`.
+`STATUS = NOG NIET GESTART`; vandaag wordt M24A-5C niet geïmplementeerd en
+worden geen nieuwe tracks geanalyseerd. Eerst shadow-only ontwerpen hoe
+momentum, transition direction en arrival impact onafhankelijk blijven; pas
+daarna Rich Musical Events v2 en Auto Show overwegen.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
