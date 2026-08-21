@@ -443,6 +443,7 @@ struct DebugAnalysisState: Decodable {
     let phraseAnalysisVersion: String?
     let model: String?
     let segment: DebugSegment?
+    let semanticSection: DebugSemanticSection?
     let richCurrent: DebugRichSegment?
     let currentEvent: DebugRichEvent?
     let nextEvent: DebugRichEvent?
@@ -458,11 +459,17 @@ struct DebugRichAnalysis: Decodable {
     let segmentCount: Int?
     let eventCount: Int?
     let segments: [DebugTrackStructureSegment]?
+    let sections: [DebugSemanticSection]?
     let events: [DebugTrackStructureEvent]?
 }
 struct DebugTrackStructureSegment: Decodable {
     let index: Int?; let startSeconds: Double?; let endSeconds: Double?; let label: String?
     let level: String?; let energy: Double?; let confidence: Double?; let startBar: Int?; let endBar: Int?
+}
+struct DebugSemanticSection: Decodable {
+    let index: Int?; let startSeconds: Double?; let endSeconds: Double?; let role: String?
+    let occurrence: Int?; let familyId: String?; let energy: Double?; let confidence: Double?
+    let startBar: Int?; let endBar: Int?; let sourcePhraseCount: Int?
 }
 struct DebugTrackStructureEvent: Decodable {
     let type: String?; let startSeconds: Double?; let targetSeconds: Double?; let endSeconds: Double?
@@ -6921,7 +6928,8 @@ struct DebugInspectorView: View {
                         row("Analysis version", model.debugState?.analysis?.analysisVersion)
                         row("Phrase analysis", model.debugState?.analysis?.phraseAnalysisVersion)
                         row("Model", model.debugState?.analysis?.model)
-                        row("Segment", model.debugState?.analysis?.segment?.label)
+                        row("Semantic section", model.debugState?.analysis?.semanticSection.map { "\($0.role ?? "—") \($0.occurrence.map(String.init) ?? "—")" })
+                        row("Native segment", model.debugState?.analysis?.segment?.label)
                         row("Energy z-score", signed(model.debugState?.analysis?.richCurrent?.energy))
                         row("Auto Show modifier", signed(model.debugState?.analysis?.energyModifier))
                         row("Confidence", model.debugState?.analysis?.richCurrent?.confidence.map { String(format: "%.0f", $0) })
@@ -7016,7 +7024,16 @@ struct DebugInspectorView: View {
     @ViewBuilder
     private var fullTrackStructure: some View {
         let rich = model.debugState?.handoff?.richAnalysis
-        if let segments = rich?.segments, !segments.isEmpty {
+        if let sections = rich?.sections, !sections.isEmpty {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(sections.enumerated()), id: \.offset) { offset, section in
+                        structureSemanticSectionRow(section, fallbackIndex: offset, nativeSegments: rich?.segments ?? [])
+                    }
+                    structureEvents(rich?.events)
+                }.padding(.vertical, 5)
+            }.frame(maxHeight: 280)
+        } else if let segments = rich?.segments, !segments.isEmpty {
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(segments.enumerated()), id: \.offset) { offset, segment in
@@ -7041,6 +7058,34 @@ struct DebugInspectorView: View {
                 .foregroundStyle(BeatBeamPalette.secondaryText)
                 .padding(.vertical, 5)
         }
+    }
+
+    @ViewBuilder
+    private func structureEvents(_ events: [DebugTrackStructureEvent]?) -> some View {
+        if let events, !events.isEmpty {
+            Divider().padding(.vertical, 3)
+            Text("Rich Musical Events").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(BeatBeamPalette.secondaryText)
+            ForEach(Array(events.enumerated()), id: \.offset) { offset, event in
+                structureEventRow(event, fallbackIndex: offset)
+            }
+        }
+    }
+
+    private func structureSemanticSectionRow(_ section: DebugSemanticSection, fallbackIndex: Int, nativeSegments: [DebugTrackStructureSegment]) -> some View {
+        let currentIndex = model.debugState?.analysis?.semanticSection?.index
+        let isCurrent = section.index == currentIndex || (section.index == nil && fallbackIndex == currentIndex)
+        let native = nativeSegments.first { ($0.startSeconds ?? .infinity) < (section.endSeconds ?? -.infinity) && ($0.endSeconds ?? -.infinity) > (section.startSeconds ?? .infinity) }
+        let bars = "Bar \(section.startBar.map(String.init) ?? "—")–\(section.endBar.map(String.init) ?? "—")"
+        let times = "\(formatDebugClock(milliseconds(section.startSeconds)))–\(formatDebugClock(milliseconds(section.endSeconds)))"
+        let family = section.familyId.map { " · \($0)" } ?? ""
+        return VStack(alignment: .leading, spacing: 2) {
+            Text("\(bars)   \(times)")
+            Text("\(section.role ?? "—") \(section.occurrence.map(String.init) ?? "—") · Conf \(section.confidence.map { String(format: "%.0f", $0) } ?? "—")\(family)")
+            if let native { Text("Native: \(native.label ?? "—") · Conf \(native.confidence.map { String(format: "%.0f", $0) } ?? "—")") }
+        }
+        .font(.system(size: 11, design: .monospaced)).foregroundStyle(isCurrent ? Color.black : Color.white)
+        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8).padding(.vertical, 5)
+        .background(isCurrent ? BeatBeamPalette.brandCyan : BeatBeamPalette.mutedBackground).clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
     private func structureSegmentRow(_ segment: DebugTrackStructureSegment, fallbackIndex: Int) -> some View {

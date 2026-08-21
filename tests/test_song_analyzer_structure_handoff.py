@@ -171,6 +171,23 @@ class SongAnalyzerStructureHandoffTests(unittest.TestCase):
             self.assertEqual("BUILD", before["rich_analysis"]["events"][0]["type"])
             self.assertEqual("DROP", before["rich_analysis"]["events"][1]["type"])
 
+    def test_v2_semantic_sections_are_projected_and_legacy_remains_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            payload["schema_version"] = 2
+            payload["tracks"][0]["rich_analysis"] = {
+                "model": "SongAnalyzerRichAnalysis", "energy_scale": "segment-normalized-rms-z-score",
+                "segments": [{"index": 0, "start_seconds": 0, "end_seconds": 32, "label": "Phrase", "level": "phrase", "energy": 0.2}],
+                "sections": [{"index": 0, "start_seconds": 0, "end_seconds": 32, "role": "PreChorus", "occurrence": 1, "family_id": "family-001", "confidence": 86, "start_bar": 1, "end_bar": 17, "source_phrase_count": 2}],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            state = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(playback(TRACK, 12))
+            self.assertEqual("PreChorus", state["semantic_section"]["role"])
+            self.assertEqual("family-001", state["semantic_section"]["family_id"])
+            self.assertEqual(1, len(state["rich_analysis"]["sections"]))
+            self.assertEqual("Phrase", state["rich_current"]["label"])
+
     def test_ready_active_track_is_used_when_virtualdj_live_state_has_no_track_path(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "handoff.json"

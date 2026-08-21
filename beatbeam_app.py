@@ -138,6 +138,20 @@ class SongAnalyzerRichEvent:
     target_bar: Optional[int] = None
     confidence: Optional[float] = None
 
+@dataclass(frozen=True)
+class SongAnalyzerSemanticSection:
+    index: int
+    start_seconds: float
+    end_seconds: float
+    role: str
+    occurrence: int
+    family_id: Optional[str] = None
+    energy: Optional[float] = None
+    confidence: Optional[float] = None
+    start_bar: Optional[int] = None
+    end_bar: Optional[int] = None
+    source_phrase_count: Optional[int] = None
+
 
 @dataclass(frozen=True)
 class SongAnalyzerStructureTrack:
@@ -153,6 +167,7 @@ class SongAnalyzerStructureTrack:
     rich_energy_scale: Optional[str] = None
     rich_segments: tuple = ()
     rich_events: tuple = ()
+    semantic_sections: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -272,6 +287,7 @@ class SongAnalyzerStructureHandoff:
             rich_energy_scale = None
             rich_segments = ()
             rich_events = ()
+            semantic_sections = ()
             rich = track_raw.get("rich_analysis")
             if rich is not None:
                 if schema != SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION or not isinstance(rich, dict):
@@ -324,6 +340,43 @@ class SongAnalyzerStructureHandoff:
                         event_raw["type"], start, target, end, event_raw.get("start_bar"),
                         event_raw.get("target_bar"), confidence))
                 rich_events = tuple(event_values)
+                sections_raw = rich.get("sections")
+                if sections_raw is not None:
+                    if not isinstance(sections_raw, list):
+                        raise ValueError("rich_analysis.sections is invalid")
+                    section_values = []
+                    previous_section_end = -math.inf
+                    roles = {"Intro", "Verse", "PreChorus", "Chorus", "Bridge", "Outro"}
+                    for expected_index, section_raw in enumerate(sections_raw):
+                        if not isinstance(section_raw, dict) or section_raw.get("index") != expected_index:
+                            raise ValueError("semantic section index is invalid")
+                        start = cls._number(section_raw.get("start_seconds"), "semantic section.start_seconds", 0.0)
+                        end = cls._number(section_raw.get("end_seconds"), "semantic section.end_seconds", 0.0)
+                        role = cls._optional_text(section_raw.get("role"), "semantic section.role")
+                        occurrence = section_raw.get("occurrence")
+                        if role not in roles or end <= start or start < previous_section_end - 1e-6 \
+                                or isinstance(occurrence, bool) or not isinstance(occurrence, int) or occurrence < 1:
+                            raise ValueError("semantic section is invalid")
+                        confidence = section_raw.get("confidence")
+                        if confidence is not None:
+                            confidence = cls._number(confidence, "semantic section.confidence", 0.0)
+                            if confidence > 100.0:
+                                raise ValueError("semantic section.confidence is invalid")
+                        energy = section_raw.get("energy")
+                        if energy is not None:
+                            energy = cls._number(energy, "semantic section.energy")
+                        family_id = cls._optional_text(section_raw.get("family_id"), "semantic section.family_id")
+                        start_bar = section_raw.get("start_bar")
+                        end_bar = section_raw.get("end_bar")
+                        for value, name, minimum in ((start_bar, "start_bar", 1), (end_bar, "end_bar", 1)):
+                            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < minimum):
+                                raise ValueError(f"semantic section.{name} is invalid")
+                        source_count = section_raw.get("source_phrase_count")
+                        if source_count is not None and (isinstance(source_count, bool) or not isinstance(source_count, int) or source_count < 1):
+                            raise ValueError("semantic section.source_phrase_count is invalid")
+                        section_values.append(SongAnalyzerSemanticSection(expected_index, start, end, role, occurrence, family_id, energy, confidence, start_bar, end_bar, source_count))
+                        previous_section_end = end
+                    semantic_sections = tuple(section_values)
             tracks[canonical_path] = SongAnalyzerStructureTrack(
                 canonical_path,
                 cls._optional_text(track_raw.get("content_sha256"), "content_sha256"),
@@ -332,7 +385,7 @@ class SongAnalyzerStructureHandoff:
                 cls._optional_text(track_raw.get("phrase_analysis_version"), "phrase_analysis_version"),
                 availability,
                 model,
-                tuple(segments), rich_model, rich_energy_scale, rich_segments, rich_events,
+                tuple(segments), rich_model, rich_energy_scale, rich_segments, rich_events, semantic_sections,
             )
         active_raw = raw.get("active_track")
         active = None
@@ -476,6 +529,7 @@ class SongAnalyzerStructureHandoff:
                 "model": None,
                 "active_track": None,
                 "rich_analysis": None,
+                "semantic_section": None,
                 "rich_current": None,
                 "current_event": None,
                 "next_event": None,
@@ -543,6 +597,15 @@ class SongAnalyzerStructureHandoff:
                          "end_bar": segment.end_bar}
                         for segment in track.rich_segments
                     ],
+                    "sections": [
+                        {"index": section.index, "start_seconds": section.start_seconds,
+                         "end_seconds": section.end_seconds, "role": section.role,
+                         "occurrence": section.occurrence, "family_id": section.family_id,
+                         "energy": section.energy, "confidence": section.confidence,
+                         "start_bar": section.start_bar, "end_bar": section.end_bar,
+                         "source_phrase_count": section.source_phrase_count}
+                        for section in track.semantic_sections
+                    ],
                     "events": [
                         {"type": event.type, "start_seconds": event.start_seconds,
                          "target_seconds": event.target_seconds, "end_seconds": event.end_seconds,
@@ -558,6 +621,17 @@ class SongAnalyzerStructureHandoff:
                 result["projection_status"] = "position_unavailable"
                 return result
             position = float(position)
+            for section in track.semantic_sections:
+                if section.start_seconds <= position < section.end_seconds or (section == track.semantic_sections[-1] and position == section.end_seconds):
+                    result["semantic_section"] = {
+                        "index": section.index, "start_seconds": section.start_seconds,
+                        "end_seconds": section.end_seconds, "role": section.role,
+                        "occurrence": section.occurrence, "family_id": section.family_id,
+                        "energy": section.energy, "confidence": section.confidence,
+                        "start_bar": section.start_bar, "end_bar": section.end_bar,
+                        "source_phrase_count": section.source_phrase_count,
+                    }
+                    break
             active_events = [event for event in track.rich_events
                              if event.start_seconds <= position <= (event.end_seconds or event.target_seconds or event.start_seconds)]
             upcoming_events = [event for event in track.rich_events if event.start_seconds > position]
@@ -14899,6 +14973,7 @@ def beatbeam_debug_state(osc_state=None):
             "phrase_analysis_version": projection.get("phrase_analysis_version"),
             "model": projection.get("model"),
             "segment": current or None,
+            "semantic_section": projection.get("semantic_section"),
             "rich_current": rich or None,
             "current_event": current_event or None,
             "next_event": next_event or None,
