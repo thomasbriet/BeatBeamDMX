@@ -111,6 +111,7 @@ let backendLogURL = FileManager.default.temporaryDirectory.appendingPathComponen
 private let stageMapAspectRatio: CGFloat = 16.0 / 9.0
 private let requiredBackendSchemaVersion = 4
 private let defaultBackendOscPort = beatBeamBackendOscPort
+private let nativeDebugUIEnabled = ProcessInfo.processInfo.environment["BEATBEAM_DEBUG_UI"] != "0"
 
 private func defaultRekordboxBridgeScriptPath() -> String {
     let fallback = (URL(fileURLWithPath: NSHomeDirectory()) as URL)
@@ -377,6 +378,99 @@ struct AppState: Decodable {
     let source: SourceState
     let transport: TransportState
     let liveUi: LiveUiState?
+    let developerStructureBehavior: DeveloperStructureBehaviorState?
+    let debug: DebugState?
+}
+
+struct DebugState: Decodable {
+    let virtualdj: DebugVirtualDjState?
+    let activeTrack: DebugActiveTrack?
+    let analysis: DebugAnalysisState?
+    let handoff: DebugHandoffState?
+    let bridgeDiagnostics: DebugBridgeDiagnostics?
+}
+
+struct DebugVirtualDjState: Decodable {
+    let transportSource: String?; let activeDeck: Int?; let trackPath: String?; let bridgeStatus: String?
+    let playing: Bool?; let positionMilliseconds: Int?; let positionAgeMilliseconds: Int?; let transportState: String?
+}
+struct DebugActiveTrack: Decodable {
+    let canonicalPath: String
+    let deck: Int
+    let status: String
+    let generation: Int
+    let activatedAtUnixMilliseconds: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case canonicalPath
+        case filePath
+        case deck
+        case status
+        case generation
+        case activatedAtUnixMilliseconds
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        canonicalPath = try container.decodeIfPresent(String.self, forKey: .canonicalPath)
+            ?? container.decode(String.self, forKey: .filePath)
+        deck = try container.decode(Int.self, forKey: .deck)
+        status = try container.decode(String.self, forKey: .status)
+        generation = try container.decode(Int.self, forKey: .generation)
+        activatedAtUnixMilliseconds = try container.decodeIfPresent(Int.self, forKey: .activatedAtUnixMilliseconds)
+    }
+}
+struct DebugAnalysisState: Decodable { let schemaVersion: Int?; let model: String?; let segment: DebugSegment?; let richCurrent: DebugRichSegment?; let energyModifier: Double? }
+struct DebugSegment: Decodable { let index: Int?; let label: String?; let startSeconds: Double?; let endSeconds: Double?; let confidence: Double? }
+struct DebugRichSegment: Decodable { let index: Int?; let label: String?; let level: String?; let energy: Double?; let confidence: Double? }
+struct DebugHandoffState: Decodable { let trackMatch: String?; let availability: String?; let richAnalysis: DebugRichAnalysis?; let fallbackReason: String?; let effectiveSource: String?; let selectedSource: String? }
+struct DebugRichAnalysis: Decodable { let model: String?; let energyScale: String?; let segmentCount: Int? }
+struct DebugBridgeDiagnostics: Decodable { let status: String?; let error: String?; let diagnostics: DebugBridgeDetails? }
+struct DebugBridgeDetails: Decodable { let playlistWatcher: DebugPlaylistWatcher?; let analysisQueue: DebugQueue?; let activeTrack: DebugActiveTrack?; let nativePlugin: DebugNativePlugin?; let control: DebugBridgeControl? }
+struct DebugPlaylistWatcher: Decodable { let enabled: Bool?; let playlistDirectory: String?; let playlistCount: Int?; let discoveredTrackCount: Int?; let cacheHitsThisSession: Int?; let lastReconcileUtc: String?; let lastError: String? }
+struct DebugQueue: Decodable { let capacity: Int?; let queuedNormal: Int?; let queuedHigh: Int?; let running: Int?; let analyzing: Int?; let completedThisSession: Int?; let failedThisSession: Int?; let oldestQueuedMilliseconds: Int? }
+struct DebugNativePlugin: Decodable {
+    let poller: DebugNativePoller?
+    let selectors: DebugNativeSelectors?
+    let candidates: [DebugNativeCandidate]?
+    let selection: DebugNativeSelection?
+    let ipc: DebugNativeIpc?
+    let response: DebugNativeResponse?
+    let recovery: DebugNativeRecovery?
+}
+struct DebugNativePoller: Decodable { let alive: Bool?; let pollCounter: Int?; let lastPollUnixMilliseconds: Int? }
+struct DebugNativeSelectors: Decodable {
+    let pluginDeckQuerySucceeded: Bool?; let pluginDeckRaw: Double?; let pluginDeck: Int?
+    let leftDeckQuerySucceeded: Bool?; let leftDeckRaw: Double?; let leftDeck: Int?
+    let rightDeckQuerySucceeded: Bool?; let rightDeckRaw: Double?; let rightDeck: Int?
+}
+struct DebugNativeCandidate: Decodable {
+    let deck: Int?; let sources: [String]?; let playQuerySucceeded: Bool?; let playing: Bool?
+    let filePathQuerySucceeded: Bool?; let filePath: String?; let filePathExists: Bool?; let relevant: Bool?
+}
+struct DebugNativeSelection: Decodable {
+    let previousSelectedDeck: Int?; let selectedDeck: Int?; let selectedFilePath: String?; let reason: String?; let noSelectionReason: String?
+}
+struct DebugNativeIpc: Decodable {
+    let lastAction: String?; let lastDeck: Int?; let lastFilePath: String?; let lastSendSucceeded: Bool?; let lastError: String?; let lastSentUnixMilliseconds: Int?
+}
+struct DebugNativeResponse: Decodable { let received: Bool?; let valid: Bool?; let success: Bool?; let accepted: Bool?; let status: String?; let errorCode: String?; let errorMessage: String?; let jobId: String? }
+struct DebugNativeRecovery: Decodable { let bridgeHealth: String?; let resyncPending: Bool? }
+struct DebugBridgeControl: Decodable {
+    let type: String?; let requestId: String?; let protocolVersion: Int?; let deck: Int?; let filePath: String?
+    let valid: Bool?; let validationError: String?; let accepted: Bool?; let cacheState: String?
+    let requestedGeneration: Int?; let resultStatus: String?; let resultGeneration: Int?; let resultFilePath: String?
+    let processingError: String?; let lastMutation: DebugActiveTrackMutation?
+    let activateReceived: Int?; let deactivateReceived: Int?; let activateSucceeded: Int?; let activateFailed: Int?
+    let receivedUtc: String?
+}
+struct DebugActiveTrackMutation: Decodable {
+    let type: String?; let oldPath: String?; let oldStatus: String?; let oldGeneration: Int?
+    let newPath: String?; let newStatus: String?; let newGeneration: Int?; let reason: String?; let timestampUtc: String?
+}
+
+struct DeveloperStructureBehaviorState: Decodable {
+    let selectedSource: String
 }
 
 struct LiveUiState: Decodable {
@@ -1828,6 +1922,14 @@ struct TransportUpdateRequest: Encodable {
     let idleAnimationEnabled: Bool
 }
 
+struct StructureBehaviorUpdateRequest: Encodable {
+    let source: String
+}
+
+struct StructureBehaviorUpdateResponse: Decodable {
+    let selectedSource: String
+}
+
 struct AutoShowUpdateBody: Encodable {
     let enabled: Bool
     let style: String
@@ -2244,6 +2346,7 @@ final class AppModel: ObservableObject {
     @Published var transportTapLocked = false
     @Published var transportExternalAvailable = false
     @Published var transportStatusText = "External OSC actief"
+    @Published var structureBehaviorSource = "legacy"
     @Published var liveAudioDevices: [AudioInputDevice] = []
     @Published var selectedLiveAudioDeviceID: UInt32 = 0 {
         didSet { saveSelectedLiveAudioDeviceID() }
@@ -2312,6 +2415,7 @@ final class AppModel: ObservableObject {
     @Published var remoteURLText = "-"
     @Published var remoteStatusText = "Remote niet beschikbaar"
     @Published var errorText = ""
+    @Published var debugState: DebugState?
 
     private var baseURL: URL {
         URL(string: "http://127.0.0.1:\(beatBeamBackendPort)")!
@@ -2389,6 +2493,10 @@ final class AppModel: ObservableObject {
     func openRemoteURL() {
         guard let url = URL(string: remoteURLText), url.scheme?.hasPrefix("http") == true else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    func refreshDebugState() {
+        Task { try? await refreshState() }
     }
 
     func copyRemoteURL() {
@@ -3582,6 +3690,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func setStructureBehaviorSource(_ source: String) {
+        let normalized = source == "song_analyzer" ? "song_analyzer" : "legacy"
+        structureBehaviorSource = normalized
+        Task {
+            do {
+                let state: StructureBehaviorUpdateResponse = try await post(
+                    "/api/developer/structure-behavior",
+                    body: StructureBehaviorUpdateRequest(source: normalized),
+                    as: StructureBehaviorUpdateResponse.self
+                )
+                structureBehaviorSource = state.selectedSource == "song_analyzer" ? "song_analyzer" : "legacy"
+                errorText = ""
+            } catch {
+                structureBehaviorSource = "legacy"
+                errorText = "Structuurbron wijzigen mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
     nonisolated private func bridgeCanUsePasswordlessSudo(scriptPath: String, oscDestination: String) -> Bool {
         guard !scriptPath.isEmpty else { return false }
         let canStart = runSystemProcess("/usr/bin/sudo", ["-n", "-l", scriptPath, oscDestination]).ok
@@ -3825,6 +3952,9 @@ final class AppModel: ObservableObject {
         transportTapLocked = state.transport.tapLocked
         transportExternalAvailable = state.transport.externalAvailable
         transportStatusText = transportResolvedLabel(for: state.transport.resolvedMode)
+        debugState = state.debug
+        structureBehaviorSource = state.developerStructureBehavior?.selectedSource == "song_analyzer"
+            ? "song_analyzer" : "legacy"
         slotPreviews = state.dmx.slotPreviews
         dmxSlotOrder = state.dmx.slotOrder
         dmxSlotRanges = state.dmx.slotRanges
@@ -5327,6 +5457,19 @@ struct ContentView: View {
 
             Spacer(minLength: 12)
 
+            if nativeDebugUIEnabled {
+                Button {
+                    model.refreshDebugState()
+                    openWindow(id: "debug")
+                } label: {
+                    Label("Debug", systemImage: "ladybug")
+                        .font(.system(size: 14, weight: .semibold))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                }
+                .buttonStyle(.plain)
+            }
+
             ForEach(UtilityPanel.allCases) { panel in
                 Button {
                     utilityPanel = utilityPanel == panel ? nil : panel
@@ -6455,6 +6598,21 @@ struct TransportControlPanel: View {
             }
 
             HStack(spacing: 10) {
+                Text("Structuurbron")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(BeatBeamPalette.secondaryText)
+                Picker("Structuurbron", selection: Binding(
+                    get: { model.structureBehaviorSource },
+                    set: { model.setStructureBehaviorSource($0) }
+                )) {
+                    Text("Legacy").tag("legacy")
+                    Text("SongAnalyzer").tag("song_analyzer")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            HStack(spacing: 10) {
                 Menu {
                     ForEach(phraseOptions, id: \.value) { option in
                         Button(option.label) {
@@ -6685,6 +6843,142 @@ struct TransportModePill: View {
                 )
         }
         .buttonStyle(.plain)
+    }
+}
+
+struct DebugInspectorView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Debug")
+                    .font(.title2.bold())
+                Spacer()
+                Button("Vernieuwen") { model.refreshDebugState() }
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    debugCard("Live / VirtualDJ") {
+                        row("Transport", model.debugState?.virtualdj?.transportSource)
+                        row("Bridge", model.debugState?.virtualdj?.bridgeStatus)
+                        row("Deck", model.debugState?.virtualdj?.activeDeck.map(String.init))
+                        row("Track", model.debugState?.activeTrack?.canonicalPath ?? model.debugState?.virtualdj?.trackPath)
+                        row("Playing", model.debugState?.virtualdj?.playing.map { $0 ? "Ja" : "Nee" })
+                        row("Position", model.debugState?.virtualdj?.positionMilliseconds.map { "\($0) ms" })
+                        row("Position age", model.debugState?.virtualdj?.positionAgeMilliseconds.map { "\($0) ms" })
+                        row("Live state", model.debugState?.virtualdj?.transportState)
+                        row("Status", model.debugState?.activeTrack?.status)
+                        row("Generation", model.debugState?.activeTrack.map { String($0.generation) })
+                        row("Activated", model.debugState?.activeTrack?.activatedAtUnixMilliseconds.map { "\($0) ms" })
+                    }
+                    debugCard("Analyse") {
+                        row("Schema", model.debugState?.analysis?.schemaVersion.map { "v\($0)" })
+                        row("Model", model.debugState?.analysis?.model)
+                        row("Segment", model.debugState?.analysis?.segment?.label)
+                        row("Energy z-score", signed(model.debugState?.analysis?.richCurrent?.energy))
+                        row("Auto Show modifier", signed(model.debugState?.analysis?.energyModifier))
+                        row("Confidence", model.debugState?.analysis?.richCurrent?.confidence.map { String(format: "%.0f", $0) })
+                    }
+                    debugCard("Queue / Cache / Playlist") {
+                        let diag = model.debugState?.bridgeDiagnostics?.diagnostics
+                        row("Queue", diag?.analysisQueue?.capacity.map { "\(diag?.analysisQueue?.queuedNormal ?? 0) NORMAL · \(diag?.analysisQueue?.queuedHigh ?? 0) HIGH / \($0)" })
+                        row("Running", diag?.analysisQueue?.running.map(String.init))
+                        row("Completed / failed", diag.map { "\($0.analysisQueue?.completedThisSession ?? 0) / \($0.analysisQueue?.failedThisSession ?? 0)" })
+                        row("Oldest queued", diag?.analysisQueue?.oldestQueuedMilliseconds.map { "\($0) ms" })
+                        row("Cache hits", diag?.playlistWatcher?.cacheHitsThisSession.map(String.init))
+                        row("Playlist", diag?.playlistWatcher?.playlistCount.map { "\($0) playlists · \(diag?.playlistWatcher?.discoveredTrackCount ?? 0) tracks" })
+                    }
+                    debugCard("Handoff / BeatBeam") {
+                        row("Track match", model.debugState?.handoff?.trackMatch)
+                        row("Availability", model.debugState?.handoff?.availability)
+                        row("Rich analysis", model.debugState?.handoff?.richAnalysis == nil ? "Nee" : "Ja")
+                        row("Rich current", model.debugState?.analysis?.richCurrent == nil ? "Nee" : "Ja")
+                        row("Source", model.debugState?.handoff?.selectedSource)
+                        row("Fallback", model.debugState?.handoff?.fallbackReason)
+                    }
+                    debugCard("Native VDJ Plugin") {
+                        let native = model.debugState?.bridgeDiagnostics?.diagnostics?.nativePlugin
+                        row("Poller", native?.poller?.alive.map { $0 ? "alive" : "stopped" })
+                        row("Poll count", native?.poller?.pollCounter.map(String.init))
+                        row("Last poll", native?.poller?.lastPollUnixMilliseconds.map { "\($0) ms" })
+                        row("Plugin deck", selector(native?.selectors?.pluginDeck, native?.selectors?.pluginDeckRaw, native?.selectors?.pluginDeckQuerySucceeded))
+                        row("Left deck", selector(native?.selectors?.leftDeck, native?.selectors?.leftDeckRaw, native?.selectors?.leftDeckQuerySucceeded))
+                        row("Right deck", selector(native?.selectors?.rightDeck, native?.selectors?.rightDeckRaw, native?.selectors?.rightDeckQuerySucceeded))
+                        if let candidates = native?.candidates, !candidates.isEmpty {
+                            ForEach(Array(candidates.enumerated()), id: \.offset) { _, candidate in
+                                row("Deck \(candidate.deck.map(String.init) ?? "—")", "\(candidate.sources?.joined(separator: " / ") ?? "unknown") · play \(bool(candidate.playing)) · path \(candidate.filePath ?? "empty") · relevant \(bool(candidate.relevant))")
+                            }
+                        } else {
+                            row("Candidates", native == nil ? nil : "none")
+                        }
+                        row("Selected", native?.selection?.selectedDeck.map { "deck \($0) · \(native?.selection?.selectedFilePath ?? "")" })
+                        row("Selection reason", native?.selection?.reason)
+                        row("No-selection reason", native?.selection?.noSelectionReason)
+                        row("Last action", native?.ipc?.lastAction)
+                        row("Send result", native?.ipc?.lastSendSucceeded.map(bool))
+                        row("Last error", native?.ipc?.lastError)
+                        row("Response", native?.response?.status.map { "\($0) / \(bool(native?.response?.success))" })
+                        row("Response error", native?.response?.errorMessage ?? native?.response?.errorCode)
+                        row("Bridge / resync", native?.recovery.map { "\($0.bridgeHealth ?? "—") / \(bool($0.resyncPending))" })
+                    }
+                    debugCard("Bridge Control") {
+                        let control = model.debugState?.bridgeDiagnostics?.diagnostics?.control
+                        row("Last received", control?.type)
+                        row("Request ID", control?.requestId)
+                        row("Deck", control?.deck.map(String.init))
+                        row("Track", control?.filePath)
+                        row("Valid", control?.valid.map(bool))
+                        row("Validation error", control?.validationError)
+                        row("Accepted", control?.accepted.map(bool))
+                        row("Cache", control?.cacheState)
+                        row("Requested generation", control?.requestedGeneration.map(String.init))
+                        row("Result", control?.resultStatus.map { "\($0) / \(control?.resultGeneration.map(String.init) ?? "—")" })
+                        row("Activate received", control?.activateReceived.map(String.init))
+                        row("Activate success / failed", control.map { "\($0.activateSucceeded ?? 0) / \($0.activateFailed ?? 0)" })
+                        row("Deactivate received", control?.deactivateReceived.map(String.init))
+                        row("Last mutation", control?.lastMutation?.type)
+                        row("Mutation reason", control?.lastMutation?.reason)
+                        row("Mutation timestamp", control?.lastMutation?.timestampUtc)
+                        row("Processing error", control?.processingError)
+                    }
+                }
+            }
+        }
+        .padding(20)
+        .onAppear { model.refreshDebugState() }
+    }
+
+    private func selector(_ deck: Int?, _ raw: Double?, _ succeeded: Bool?) -> String? {
+        guard let succeeded else { return nil }
+        return "\(deck.map(String.init) ?? "—") (raw \(raw.map { String(format: "%.0f", $0) } ?? "—"), \(succeeded ? "ok" : "failed"))"
+    }
+
+    private func bool(_ value: Bool?) -> String { value == true ? "yes" : value == false ? "no" : "—" }
+
+    private func debugCard<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title).font(.headline)
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(BeatBeamPalette.raisedGradient)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func row(_ label: String, _ value: String?) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).foregroundStyle(.secondary).frame(width: 150, alignment: .leading)
+            Text(value?.isEmpty == false ? value! : "—").textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 12, design: .monospaced))
+    }
+
+    private func signed(_ value: Double?) -> String? {
+        guard let value, value.isFinite else { return nil }
+        return String(format: "%+.2f", value)
     }
 }
 
@@ -15616,5 +15910,13 @@ struct BeatBeamDMXNativeApp: App {
                 .preferredColorScheme(.dark)
         }
         .defaultSize(width: 1280, height: 800)
+
+        Window("BeatBeam Debug", id: "debug") {
+            DebugInspectorView()
+                .environmentObject(model)
+                .preferredColorScheme(.dark)
+        }
+        .defaultSize(width: 760, height: 680)
+        .windowResizability(.contentSize)
     }
 }

@@ -71,10 +71,21 @@ MAXIMUM_VIRTUALDJ_BEAT_PULSE_LATE_DISPATCH_MILLISECONDS = 100
 DEFAULT_VIRTUALDJ_PLAYBACK_STATE_PATH = (
     Path.home() / "Library/Application Support/MusicAnalyzer/virtualdj-playback.json"
 )
-SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION = 1
+SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION = 2
+SONG_ANALYZER_STRUCTURE_LEGACY_SCHEMA_VERSION = 1
+SONG_ANALYZER_RICH_ANALYSIS_MODEL = "SongAnalyzerRichAnalysis"
+SONG_ANALYZER_ENERGY_SCALE = "segment-normalized-rms-z-score"
+# The source energy is a normalized-RMS z-score, not absolute loudness. Its
+# effect is deliberately a small bounded modifier to the existing Auto Show.
+SONG_ANALYZER_ENERGY_Z_SCORE_MODIFIER_PER_UNIT = 0.04
+SONG_ANALYZER_MAX_ENERGY_MODIFIER = 0.08
 DEFAULT_SONG_ANALYZER_STRUCTURE_PATH = Path(
     os.environ.get("BEATBEAM_SONG_ANALYZER_STRUCTURE_PATH")
     or (Path.home() / "Library/Application Support/MusicAnalyzer/beatbeam-structure-plan.json")
+)
+DEFAULT_SONG_ANALYZER_BRIDGE_SOCKET_PATH = Path(
+    os.environ.get("BEATBEAM_SONG_ANALYZER_BRIDGE_SOCKET_PATH")
+    or (Path.home() / "Library/Application Support/MusicAnalyzer/VirtualDJ/bridge.sock")
 )
 FIXTURE_LIBRARY = load_fixture_profiles()
 SERVER_HOST = "127.0.0.1"
@@ -103,6 +114,21 @@ class SongAnalyzerStructureSegment:
 
 
 @dataclass(frozen=True)
+class SongAnalyzerRichSegment:
+    index: int
+    start_seconds: float
+    end_seconds: float
+    label: str
+    level: str
+    energy: float
+    confidence: Optional[float] = None
+    start_beat: Optional[int] = None
+    end_beat: Optional[int] = None
+    start_bar: Optional[int] = None
+    end_bar: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class SongAnalyzerStructureTrack:
     canonical_path: str
     content_sha256: Optional[str]
@@ -112,6 +138,18 @@ class SongAnalyzerStructureTrack:
     availability: str
     model: str
     segments: tuple
+    rich_model: Optional[str] = None
+    rich_energy_scale: Optional[str] = None
+    rich_segments: tuple = ()
+
+
+@dataclass(frozen=True)
+class SongAnalyzerActiveTrack:
+    canonical_path: str
+    deck: int
+    status: str
+    generation: int
+    activated_at_unix_milliseconds: Optional[int] = None
 
 
 class SongAnalyzerStructureHandoff:
@@ -128,6 +166,7 @@ class SongAnalyzerStructureHandoff:
         self._last_check = 0.0
         self._signature = object()
         self._tracks = {}
+        self._active_track = None
         self._schema_version = None
         self._load_status = "missing"
         self._load_error = None
@@ -164,7 +203,9 @@ class SongAnalyzerStructureHandoff:
         if not isinstance(raw, dict):
             raise ValueError("document is invalid")
         schema = raw.get("schema_version")
-        if isinstance(schema, bool) or not isinstance(schema, int) or schema != SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION:
+        if isinstance(schema, bool) or not isinstance(schema, int) or schema not in {
+            SONG_ANALYZER_STRUCTURE_LEGACY_SCHEMA_VERSION, SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION
+        }:
             raise RuntimeError("unsupported_schema")
         tracks_raw = raw.get("tracks")
         if not isinstance(tracks_raw, list):
@@ -215,6 +256,43 @@ class SongAnalyzerStructureHandoff:
                     expected_index, start, end, label, confidence, start_bar, end_bar
                 ))
                 previous_end = end
+            rich_model = None
+            rich_energy_scale = None
+            rich_segments = ()
+            rich = track_raw.get("rich_analysis")
+            if rich is not None:
+                if schema != SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION or not isinstance(rich, dict):
+                    raise ValueError("rich_analysis is invalid")
+                rich_model = cls._optional_text(rich.get("model"), "rich_analysis.model")
+                rich_energy_scale = cls._optional_text(rich.get("energy_scale"), "rich_analysis.energy_scale")
+                rich_raw = rich.get("segments")
+                if rich_model != SONG_ANALYZER_RICH_ANALYSIS_MODEL or rich_energy_scale != SONG_ANALYZER_ENERGY_SCALE \
+                        or not isinstance(rich_raw, list):
+                    raise ValueError("rich_analysis is incomplete")
+                rich_values = []
+                rich_previous_end = -math.inf
+                for expected_index, segment_raw in enumerate(rich_raw):
+                    if not isinstance(segment_raw, dict) or segment_raw.get("index") != expected_index:
+                        raise ValueError("rich segment index is invalid")
+                    start = cls._number(segment_raw.get("start_seconds"), "rich segment.start_seconds", 0.0)
+                    end = cls._number(segment_raw.get("end_seconds"), "rich segment.end_seconds", 0.0)
+                    label = cls._optional_text(segment_raw.get("label"), "rich segment.label")
+                    level = cls._optional_text(segment_raw.get("level"), "rich segment.level")
+                    energy = cls._number(segment_raw.get("energy"), "rich segment.energy")
+                    confidence = segment_raw.get("confidence")
+                    if confidence is not None:
+                        confidence = cls._number(confidence, "rich segment.confidence", 0.0)
+                        if confidence > 100.0:
+                            raise ValueError("rich segment.confidence is invalid")
+                    if not label or not level or end <= start or start < rich_previous_end:
+                        raise ValueError("rich segment timing is invalid")
+                    rich_values.append(SongAnalyzerRichSegment(
+                        expected_index, start, end, label, level, energy, confidence,
+                        segment_raw.get("start_beat"), segment_raw.get("end_beat"),
+                        segment_raw.get("start_bar"), segment_raw.get("end_bar"),
+                    ))
+                    rich_previous_end = end
+                rich_segments = tuple(rich_values)
             tracks[canonical_path] = SongAnalyzerStructureTrack(
                 canonical_path,
                 cls._optional_text(track_raw.get("content_sha256"), "content_sha256"),
@@ -223,9 +301,26 @@ class SongAnalyzerStructureHandoff:
                 cls._optional_text(track_raw.get("phrase_analysis_version"), "phrase_analysis_version"),
                 availability,
                 model,
-                tuple(segments),
+                tuple(segments), rich_model, rich_energy_scale, rich_segments,
             )
-        return schema, tracks
+        active_raw = raw.get("active_track")
+        active = None
+        if active_raw is not None:
+            if not isinstance(active_raw, dict):
+                raise ValueError("active_track is invalid")
+            active_path = cls._optional_text(active_raw.get("canonical_path"), "active_track.canonical_path")
+            deck = active_raw.get("deck")
+            status = active_raw.get("status")
+            generation = active_raw.get("generation", 0)
+            activated_at = active_raw.get("activated_at_unix_milliseconds")
+            if not active_path or canonical_song_analyzer_track_path(active_path) != active_path \
+                    or isinstance(deck, bool) or not isinstance(deck, int) or deck < 1 \
+                    or status not in {"ready", "pending", "unavailable"} \
+                    or isinstance(generation, bool) or not isinstance(generation, int) or generation < 0 \
+                    or activated_at is not None and (isinstance(activated_at, bool) or not isinstance(activated_at, int) or activated_at < 0):
+                raise ValueError("active_track is invalid")
+            active = SongAnalyzerActiveTrack(active_path, deck, status, generation, activated_at)
+        return schema, tracks, active
 
     def _file_signature(self):
         try:
@@ -247,6 +342,7 @@ class SongAnalyzerStructureHandoff:
             return
         self._signature = signature
         self._tracks = {}
+        self._active_track = None
         self._schema_version = None
         self._load_error = None
         if signature is None:
@@ -260,9 +356,10 @@ class SongAnalyzerStructureHandoff:
         self._metrics["structure_loads"] += 1
         try:
             with self.path.open("r", encoding="utf-8") as handle:
-                schema, tracks = self._parse_document(json.load(handle))
+                schema, tracks, active = self._parse_document(json.load(handle))
             self._schema_version = schema
             self._tracks = tracks
+            self._active_track = active
             self._load_status = "ready"
         except RuntimeError as exc:
             self._load_status = "unsupported_schema"
@@ -287,6 +384,20 @@ class SongAnalyzerStructureHandoff:
             "elapsed_seconds": max(0.0, position - segment.start_seconds),
             "remaining_seconds": max(0.0, segment.end_seconds - position),
             "starts_in_seconds": max(0.0, segment.start_seconds - position),
+            "progress": min(1.0, max(0.0, (position - segment.start_seconds) / duration)) if duration else 0.0,
+        }
+
+    @staticmethod
+    def _rich_segment_state(segment, position):
+        duration = max(0.0, segment.end_seconds - segment.start_seconds)
+        return {
+            "index": segment.index,
+            "label": segment.label,
+            "level": segment.level,
+            "energy": segment.energy,
+            "confidence": segment.confidence,
+            "start_seconds": segment.start_seconds,
+            "end_seconds": segment.end_seconds,
             "progress": min(1.0, max(0.0, (position - segment.start_seconds) / duration)) if duration else 0.0,
         }
 
@@ -317,15 +428,43 @@ class SongAnalyzerStructureHandoff:
                 "analysis_version": None,
                 "phrase_analysis_version": None,
                 "model": None,
+                "active_track": None,
+                "rich_analysis": None,
+                "rich_current": None,
                 "segment_count": 0,
                 "current": None,
                 "previous": None,
                 "next": None,
                 "metrics": dict(self._metrics),
             }
-            if source != "virtualdj" or not canonical_path:
+            if source != "virtualdj":
                 return result
             if self._load_status != "ready":
+                return result
+            active = self._active_track
+            if active is not None:
+                result["active_track"] = {
+                    "canonical_path": active.canonical_path,
+                    "deck": active.deck,
+                    "status": active.status,
+                    "generation": active.generation,
+                    "activated_at_unix_milliseconds": active.activated_at_unix_milliseconds,
+                }
+                if active.status != "ready":
+                    result["availability"] = active.status
+                    result["track_match"] = "active_not_ready"
+                    return result
+                # The native VirtualDJ activation is the authoritative identity
+                # when its lightweight live state has not supplied track_path
+                # yet.  If a live path is available, retain the strict exact
+                # match so a stale persisted active track can never project.
+                if not canonical_path:
+                    canonical_path = active.canonical_path
+                    result["canonical_track_path"] = canonical_path
+                elif active.canonical_path != canonical_path:
+                    result["track_match"] = "not_active"
+                    return result
+            elif not canonical_path:
                 return result
             track = self._tracks.get(canonical_path)
             if track is None:
@@ -342,6 +481,12 @@ class SongAnalyzerStructureHandoff:
                 "model": track.model,
                 "segment_count": len(track.segments),
             })
+            if track.rich_segments:
+                result["rich_analysis"] = {
+                    "model": track.rich_model,
+                    "energy_scale": track.rich_energy_scale,
+                    "segment_count": len(track.rich_segments),
+                }
             if track.availability == "missing":
                 return result
             position = state.get("time_seconds")
@@ -360,6 +505,10 @@ class SongAnalyzerStructureHandoff:
                 if segment.start_seconds <= position < segment.end_seconds or is_final_end:
                     result["projection_status"] = "in_final_segment" if is_final_end else "in_segment"
                     result["current"] = self._segment_state(segment, position)
+                    if index < len(track.rich_segments):
+                        rich = track.rich_segments[index]
+                        if rich.start_seconds <= position <= rich.end_seconds:
+                            result["rich_current"] = self._rich_segment_state(rich, position)
                     if index:
                         result["previous"] = self._segment_state(track.segments[index - 1], position)
                     if index + 1 < len(track.segments):
@@ -373,6 +522,41 @@ class SongAnalyzerStructureHandoff:
             result["projection_status"] = "after_structure"
             result["previous"] = self._segment_state(track.segments[-1], position)
             return result
+
+
+class SongAnalyzerBridgeDiagnostics:
+    """Small read-only diagnostics client with a one-second bounded cache."""
+
+    def __init__(self, socket_path=DEFAULT_SONG_ANALYZER_BRIDGE_SOCKET_PATH, refresh_seconds=1.0):
+        self.socket_path = str(socket_path)
+        self.refresh_seconds = max(0.5, float(refresh_seconds))
+        self._lock = threading.Lock()
+        self._next_refresh = 0.0
+        self._snapshot = {"status": "unavailable", "error": None, "diagnostics": None}
+
+    def snapshot(self):
+        with self._lock:
+            now = time.monotonic()
+            if now < self._next_refresh:
+                return dict(self._snapshot)
+            self._next_refresh = now + self.refresh_seconds
+            try:
+                request = json.dumps({"protocolVersion": 1, "requestId": "beatbeam-debug", "type": "diagnostics"}) + "\n"
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(0.2)
+                    client.connect(self.socket_path)
+                    client.sendall(request.encode("utf-8"))
+                    payload = client.recv(65536)
+                response = json.loads(payload.decode("utf-8"))
+                diagnostics = response.get("diagnostics") if response.get("success") else None
+                self._snapshot = {
+                    "status": "connected" if isinstance(diagnostics, dict) else "unavailable",
+                    "error": None if isinstance(diagnostics, dict) else "invalid_response",
+                    "diagnostics": diagnostics if isinstance(diagnostics, dict) else None,
+                }
+            except Exception as exc:
+                self._snapshot = {"status": "unavailable", "error": type(exc).__name__, "diagnostics": None}
+            return dict(self._snapshot)
 
 
 def playback_system_monotonic_time():
@@ -3025,9 +3209,11 @@ class StructureBehaviorBridge:
                 legacy_phrase, None, None, projection,
             ).as_dict()
         if projection.get("projection_status") not in {"in_segment", "in_final_segment"}:
+            projection_status = projection.get("projection_status")
+            fallback_reason = "no_playback_position" if projection_status == "position_unavailable" else "no_current_segment"
             return EffectiveBehaviorContext(
                 selected_source, "legacy", False,
-                "legacy_selected" if selected_source == "legacy" else "current_segment_unavailable",
+                "legacy_selected" if selected_source == "legacy" else fallback_reason,
                 legacy_phrase, None, None, projection,
             ).as_dict()
         if projection.get("canonical_track_path") != track_path:
@@ -3136,6 +3322,75 @@ class PlaybackStateSource:
 
     def read(self):
         raise NotImplementedError
+
+
+class BridgePlaybackStateSource(PlaybackStateSource):
+    """Bounded read-only consumer of the bridge's ephemeral native transport."""
+
+    def __init__(self, socket_path=DEFAULT_SONG_ANALYZER_BRIDGE_SOCKET_PATH, refresh_seconds=0.10):
+        self.socket_path = str(socket_path)
+        self.refresh_seconds = max(0.05, float(refresh_seconds))
+        self._lock = threading.Lock()
+        self._next_refresh = 0.0
+        self._cached = PlaybackSourceRead(None, "unavailable")
+        self._request_sequence = 0
+
+    def read(self):
+        with self._lock:
+            now = time.monotonic()
+            if now < self._next_refresh:
+                return self._cached
+            self._next_refresh = now + self.refresh_seconds
+            self._request_sequence += 1
+            try:
+                request = json.dumps({
+                    "protocolVersion": 1,
+                    "requestId": f"beatbeam-transport-{self._request_sequence}",
+                    "type": "transportSnapshot",
+                }) + "\n"
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(0.05)
+                    client.connect(self.socket_path)
+                    client.sendall(request.encode("utf-8"))
+                    response = json.loads(client.recv(65536).decode("utf-8"))
+                transport = response.get("transport") if response.get("success") else None
+                self._cached = PlaybackSourceRead(
+                    self._parse_transport(transport) if isinstance(transport, dict) else None,
+                    "available" if isinstance(transport, dict) else "unavailable",
+                )
+            except Exception as exc:
+                self._cached = PlaybackSourceRead(None, "unavailable", type(exc).__name__)
+            return self._cached
+
+    @staticmethod
+    def _parse_transport(raw):
+        sequence = JsonPlaybackStateSource._positive_int(raw.get("sequence"), "transport sequence")
+        deck = JsonPlaybackStateSource._positive_int(raw.get("deck"), "transport deck")
+        path = JsonPlaybackStateSource._optional_text(raw.get("filePath"), "transport filePath")
+        playing = raw.get("playing")
+        observed = JsonPlaybackStateSource._non_negative_int(raw.get("observedAtUnixMilliseconds"), "transport observedAtUnixMilliseconds")
+        if not path or not isinstance(playing, bool):
+            raise ValueError("Transport mist identity.")
+        position = JsonPlaybackStateSource._optional_non_negative_int(raw.get("positionMilliseconds"), "transport positionMilliseconds")
+        bpm = JsonPlaybackStateSource._optional_positive_float(raw.get("bpm"), "transport bpm")
+        beat_position = JsonPlaybackStateSource._optional_non_negative_float(raw.get("beatPosition"), "transport beatPosition")
+        beat_number = JsonPlaybackStateSource._optional_range_int(raw.get("beatNumber"), "transport beatNumber", 1, 4)
+        bar_number = JsonPlaybackStateSource._optional_positive_int(raw.get("barNumber"), "transport barNumber")
+        available = playing and position is not None and bpm is not None
+        deck_state = {
+            "deck_number": deck, "is_loaded": True, "track_path": path,
+            "file_name": Path(path).name or None, "artist": None, "title": Path(path).stem or None,
+            "bpm": bpm, "position_milliseconds": position, "beat_position": beat_position,
+            "beat_number": beat_number, "bar_number": bar_number,
+            "captured_at_unix_milliseconds": observed, "is_playing": playing,
+        }
+        return PlaybackStateSnapshot(
+            PLAYBACK_STATE_SCHEMA_VERSION, sequence, observed, True,
+            "available" if available else "unavailable", "active_deck", deck, path if available else None,
+            bpm if available else None, position if available else None, None,
+            beat_position if available else None, beat_number if available else None, bar_number if available else None,
+            {"snapshot_latency_milliseconds": 0.0, "error_count": 0}, None, None, (deck_state,),
+        )
 
 
 class JsonPlaybackStateSource(PlaybackStateSource):
@@ -4059,7 +4314,10 @@ class DeveloperPlaybackController:
         if path == self.state_path:
             return
         self.state_path = path
-        self.clock = PlaybackClock(JsonPlaybackStateSource(path))
+        # Native VirtualDJ transport is ephemeral bridge IPC. The historical
+        # snapshot path remains a developer setting, but is never polled for
+        # normal playback position.
+        self.clock = PlaybackClock(BridgePlaybackStateSource())
 
     def state(self):
         return self.clock.state()
@@ -8569,9 +8827,14 @@ class TransportController:
 
     def _active_render_snapshot(self, now, legacy_snapshot):
         with self._lock:
-            active_source = self.config.get("active_playback_source", "legacy")
+            configured_source = self.config.get("active_playback_source", "legacy")
+            selected_mode = self.config.get("mode", "auto")
+        playback_state = self.developer_playback.state()
+        virtualdj_available = playback_state.get("availability") == "available"
+        active_source = "virtualdj" if configured_source == "virtualdj" or (
+            selected_mode == "auto" and virtualdj_available
+        ) else "legacy"
         if active_source == "virtualdj":
-            playback_state = self.developer_playback.state()
             # Start with the existing transport contract so native clients keep
             # receiving its required mode and manual-clock fields. VirtualDJ
             # below replaces only the active timing source.
@@ -12586,6 +12849,20 @@ class DmxController:
             + drum_profile["impact"] * 0.04
             + drum_profile["sparkle"] * 0.015
         )
+        rich_current = ((structure_behavior.get("projection") or {}).get("rich_current") or {}) \
+            if structure_behavior["effective_source"] == "song_analyzer" else {}
+        song_analyzer_energy = rich_current.get("energy")
+        if isinstance(song_analyzer_energy, bool) or not isinstance(song_analyzer_energy, (int, float)) \
+                or not math.isfinite(float(song_analyzer_energy)):
+            song_analyzer_energy = None
+        song_analyzer_energy_modifier = 0.0 if song_analyzer_energy is None else max(
+            -SONG_ANALYZER_MAX_ENERGY_MODIFIER,
+            min(SONG_ANALYZER_MAX_ENERGY_MODIFIER,
+                float(song_analyzer_energy) * SONG_ANALYZER_ENERGY_Z_SCORE_MODIFIER_PER_UNIT),
+        )
+        # Rich SongAnalyzer energy is additive and bounded: phrase buckets and
+        # all existing fixture safety controls remain authoritative.
+        base_energy = clamp_unit(base_energy + song_analyzer_energy_modifier)
         base_energy = apply_live_energy_override(
             override_energy,
             base_energy,
@@ -12746,6 +13023,8 @@ class DmxController:
             "cue_label": cue_label,
             "color_source": color_source,
             "energy": energy,
+            "song_analyzer_energy": song_analyzer_energy,
+            "song_analyzer_energy_modifier": song_analyzer_energy_modifier,
             "waveform_energy": waveform_factor,
             "waveform_bands": {
                 "low": waveform_bands["low"],
@@ -14052,6 +14331,7 @@ OSC = OscListener()
 TRANSPORT = TransportController(OSC)
 SONG_ANALYZER_STRUCTURE = SongAnalyzerStructureHandoff()
 STRUCTURE_BEHAVIOR = StructureBehaviorBridge(SONG_ANALYZER_STRUCTURE)
+SONG_ANALYZER_BRIDGE_DIAGNOSTICS = SongAnalyzerBridgeDiagnostics()
 DMX = DmxController(TRANSPORT, STRUCTURE_BEHAVIOR)
 
 
@@ -14500,6 +14780,54 @@ def full_state():
         "developer_playback": TRANSPORT.developer_playback_state(osc_state),
         "developer_structure_behavior": structure_behavior_state(osc_state),
         "live_ui": live_ui_state(osc_state),
+        "debug": beatbeam_debug_state(osc_state),
+    }
+
+
+def beatbeam_debug_state(osc_state=None):
+    state = TRANSPORT.state() if osc_state is None else osc_state
+    playback = dict(state.get("playback_state") or {})
+    live_transport = dict(playback.get("beatbeam") or {})
+    observed_at = ((playback.get("virtualdj") or {}).get("captured_at_unix_milliseconds"))
+    position_age = None
+    if isinstance(observed_at, int) and observed_at >= 0:
+        position_age = max(0, int(time.time() * 1000) - observed_at)
+    projection = SONG_ANALYZER_STRUCTURE.project(state)
+    behavior = structure_behavior_state(state)
+    auto_show = (DMX.state().get("auto_show") or {})
+    bridge = SONG_ANALYZER_BRIDGE_DIAGNOSTICS.snapshot()
+    current = projection.get("current") or {}
+    rich = projection.get("rich_current") or {}
+    active = projection.get("active_track") or {}
+    fallback = behavior.get("fallback_reason")
+    return {
+        "virtualdj": {
+            "transport_source": state.get("_active_playback_source"),
+            "active_deck": live_transport.get("deck_number"),
+            "track_path": live_transport.get("track_path"),
+            "playing": playback.get("availability") == "available",
+            "position_milliseconds": live_transport.get("estimated_position_milliseconds"),
+            "position_age_milliseconds": position_age,
+            "transport_state": playback.get("transport_state"),
+            "bridge_status": bridge.get("status"),
+        },
+        "active_track": active or None,
+        "analysis": {
+            "schema_version": projection.get("schema_version"),
+            "model": projection.get("model"),
+            "segment": current or None,
+            "rich_current": rich or None,
+            "energy_modifier": auto_show.get("song_analyzer_energy_modifier"),
+        },
+        "handoff": {
+            "track_match": projection.get("track_match"),
+            "availability": projection.get("availability"),
+            "rich_analysis": projection.get("rich_analysis"),
+            "fallback_reason": fallback,
+            "effective_source": behavior.get("effective_source"),
+            "selected_source": behavior.get("selected_source"),
+        },
+        "bridge_diagnostics": bridge,
     }
 
 

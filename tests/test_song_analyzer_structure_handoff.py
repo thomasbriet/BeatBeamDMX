@@ -7,6 +7,7 @@ from beatbeam_app import SongAnalyzerStructureHandoff
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "beatbeam-structure-handoff-v1.json"
+TRACK = "/Music/Example/O'Brien Café.flac"
 
 
 def playback(path, seconds, source="virtualdj"):
@@ -116,6 +117,71 @@ class SongAnalyzerStructureHandoffTests(unittest.TestCase):
             self.assertEqual("exact", state["track_match"])
             self.assertEqual("unavailable", state["availability"])
             self.assertIsNone(state["current"])
+
+    def test_v2_rich_segment_and_ready_active_track_project_exactly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            payload["schema_version"] = 2
+            payload["active_track"] = {
+                "canonical_path": TRACK, "deck": 1, "status": "ready", "generation": 9,
+            }
+            payload["tracks"][0]["rich_analysis"] = {
+                "model": "SongAnalyzerRichAnalysis",
+                "energy_scale": "segment-normalized-rms-z-score",
+                "segments": [
+                    {"index": 0, "start_seconds": 0, "end_seconds": 16, "label": "Intro 1", "level": "phrase", "energy": -1.0},
+                    {"index": 1, "start_seconds": 16, "end_seconds": 32, "label": "Up 1", "level": "phrase", "energy": 2.0},
+                ],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            state = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(playback(TRACK, 18))
+
+            self.assertEqual(2, state["schema_version"])
+            self.assertEqual(9, state["active_track"]["generation"])
+            self.assertEqual(2.0, state["rich_current"]["energy"])
+
+    def test_ready_active_track_is_used_when_virtualdj_live_state_has_no_track_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            payload["schema_version"] = 2
+            payload["active_track"] = {
+                "canonical_path": TRACK, "deck": 1, "status": "ready", "generation": 11,
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            state = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project({
+                "_active_playback_source": "virtualdj",
+                "time_seconds": 2,
+            })
+
+            self.assertEqual(TRACK, state["canonical_track_path"])
+            self.assertEqual("exact", state["track_match"])
+            self.assertEqual("available_current", state["availability"])
+            self.assertEqual(11, state["active_track"]["generation"])
+            self.assertEqual("Intro 1", state["current"]["label"])
+
+    def test_pending_or_other_active_track_cannot_project_previous_track_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            payload["schema_version"] = 2
+            payload["active_track"] = {
+                "canonical_path": TRACK, "deck": 1, "status": "pending", "generation": 10,
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            handoff = SongAnalyzerStructureHandoff(path, check_interval_seconds=0)
+            pending = handoff.project(playback(TRACK, 2))
+            self.assertEqual("active_not_ready", pending["track_match"])
+            self.assertIsNone(pending["current"])
+
+            payload["active_track"]["canonical_path"] = "/Music/Other.flac"
+            payload["active_track"]["status"] = "ready"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            other = handoff.project(playback(TRACK, 2))
+            self.assertEqual("not_active", other["track_match"])
+            self.assertIsNone(other["current"])
 
 
 if __name__ == "__main__":

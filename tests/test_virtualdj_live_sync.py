@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from beatbeam_app import (
     PLAYBACK_STATE_SCHEMA_VERSION,
+    BridgePlaybackStateSource,
     JsonPlaybackStateSource,
     PlaybackClock,
     PlaybackPositionReference,
@@ -180,6 +181,43 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
         self.assertIsNone(live["next_phrase"])
         self.assertFalse(live["decks"][0]["is_loaded"])
         self.assertTrue(live["decks"][1]["is_active"])
+
+    def test_bridge_transport_snapshot_projects_existing_playback_contract(self):
+        parsed = BridgePlaybackStateSource._parse_transport({
+            "sequence": 4,
+            "deck": 1,
+            "filePath": "/Music/Bridge Track.flac",
+            "playing": True,
+            "positionMilliseconds": 18_000,
+            "bpm": 124.0,
+            "beatPosition": 36.5,
+            "beatNumber": 1,
+            "barNumber": 10,
+            "observedAtUnixMilliseconds": 100,
+        })
+
+        self.assertEqual("available", parsed.status)
+        self.assertEqual("/Music/Bridge Track.flac", parsed.track_path)
+        self.assertEqual(18_000, parsed.position_milliseconds)
+        self.assertEqual(1, parsed.decks[0]["deck_number"])
+
+    def test_bridge_transport_paused_snapshot_is_safe_unavailable_state(self):
+        parsed = BridgePlaybackStateSource._parse_transport({
+            "sequence": 5,
+            "deck": 1,
+            "filePath": "/Music/Bridge Track.flac",
+            "playing": False,
+            "positionMilliseconds": 18_000,
+            "bpm": 124.0,
+            "beatPosition": 36.5,
+            "beatNumber": 1,
+            "barNumber": 10,
+            "observedAtUnixMilliseconds": 101,
+        })
+
+        self.assertEqual("unavailable", parsed.status)
+        self.assertIsNone(parsed.track_path)
+        self.assertTrue(parsed.decks[0]["is_loaded"])
 
     def publish(self, value, at):
         self.source.snapshot = value
@@ -710,6 +748,15 @@ class ActivePlaybackSourceTests(unittest.TestCase):
         transport.update_config({"active_playback_source": "legacy"})
         self.assertEqual("legacy", transport.config["active_playback_source"])
         self.assertEqual(2, transport.developer_playback.reset_count)
+
+    def test_auto_selects_live_virtualdj_then_falls_back_and_recovers(self):
+        transport, _legacy = self.make_transport(virtualdj_state())
+
+        self.assertEqual("virtualdj", transport.snapshot_for_render()["_active_playback_source"])
+        transport.developer_playback.current_state = virtualdj_state(availability="unavailable")
+        self.assertEqual("legacy", transport.snapshot_for_render()["_active_playback_source"])
+        transport.developer_playback.current_state = virtualdj_state(position=2_000)
+        self.assertEqual("virtualdj", transport.snapshot_for_render()["_active_playback_source"])
 
     def test_equivalent_legacy_and_virtualdj_trace_has_the_same_transport_values(self):
         transport, _legacy = self.make_transport()

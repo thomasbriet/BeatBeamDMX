@@ -29,7 +29,11 @@ Bij iedere programmeertaak:
 
 # M22A — Actuele status
 
-`BEZIG` — de technische integratie is grotendeels geïmplementeerd en een gedeeltelijke end-to-end runtime-PASS is bewezen. De resterende handmatige checks staan onder “Nog open voor volledige M22A-PASS”.
+`GEREED` — volledige echte VirtualDJ → SongAnalyzer → bridge → BeatBeam runtime-PASS is handmatig bevestigd en de eindvalidatie is groen.
+
+De PASS omvat phrase boundary, seek, normale NOW/Auto Show, rich current, energy modifier, uncached live track met HIGH-prioriteit, pending/stale-data-safety, exacte Track A/Track B matching, VirtualDJ stop/restart, automatische reconnect en live transport zonder handmatige Connect-knop.
+
+De bestaande `build_native_app.sh` developmentroute heeft een Python 3.14 `site-packages`-pad/reproduceerbaarheidsprobleem. De actuele Beta-app is via de directe development packaging-route opnieuw gebouwd, gebundeld en strikt ad-hoc gesigned. Dit is technische schuld voor een aparte cleanup en geen M22A-productfailure.
 
 ## M22A — Performancebaseline
 
@@ -428,11 +432,11 @@ Deze punten zijn bewust geschrapt en mogen niet zonder expliciete productbesliss
 
 Aanbevolen volgorde vanaf de huidige productrichting:
 
-1. `BEZIG` M22A: Canoniek BeatBeam Analysis Model definiëren en eerste begrensde Auto Show-consument toevoegen.
-2. `TODO` Inventariseren welke diepere audiofeatures met de huidige Essentia/Python-pipeline haalbaar zijn.
-3. `TODO` Nieuwe hiërarchische segmentatie ontwerpen.
-4. `TODO` Drops/build-ups/breakdowns/transitions als eerste rijke events implementeren.
-5. `TODO` Analyse-output koppelen aan BeatBeam Auto Show.
+1. `GEREED` M22A: Canoniek BeatBeam Analysis Model en eerste begrensde Auto Show-consument, inclusief echte VirtualDJ-liveketen.
+2. `TODO` Volgende toekomstige richting: Rich Musical Events voor BeatBeam — build, drop, chorus, breakdown, transition, confidence en bar alignment.
+3. `TODO` Inventariseren welke diepere audiofeatures met de huidige Essentia/Python-pipeline haalbaar zijn.
+4. `TODO` Nieuwe hiërarchische segmentatie ontwerpen.
+5. `TODO` Analyse-output verder koppelen aan BeatBeam Auto Show.
 6. `TODO` Live BeatBeam UI herontwerpen rond visualisatie + overrides.
 7. `TODO` Moving-head snelheidsmodifier toevoegen.
 8. `TODO` VirtualDJ analyseworkflow/status integreren voor zover de SDK dit ondersteunt.

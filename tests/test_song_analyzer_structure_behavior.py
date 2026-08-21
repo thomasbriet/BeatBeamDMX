@@ -128,7 +128,7 @@ class SongAnalyzerStructureBehaviorTests(unittest.TestCase):
             self.bridge_with_fixture(unsupported).resolve("song_analyzer", playback())["fallback_reason"],
         )
         self.assertEqual(
-            "current_segment_unavailable",
+            "no_current_segment",
             self.bridge_with_fixture().resolve("song_analyzer", playback(seconds=-0.1))["fallback_reason"],
         )
 
@@ -199,6 +199,30 @@ class SongAnalyzerStructureBehaviorTests(unittest.TestCase):
 
         for key in ("phrase_bucket", "behavior_bucket", "rhythm_mode", "motion_name", "pulse_name", "energy"):
             self.assertEqual(legacy[key], fallback[key], key)
+
+    def test_rich_energy_is_a_deterministic_bounded_auto_show_modifier(self):
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        payload["schema_version"] = 2
+        payload["active_track"] = {"canonical_path": TRACK, "deck": 1, "status": "ready", "generation": 4}
+        payload["tracks"][0]["rich_analysis"] = {
+            "model": "SongAnalyzerRichAnalysis",
+            "energy_scale": "segment-normalized-rms-z-score",
+            "segments": [
+                {"index": 0, "start_seconds": 0, "end_seconds": 16, "label": "Intro 1", "level": "phrase", "energy": 0.0},
+                {"index": 1, "start_seconds": 16, "end_seconds": 32, "label": "Up 1", "level": "phrase", "energy": 10.0},
+            ],
+        }
+        bridge = self.bridge_with_fixture(payload)
+        controller = DmxController(StructureBehaviorTransport("song_analyzer"), bridge)
+        config = controller._clean_full_config(controller.default_config())
+        config["auto_show"]["enabled"] = True
+        low = controller._auto_show_state(playback(seconds=2), config["auto_show"])
+        high = controller._auto_show_state(playback(seconds=18), config["auto_show"])
+
+        self.assertEqual(0.0, low["song_analyzer_energy_modifier"])
+        self.assertEqual(0.08, high["song_analyzer_energy_modifier"])
+        self.assertLessEqual(high["energy"], 1.0)
+        self.assertGreaterEqual(high["energy"], 0.0)
 
 
 if __name__ == "__main__":
