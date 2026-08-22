@@ -283,12 +283,67 @@ veilige fallback. Canonical boundaries/sections/confidence, Rich Musical Events,
 AnalysisLibrary, cache, persistence en Auto Show zijn ongewijzigd; er is geen
 shadow-event persistence, hypothese, threshold, weight, confidence of winner.
 
-Volgende stap: `M24A-5D-3 — abstention-first candidate event hypotheses`,
-`STATUS = NOG NIET GESTART`. Ontwerp eerst opnieuw de minimale gates/evidence
-voor verklaarbare kandidaten (BUILD, DROP, BREAKDOWN, RETURN en STRUCTURAL
-TRANSITION); `NO_EVENT`/abstention blijft normaal en gewenst. Geen productie-
-consumptie, canonical SectionRole, High/Mid/Low, native type, genre-routering
-of Auto Show-input.
+`GEREED` M24A-5D-3A — read-only candidate-hypothesisdesign. Hypotheses zijn
+abstention-first en ondersteunen nul of meer hypotheses per boundary, zonder
+score, confidence, ranking, winner of lineaire samengestelde evidence. Canonical
+roles, native types, Rich Musical Events, genre en Auto Show zijn geen input.
+BUILD was alleen als strenge rising-subset klaar voor een eerste shadow-gate;
+DROP en RETURN hadden meer evidence nodig; BREAKDOWN werd geparkeerd.
+
+`GEREED` M24A-5D-3B — brede read-only distribution audit op Ralf Feest:
+190 playlistentries, 173 unieke FLAC-tracks, 17 duplicaten, 0 ontbrekend;
+173/173 verwerkt, 1.702 raw observations en 1.529 contiguous boundaries zonder
+gaps. De audit was standalone en niet-persistent; AnalysisLibrary, cache,
+handoff, versions, canonical output, Rich Musical Events en Auto Show bleven
+ongewijzigd. EntryContrast en BoundaryNovelty correleren sterk (`r ≈ 0.833`)
+en zijn geen onafhankelijke stemmen. Signed evidence is breed verdeeld; teken,
+aanwezigheid en coherentie zijn voorlopig bruikbaarder dan magnitude-thresholds.
+Lokale EnergyDirection en destination-vs-origin state-shift zijn in circa 23,4%
+van de boundaries tegengesteld. Slechts 15 boundaries hebben StructuralRoute;
+alle 15 zijn `family-exit`. De eerste presence-bundle is route `family-exit`+
+StructuralEvidence aanwezig+MembershipExitStrength aanwezig, zonder numerieke
+threshold; deze komt op 7 boundaries voor. MembershipExitStrength en
+RepeatedSectionEnd delen dezelfde repeat-end-provenance en tellen niet dubbel.
+HasEarlierFamilyOccurrence is te breed voor RETURN: 953 true-cases, waarvan
+ongeveer 744 directe family-continuations en circa 107 aantoonbare onderbrekingen.
+
+`GEREED` M24A-5D-3C0 — technische en menselijke runtime-PASS. Additief
+`ShadowEventEvidence.DestinationIsTerminal : bool` projecteert uitsluitend raw
+sequence-topology (`destinationIndex == observations.Count - 1`) naar
+`destination_is_terminal` in schema v2. Legacy handoff zonder dit veld blijft
+geldig; BeatBeam inferreert terminaliteit niet. Magnetic 142.184 s is
+non-terminal; John De Bever 154.088 s is terminal.
+
+`GEREED` M24A-5D-3C — technische en menselijke runtime-PASS. Dit is de eerste
+shadow-eventinterpretatie; uitsluitend `STRUCTURAL_TRANSITION_CANDIDATE` kan
+worden geproduceerd. Het boundary-model ondersteunt 0..N hypotheses per
+evidence-record. `AnchorKind = Boundary`, `StartSeconds = TargetSeconds =
+BoundarySeconds`, `EndSeconds = null`. De gate vereist non-terminal destination
+én op dezelfde zijde (`OriginExit` of `DestinationEntry`) de complete bundle:
+`StructuralRoute == family-exit`, StructuralEvidence aanwezig en
+MembershipExitStrength aanwezig. Origin- en destinationvelden worden nooit
+gemengd; dubbele coherente zijden leveren exact één kandidaat en conflicterende
+routes sluiten fail-closed. SupportingEvidence bevat alleen stabiele codes;
+ConflictingEvidence is normaal leeg. RepeatedSectionEnd is geen tweede bron en
+er zijn geen numerieke thresholds, confidence, score, ranking of winner.
+Magnetic 142.184 s, Calling 338.955 s en Losse Pols 50.306 s zijn positieve
+guards; John De Bever 154.088 s is de terminale negatieve guard. Kleine Arrival
+blokkeert de kandidaat niet.
+
+BUILD_CANDIDATE, DROP_CANDIDATE, RETURN_CANDIDATE en generieke
+`TRANSITION_CANDIDATE` zijn niet geïmplementeerd; BREAKDOWN blijft geparkeerd.
+Er bestaat geen `NO_EVENT`- of `ABSTAINED`-object: geen hypothesis is een lege
+lijst. De shadow-hypotheses zijn additive, ephemeral en Debug-only; productie-
+output, Auto Show, AnalysisLibrary, cache en persistence blijven geïsoleerd.
+Baseline blijft `analysis_version = m14-v5` en
+`phrase_analysis_version = phrase-analysis-v17`; M23A blijft `BEZIG` en v17 de
+veilige fallback.
+
+Volgende stap: `M24A-5D-4 — DROP / BUILD / RETURN human sample review & gate
+design`, `STATUS = NOG NIET GESTART`. Eerst representatieve menselijke
+sample-review van de brede 3B-distributie; DROP heeft prioriteit, daarna BUILD
+en RETURN. Er wordt nog geen directe gate geïmplementeerd. BREAKDOWN blijft
+geparkeerd.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
