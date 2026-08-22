@@ -155,11 +155,60 @@ blijft de veilige productionele fallback. Canonical boundaries/sections/
 confidence, Rich Musical Events, Auto Show, AnalysisLibrary en cache keys zijn
 ongewijzigd. M24A-5A/5B blijven shadow/diagnostics-only.
 
-Volgende actieve ontwikkelstap: `M24A-5C — Momentum / Arrival semantics`.
-`STATUS = NOG NIET GESTART`; vandaag wordt M24A-5C niet geïmplementeerd en
-worden geen nieuwe tracks geanalyseerd. Eerst shadow-only ontwerpen hoe
-momentum, transition direction en arrival impact onafhankelijk blijven; pas
-daarna Rich Musical Events v2 en Auto Show overwegen.
+`GEREED` M24A-5C-2 — technische en menselijke runtime-PASS. De shadow-only,
+vectoriële architectuur bestaat uit drie onafhankelijke profielen:
+
+- `PreparationProfileShadow`: `EnergyTrajectory`, `ExitEnergyDirection`,
+  `ExitOnsetDirection`, `ExitSilenceDirection` en `ExitStructuralContext`.
+  Preparation leest uitsluitend de origin section en haar exit; destination
+  state, arrival, canonical role en eventlabels zijn geen input.
+- `ArrivalProfileShadow`: `EntryContrast`, `BoundaryNovelty`,
+  `EnergyDirection`, `OnsetDirection`, `SilenceDirection`,
+  `OriginRelativeEnergy` en `DestinationRelativeEnergy`. Arrival is een
+  boundaryvector zonder `ArrivalImpact`-score, gewogen combinatie,
+  `RecurrenceStrength` of `FamilySalience` als input.
+- `StructuralDepartureProfileShadow`: `StructuralContextChange`,
+  `MembershipExitStrength`, `RepeatedSectionEnd`, `RecurrenceChange`,
+  `StructuralRoute`, `StructuralEvidence` en `StructuralTargetBar`. Entry en
+  Exit blijven zelfstandig boundary-georiënteerd en worden niet in Arrival
+  samengevouwen.
+
+`OriginRelativeEnergy` wordt uitsluitend aan een direct aangrenzende vorige
+raw observation gekoppeld; eerste, gapped of ongeldige observations blijven
+`null`. `BuildMomentum` en `DropImpact` blijven `unknown/null` placeholders.
+Er is geen `PreparationType`, eventlabel, threshold of eventinterpretatie.
+Schema v2 blijft additief; shadowdata blijft ephemeral en wijzigt geen
+persistence, cache of AnalysisLibrary.
+
+De Magnetic-runtimevalidatie bevestigt rond 38.797 s een consistente boundary:
+de Preparation-exit en Arrival-entry delen `ΔEnergy +1.30`, `ΔOnset +0.71`
+en `ΔSilence -3.79`, met `OriginRelativeEnergy 0.25`,
+`DestinationRelativeEnergy 0.84`, `EntryContrast 0.55` en
+`BoundaryNovelty 0.97`. De arrival rond 112.645 s bevestigt hetzelfde patroon
+(`ΔEnergy +1.39`, `ΔOnset +1.02`, `ΔSilence -4.14`, `0.31 → 0.93`). De
+Magnetic Bridge rond 142.184 s bevestigt de scheiding: lokaal kleine arrival
+(`RelativeEnergy 0.93 → 0.91`, `ΔEnergy ≈ 0`, `ΔOnset ≈ -0.06`,
+`ΔSilence ≈ +0.18`, `EntryContrast 0.10`, `BoundaryNovelty 0.13`) tegenover
+onafhankelijke structural departure (`MembershipExitStrength 0.78`,
+`RepeatedSectionEnd 0.78`, route `family-exit`, `StructuralEvidence 0.70`).
+De laatste overgang bevestigt bovendien een expliciet downward profiel:
+`RelativeEnergy 0.91 → 0.03`, `EnergyDirection -1.35`,
+`OnsetDirection -0.81`, `SilenceDirection +2.72`, `EntryContrast 0.60` en
+`BoundaryNovelty 0.92`.
+
+Baseline blijft `analysis_version = m14-v5` en
+`phrase_analysis_version = phrase-analysis-v17`; M23A blijft `BEZIG` en v17
+blijft de veilige productionele fallback. Canonical output, Rich Musical
+Events, Auto Show, AnalysisLibrary en cachegedrag zijn ongewijzigd.
+
+Volgende actieve ontwikkelstap: `M24A-5C-3 — multi-track runtimecalibratie van
+de vectorprofielen`, `STATUS = NOG NIET GESTART`. Beoordeel Free Your Mind,
+Levels en Calling naast de geaccepteerde Magnetic-guard op
+boundaryconsistentie, tekenbehoud, origin/destination state, nullgedrag,
+onafhankelijkheid van arrangement identity en structural departure, en
+diagnostische leesbaarheid. Geen track-specifieke tuning en nog geen
+eventinterpretatie. `M24A-5D` blijft pas daarna kandidaat voor shadow event
+interpretation.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
