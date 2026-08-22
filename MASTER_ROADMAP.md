@@ -339,10 +339,48 @@ Baseline blijft `analysis_version = m14-v5` en
 `phrase_analysis_version = phrase-analysis-v17`; M23A blijft `BEZIG` en v17 de
 veilige fallback.
 
-Volgende stap: `M24A-5D-4 — DROP / BUILD / RETURN human sample review & gate
-design`, `STATUS = NOG NIET GESTART`. Eerst representatieve menselijke
-sample-review van de brede 3B-distributie; DROP heeft prioriteit, daarna BUILD
-en RETURN. Er wordt nog geen directe gate geïmplementeerd. BREAKDOWN blijft
+`GEREED` M24A-5D-4A — strikt read-only human sample-review op de bestaande
+M24A-5D-3B-auditoutput. De reviewset bevatte 16 boundaries (A=4, B=4, C=3,
+D=2, E=2, F=1) met 5 `DROP_LIKE`, 7 `NOT_DROP` en 4 `AMBIGUOUS`. De review
+liet zien dat veel tracks geen duidelijke klassieke drop bevatten: een
+belangrijke upward arrival kan showmatig relevant zijn zonder als klassieke
+Drop te worden ervaren. Extreme lokale salience is geen Drop-proxy (stratum A
+0/4 `DROP_LIKE`; inclusief top-5%-reference/control 0/6); EntryContrast en
+BoundaryNovelty blijven één gecorreleerde saliencefamilie zonder monotone
+threshold. De tijdelijke reviewoutput staat buiten de repository.
+
+`GEREED` M24A-5D-4B — read-only evidencevergelijking en menselijke design-PASS;
+geen code-implementatie of productgate. `DROP_DIRECT_GATE_STATUS =
+SEMANTIC_LAYER_TOO_SPECIFIC`; `UPWARD_ARRIVAL_LAYER_STATUS = SUPPORTED`.
+Alle human `DROP_LIKE`-cases hebben positieve `EnergyDirection` én
+`StateShift`, maar EnergyDirection alleen onderscheidt onvoldoende.
+`DestinationRelativeEnergy` is in deze kleine sample onderscheidender (mediaan
+ongeveer 0.912 versus 0.405 bij `NOT_DROP`) en is relevante
+`UPWARD_ARRIVAL`-evidence, zonder numerieke productthreshold. D12 en D13 zijn
+`NOT_DROP` met positieve EnergyDirection maar negatieve StateShift (ongeveer
+-0.080 en -0.366); `StateShift <= 0` is daarom uitsluitend een te valideren
+`HARD_BLOCKER_CANDIDATE` voor een toekomstige upward-hypothese. D14 en D15
+tonen dat negatieve OnsetDirection geen harde eis of blocker mag zijn.
+Preparation- en silencevectoren blijven afzonderlijke ondersteunende evidence;
+recurrence/family- en structurele evidence zijn geen Drop-gate. Alle 16 cases
+waren non-terminal en geen ervan droeg `STRUCTURAL_TRANSITION_CANDIDATE`.
+`AMBIGUOUS` blijft expliciete abstention en wordt niet naar yes/no gedwongen.
+
+Voorlopige semantische layering voor vervolgdesign:
+`RawSectionObservation`/boundary evidence → Preparation/Arrival/
+StructuralDeparture/ArrangementIdentity → shadow event hypotheses →
+`UPWARD_ARRIVAL_CANDIDATE` → optionele strengere `DROP_CANDIDATE`-interpretatie.
+`ArrivalProfileShadow` blijft evidence; `UPWARD_ARRIVAL_CANDIDATE` is geen
+vervanging daarvan. `STRUCTURAL_TRANSITION_CANDIDATE` blijft onafhankelijk.
+
+Volgende stap: `M24A-5D-4C — UPWARD ARRIVAL gate design & human controls`,
+`STATUS = NOG NIET GESTART`. Eerst uitsluitend een abstention-first gate
+ontwerpen uit bestaande evidence en een nieuwe human controlset beoordelen,
+met aandacht voor positieve StateShift, de mogelijke StateShift-blocker,
+destination-state zonder threshold, lokale salience zonder monotone aanname,
+preparation/release, onset als niet-harde context, terminale topology,
+mogelijke structural overlap en expliciete abstention. Er wordt nog niets
+geïmplementeerd. BUILD en RETURN zijn niet geïmplementeerd; BREAKDOWN blijft
 geparkeerd.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
