@@ -442,15 +442,46 @@ gecorreleerde evidencefamilie; preparation is alleen supporting context.
 er is nog geen shadow gate. BUILD, RETURN en DROP zijn niet geïmplementeerd;
 BREAKDOWN blijft geparkeerd.
 
-Volgende stap: `M24A-5D-4G — Fine-grained temporal shadow evidence design`,
-`STATUS = NOG NIET GESTART`. Dit is uitsluitend ontwerp: inventariseer waar
-bestaande fijnere temporal evidence ontstaat, wat persistent/intermediate
-beschikbaar is, wat nu verloren gaat, minimale additive shadowvelden,
-provenance, dubbel-tellen, Debug-only grenzen, schema-v2 backward compatibility
-en de human controls na exposure. Geen nieuwe features, Essentia-calls,
-thresholds, gate/classifier/score, canonical/native evidence, Rich Musical
-Events of Auto Show-wijziging. Raw audio → bestaande berekeningen → additive
-fine-grained shadow evidence → human calibration → semantische hypothese.
+`GEREED` M24A-5D-4G — read-only fine-grained temporal shadow evidence design en
+human design-PASS. `TEMPORAL_EXPOSURE_DESIGN_STATUS = READY_FOR_IMPLEMENTATION`,
+uitsluitend voor additive temporal shadow exposure; dit maakt
+`UPWARD_ARRIVAL_CANDIDATE` niet implementatieklaar. De bestaande route is
+`beat_features` → `aggregate_bars` / `relative_energy_bars` →
+`boundary_candidates` / `raw_section_observations` → C# shadowprojectie.
+`RelativeEnergy` is een section-average van per-bar relative energy;
+`EnergyRise` vergelijkt eerste en laatste derde van `normalizedRms`; de audit-
+`StateShift` is `DestinationRelativeEnergy - OriginRelativeEnergy`. Daardoor
+gaan laatste originbar en eerste destinationbar verloren; StateShift blijft een
+section-state diagnostic, maar geen universele boundary-arrivalrepresentatie.
+De bestaande deltas zijn één barpaar: `EnergyDelta = normalizedRms[i] -
+normalizedRms[i-1]`, met dezelfde vorm voor onset en silence; operands worden
+niet behouden. Late origin en early destination zijn beide
+`YES_DERIVABLE_FROM_EXISTING_INTERMEDIATE`.
+
+Minimale exposure: `PreBoundaryNormalizedRms` en `PostBoundaryNormalizedRms`
+(`ENERGY_LOCAL_BOUNDARY`) plus `LateOriginRelativeEnergy` en
+`EarlyDestinationRelativeEnergy` (`ENERGY_STATE`). Alle vier zijn nullable,
+additive, ephemeral, shadow-only en Debug-only. Advies:
+`ADD_DEDICATED_TEMPORAL_CONTEXT` met conceptueel
+`BoundaryTemporalContextShadow` aan `ShadowEventEvidence`; `ArrivalProfileShadow`
+wordt geen temporal dump. Pre/post-RMS en EnergyDelta zijn één bronfamilie;
+relative-energy-randwaarden en section averages één beat-RMS-familie. Onset- en
+silence-operands worden niet opnieuw geëxposeerd; U08 is met bestaande lokale
+direction-evidence al descriptief bruikbaar. Schema v2 blijft additive zonder
+version bump, cachewijziging, AnalysisLibrary-persistence of cache-invalidation.
+Baseline blijft `m14-v5` / `phrase-analysis-v17`; M23A blijft `BEZIG` en v17 de
+veilige fallback. BUILD, RETURN en DROP zijn niet geïmplementeerd;
+BREAKDOWN blijft geparkeerd.
+
+Volgende stap: `M24A-5D-4H — Implement fine-grained temporal shadow evidence`,
+`STATUS = NOG NIET GESTART`. Uitsluitend de vier bestaande-intermediatevelden
+implementeren met provenance, nullable fail-closed, geen fabricated values,
+geen thresholds of semantische score, additive schema-v2 handoff en BeatBeam
+Debug-only isolation. Na runtime-relevante code: build → package/publish →
+install → sign → verify → restart → versie/hash-check → human runtimeacceptatie.
+Daarna volgt een gerichte 8–12-control human calibration rond U08, U16, M07,
+M08 en matched NOT/AMBIGUOUS controls; geen brede 173-track replay. Pas daarna
+kan Upward gate-design terugkomen. Geen nieuwe audiofeature of Essentia-call.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
