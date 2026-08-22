@@ -239,11 +239,56 @@ Auto Show, AnalysisLibrary, cache keys/persistence en ephemeral shadowveiligheid
 blijven ongewijzigd; `m14-v5`, `phrase-analysis-v17`, M23A `BEZIG` en v17 als
 veilige productionele fallback blijven gelden.
 
-Volgende stap: `M24A-5D — shadow event interpretation`, `STATUS = NOG NIET
-GESTART`. Eerst read-only ontwerpen; daarna eventueel een kleine,
-verklaarbare shadowlaag bovenop de drie vectorprofielen en Arrangement Identity.
-Geen High/Mid/Low, native type, canonical SectionRole, genre-routering, nieuwe
-Essentia-features, productionele consumptie, thresholds of classifier.
+`GEREED` M24A-5D-1 — read-only shadow event semantics audit. De eventroute is
+abstention-first: onafhankelijke evidence → boundary-georiënteerde
+`ShadowEventEvidence` → later nul of meer conservatieve hypotheses → pas na
+calibratie eventuele productionele interpretatie. Er is geen hard `EventType`;
+evidence-nabije aspecten blijven gescheiden van latere muzikale hypotheses.
+
+`GEREED` M24A-5D-2 — technische en menselijke runtime-PASS. Per bestaande
+geldige contiguous raw boundary `i → i+1` wordt exact één additive, ephemeral,
+shadow-only `ShadowEventEvidence` gemaakt. `BoundarySeconds` is exact de
+destination-starttijd en `BoundaryBar` de bestaande destination-startbar
+(Debug één-gebaseerd); eerste observations hebben geen kunstmatige inbound,
+laatste geen kunstmatige outbound en gaps leveren geen record. De evidence
+bevat uitsluitend `OriginObservationId`, `DestinationObservationId`,
+`BoundarySeconds`, `BoundaryBar`, `PreparationAspect`, `ArrivalAspect`,
+`StructuralDepartureAspect` (`OriginExit` en `DestinationEntry`) en
+`ArrangementIdentityAspect` (`RecurrenceStrength`, `FamilySalience`, `FamilyId`,
+`HasEarlierFamilyOccurrence`). Preparation komt alleen uit origin-exit,
+Arrival alleen uit destination-entry; arrangement identity blijft context en
+verandert Arrival niet.
+
+`HasEarlierFamilyOccurrence` is uitsluitend chronologische raw-family-history:
+`true` bij een geldige geselecteerde FamilyId die eerder in dezelfde raw sequence
+voorkwam, `false` bij geldige identity/history zonder eerdere occurrence, anders
+`null`. RecurrenceStrength of FamilySalience kunnen dit nooit op `true` zetten.
+`EvidenceCompleteness` en `MissingEvidence` zijn bewust niet toegevoegd:
+zonder concrete eventhypothese zou een algemene COMPLETE-status schijnprecisie
+zijn.
+
+De Magnetic-runtime-PASS bevestigt acht records voor negen raw observations:
+de upward boundaries rond 38.797 s en 112.645 s, de Bridge-guard rond 142.184 s
+met kleine lokale Arrival maar zelfstandige structural departure, en de sterke
+downward boundary rond 171.723 s zonder automatisch eventlabel. De eerste
+family-occurrence toont `section-family-001` met `HasEarlierFamilyOccurrence =
+false`; latere occurrences tonen correct `true`. Debug/handoff exposeert
+optioneel `shadow_analysis.event_evidence` binnen schema v2 met een aparte
+`SHADOW EVENT EVIDENCE`-sectie; dit beïnvloedt geen `rich_analysis.events`,
+`current_event`, `next_event` of Auto Show.
+
+Productioneel blijft alles geïsoleerd: `analysis_version = m14-v5`,
+`phrase_analysis_version = phrase-analysis-v17`, M23A blijft `BEZIG` en v17 de
+veilige fallback. Canonical boundaries/sections/confidence, Rich Musical Events,
+AnalysisLibrary, cache, persistence en Auto Show zijn ongewijzigd; er is geen
+shadow-event persistence, hypothese, threshold, weight, confidence of winner.
+
+Volgende stap: `M24A-5D-3 — abstention-first candidate event hypotheses`,
+`STATUS = NOG NIET GESTART`. Ontwerp eerst opnieuw de minimale gates/evidence
+voor verklaarbare kandidaten (BUILD, DROP, BREAKDOWN, RETURN en STRUCTURAL
+TRANSITION); `NO_EVENT`/abstention blijft normaal en gewenst. Geen productie-
+consumptie, canonical SectionRole, High/Mid/Low, native type, genre-routering
+of Auto Show-input.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
