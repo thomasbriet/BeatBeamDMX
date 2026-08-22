@@ -373,15 +373,48 @@ StructuralDeparture/ArrangementIdentity → shadow event hypotheses →
 `ArrivalProfileShadow` blijft evidence; `UPWARD_ARRIVAL_CANDIDATE` is geen
 vervanging daarvan. `STRUCTURAL_TRANSITION_CANDIDATE` blijft onafhankelijk.
 
-Volgende stap: `M24A-5D-4C — UPWARD ARRIVAL gate design & human controls`,
-`STATUS = NOG NIET GESTART`. Eerst uitsluitend een abstention-first gate
-ontwerpen uit bestaande evidence en een nieuwe human controlset beoordelen,
-met aandacht voor positieve StateShift, de mogelijke StateShift-blocker,
-destination-state zonder threshold, lokale salience zonder monotone aanname,
-preparation/release, onset als niet-harde context, terminale topology,
-mogelijke structural overlap en expliciete abstention. Er wordt nog niets
-geïmplementeerd. BUILD en RETURN zijn niet geïmplementeerd; BREAKDOWN blijft
-geparkeerd.
+`GEREED` M24A-5D-4C — read-only Upward Arrival gate-design en 16 nieuwe,
+onafhankelijke human controls. Oude Drop-verdicts zijn niet hergebruikt; de
+reviewcodering was 1=`UPWARD_ARRIVAL`, 2=`NOT_UPWARD_ARRIVAL`,
+3=`AMBIGUOUS`. De controlgroepen waren clean core, lagere/midden
+destination-state, StateShift/EnergyDirection-conflict, StateShift-controls,
+terminaliteit en StructuralTransition-overlap.
+
+`GEREED` M24A-5D-4D — read-only human verdict × evidence analyse en menselijke
+design-PASS; dit is geen productgate. De verdictverdeling was 6
+`UPWARD_ARRIVAL`, 7 `NOT_UPWARD_ARRIVAL` en 3 `AMBIGUOUS`.
+`UPWARD_ARRIVAL_GATE_STATUS = NEEDS_MORE_HUMAN_CONTROLS`.
+`DestinationRelativeEnergy` blijft belangrijke calibration-evidence zonder
+threshold; U-A was 3/3 upward bij ongeveer 0.842–0.867, terwijl U-B 0/3
+duidelijke upward was bij ongeveer 0.091, 0.623 en 0.707. Hoge
+destination-state overlapt echter met NOT_UPWARD en AMBIGUOUS.
+`ENERGY_DIRECTION_POSITIVE_STATUS = SUPPORTING_ONLY`: U07/U08/U09 hadden
+alle positieve StateShift en niet-positieve EnergyDirection, maar alleen U08
+was upward. U10/U11/U12 ondersteunden aanvankelijk een StateShift-blocker,
+maar U16 was human `UPWARD_ARRIVAL` met StateShift ongeveer -0.247.
+`STATE_SHIFT_NONPOSITIVE_STATUS = NOT_SUPPORTED`; StateShift <= 0 is geen
+universele blocker. U13 was terminal en upward, dus
+`TERMINALITY_STATUS = NOT_A_BLOCKER`. U15 was structural-compatible maar niet
+upward en U16 structural-compatible én upward; daarom
+`STRUCTURAL_COEXISTENCE_STATUS = SUPPORTED` en blijven de hypothese-assen
+orthogonaal met 0..N hypotheses, zonder winner/ranking. U06/U12/U14 blijven
+abstentioncases; lokale salience, onset, silence en preparation zijn geen
+universele harde voorwaarden.
+
+Brede sanitycheck: StateShift > 0 betreft 872 boundaries/173 tracks (59
+terminal, 3 structural-overlap); met EnergyDirection > 0 zijn dat 664/172
+(47, 2); met EnergyDirection <= 0 208/118 (12, 1). Destination-state en
+perceptuele coherentie zijn zonder nieuwe gevalideerde semantiek niet
+thresholdvrij als booleaanse gate te evalueren. Geen van de drie voorlopige
+gatevarianten is klaar voor implementatie.
+
+Volgende stap: `M24A-5D-4E — Matched Upward Arrival human controls`,
+`STATUS = NOG NIET GESTART`. Dit wordt geen brede random sample maar een
+kleine matched-controlstudie rond U08- en U16-type tegenvoorbeelden, hoge en
+lage/midden destination-state, terminale replicaties en
+StructuralTransition-overlap. Uitsluitend bestaande evidence en geen nieuwe
+features; nog geen code. BUILD, RETURN en DROP zijn niet geïmplementeerd;
+BREAKDOWN blijft geparkeerd.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
