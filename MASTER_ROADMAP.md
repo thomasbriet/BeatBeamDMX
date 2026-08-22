@@ -473,15 +473,66 @@ Baseline blijft `m14-v5` / `phrase-analysis-v17`; M23A blijft `BEZIG` en v17 de
 veilige fallback. BUILD, RETURN en DROP zijn niet geïmplementeerd;
 BREAKDOWN blijft geparkeerd.
 
-Volgende stap: `M24A-5D-4H — Implement fine-grained temporal shadow evidence`,
-`STATUS = NOG NIET GESTART`. Uitsluitend de vier bestaande-intermediatevelden
-implementeren met provenance, nullable fail-closed, geen fabricated values,
-geen thresholds of semantische score, additive schema-v2 handoff en BeatBeam
-Debug-only isolation. Na runtime-relevante code: build → package/publish →
-install → sign → verify → restart → versie/hash-check → human runtimeacceptatie.
-Daarna volgt een gerichte 8–12-control human calibration rond U08, U16, M07,
-M08 en matched NOT/AMBIGUOUS controls; geen brede 173-track replay. Pas daarna
-kan Upward gate-design terugkomen. Geen nieuwe audiofeature of Essentia-call.
+`GEREED` M24A-5D-4H — technische + menselijke runtime-PASS voor fine-grained
+temporal shadow evidence exposure. `BoundaryTemporalContextShadow` is aan
+`ShadowEventEvidence` gekoppeld met exact vier nullable additive velden:
+`PreBoundaryNormalizedRms`, `PostBoundaryNormalizedRms`,
+`LateOriginRelativeEnergy` en `EarlyDestinationRelativeEnergy`. De eerste twee
+zijn de bestaande normalizedRms van exact de laatste originbar en eerste
+destinationbar; de laatste twee zijn de bestaande P10/P90-normalized
+relative-energywaarden van diezelfde bars. Er zijn geen nieuwe audiofeatures,
+Essentia-calls, onset-/silence-operands of semantische scores toegevoegd.
+
+`EnergyDelta` blijft ongewijzigd uit zijn bestaande productiebron en is op alle
+vier anchors algebraïsch gelijk aan post minus pre binnen Debug-precisie.
+`PreBoundaryNormalizedRms`, `PostBoundaryNormalizedRms` en `EnergyDelta` vormen
+één `ENERGY_LOCAL_BOUNDARY`-provenancefamilie; `LateOriginRelativeEnergy`,
+`EarlyDestinationRelativeEnergy`, `OriginRelativeEnergy` en
+`DestinationRelativeEnergy` één `ENERGY_STATE`-familie. Deze velden mogen later
+niet als onafhankelijke stemmen worden geteld. Handoff blijft schema v2,
+additive, backward-compatible, optional, nullable, ephemeral, shadow-only en
+Debug-only. Er is geen persistence-, cache-, invalidation- of version-bump.
+Baseline blijft `m14-v5` / `phrase-analysis-v17`; M23A blijft `BEZIG`.
+
+Voor deployment is een pre-existing macOS-testhostblocker gevonden in
+`DiagnosticsProviderCombinesWatcherAndActiveTrackSnapshots`: een echte
+`PlaylistWatcher`/`FileSystemWatcher`-lifecycle hing. `Flush(true)` was niet de
+directe oorzaak. De test-only fixture seedt nu alleen de gelezen watcher- en
+active-trackstatus; assertions en de echte writerdekking bleven intact.
+Daarna waren de probleemtest 3x, bridge 30/30, StructureHandoff 16/16, 4H
+targeted .NET 47/47, volledige .NET 854/854, Python 185/185, BeatBeam 107/107
+en build 0 warnings/0 errors groen.
+
+Na verse deployment werd de runtimeblocker vastgesteld als
+`PLAYLIST_WATCHER_STARTUP_BLOCKED_PRE_BIND`: de bridge blokkeerde vóór de
+Unix-socket bind. De lifecyclefix laat `UnixBridgeServer` eerst binden en start
+de `PlaylistWatcher` daarna asynchroon via expliciete `Start()`; een
+bindvolgorde-regressietest is toegevoegd. De fix wijzigt geen temporal- of
+eventsemantiek. Eindvalidatie: bridge 31/31, SongAnalyzer .NET 855/855,
+ARM64 self-contained publish/socket-smoke PASS, ARM64/signing/plugin-verificatie
+PASS, `bridge.sock` beschikbaar, diagnostics geldig en native plugin- plus
+active-tracktelemetrie ontvangen.
+
+Vier-anchor runtimeconclusie: U08 (Upward) heeft section-relative-energy
+ongeveer 0.43→0.88 maar een lokale RMS-edge van ongeveer +0.03→−0.52 en
+EnergyDelta −0.56; één-bar landing verklaart Upward dus niet universeel. U16
+(Upward) gaat zowel section-state als lokale edge omlaag; de eerdere hypothese
+dat U16 lokaal omhoog zou zijn is niet bevestigd. M07 (Not Upward) heeft een
+licht stijgende section-state maar duidelijk dalende lokale edge; M08 (Upward)
+heeft beide stijgend. De vier technische projecties zijn PASS en tonen dat
+één-bar edge-context informatief maar niet universeel voldoende is.
+
+`UPWARD_ARRIVAL_CANDIDATE` is niet geïmplementeerd: geen gate, threshold, score,
+confidence, classifier, winner of ranking. Alleen
+`STRUCTURAL_TRANSITION_CANDIDATE` blijft geïmplementeerd.
+
+`M24A-5D-4I — Multi-scale temporal arrival diagnosis` — `STATUS = NOG NIET
+GESTART`. Dit wordt uitsluitend een read-only source/data-audit: inventariseer
+of reeds berekende multi-bar sequences, early-/late-barreeksen,
+first-/last-third-inputs, normalizedRms en relative-energy barreeksen U08, U16,
+M07, M08 en matched controls op meerdere schalen kunnen vergelijken. Eerst
+brondata, daarna eventueel design; geen nieuwe feature, extractie, versie,
+handoff, Auto Show-wijziging of Upward-gatewerk.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
