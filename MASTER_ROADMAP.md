@@ -557,12 +557,47 @@ score, classifier, confidence of ranking. Alleen
 `STRUCTURAL_TRANSITION_CANDIDATE` blijft geïmplementeerd. Baseline blijft
 `m14-v5` / `phrase-analysis-v17`; M23A blijft `BEZIG`.
 
-`M24A-5D-4J — Multi-scale temporal shadow exposure design` — `STATUS = NOG
-NIET GESTART`. Volgende stap `A`: uitsluitend ontwerpen hoe bestaande
-worker-barcontext minimaal, geordend en provenance-clean observeerbaar wordt.
-Voorkeur is een korte boundary-gecentreerde sequence boven premature E2/E4-
-aggregaten; schema v2 blijft additive/backward-compatible en shadow/ephemeral/
-Debug-only. Geen code, nieuwe feature, handoffwijziging, gate of persistence.
+`GEREED` M24A-5D-4J — read-only multi-scale temporal shadow exposure design +
+design-PASS. `MULTISCALE_EXPOSURE_DESIGN_STATUS = READY_FOR_IMPLEMENTATION`
+geldt uitsluitend voor additive exposure; geen upward-arrival gate, semantic
+classifier of threshold. De bestaande route blijft beat-RMS → baraggregatie /
+track-robuste normalisatie → track-P10/P90-relative-energy → raw section
+observations vóór High-refinement → shadow-eventprojectie. De window hoort vóór
+het verlies van worker-bararrays in de bestaande raw-observation /
+boundary-projectie te ontstaan. `boundaryBar` is 0-based en de eerste
+destinationbar; sections zijn start-inclusive/end-exclusive en een pair moet
+strict contiguous zijn.
+
+Aanbevolen model: maximaal 4 origin- en 4 destinationbars, één ordered
+relative sequence (variant B) met offsets `-4,-3,-2,-1,+1,+2,+3,+4`; geen
+offset 0. De sequence wordt optioneel genest als `window` binnen
+`BoundaryTemporalContextShadow`, uitsluitend onder
+`shadow_analysis.event_evidence[].temporal_context.window`. Elk barsample bevat
+alleen `RelativeBarOffset`, bestaande `NormalizedRms` en bestaande
+`RelativeEnergy`; onset en silence blijven `DEFER`. Korte sections leveren een
+partiële window zonder padding, duplicatie, nearest-bar of average fallback;
+ongeldige/non-contiguous ranges of waarden geven `TemporalWindow = null`.
+
+`E1_COMPATIBILITY_STRATEGY = A`: de bestaande vier 4H-fields blijven behouden
+en offsets `-1/+1` moeten exact overeenkomen; mismatch is fail-closed. Window,
+E1, EnergyDelta en section-relative-energy zijn temporele views uit dezelfde
+beat-RMS-provenancefamilies, geen extra votes. Schema v2 blijft additive,
+backward-compatible, optional/nullable, shadow-only, ephemeral en Debug-only;
+geen AnalysisLibrary-, cache-, persistence- of version-bump. E1/E2/E4 zijn
+uitsluitend calibration derivations. Een gerichte human calibration gebruikt
+10 bestaande boundaries (U08, U16, M07, M08, vijf reviewed controls en één
+ambiguous case), zonder vooraf getoond human verdict. Payloadraming blijft
+circa 10,7 KiB per track en 860 KiB voor de 1.529-boundary auditset.
+
+`M24A-5D-4K — Implement multi-scale temporal shadow exposure` — `STATUS = NOG
+NIET GESTART`. 4K mag uitsluitend deze additive window, schema-v2-serialisatie,
+parser/Debug, tests en fresh deployment implementeren; geen
+`UPWARD_ARRIVAL_CANDIDATE`, gate, threshold, score, classifier, confidence,
+ranking, nieuwe audiofeature/Essentia-call, onset/silence-window,
+AnalysisLibrary-persistence, cachewijziging of version bump. `UPWARD_ARRIVAL_CANDIDATE`
+blijft niet geïmplementeerd; alleen `STRUCTURAL_TRANSITION_CANDIDATE` blijft
+geïmplementeerd. Baseline blijft `m14-v5` / `phrase-analysis-v17`; M23A blijft
+`BEZIG`.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
