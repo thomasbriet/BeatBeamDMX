@@ -526,13 +526,43 @@ heeft beide stijgend. De vier technische projecties zijn PASS en tonen dat
 confidence, classifier, winner of ranking. Alleen
 `STRUCTURAL_TRANSITION_CANDIDATE` blijft geïmplementeerd.
 
-`M24A-5D-4I — Multi-scale temporal arrival diagnosis` — `STATUS = NOG NIET
-GESTART`. Dit wordt uitsluitend een read-only source/data-audit: inventariseer
-of reeds berekende multi-bar sequences, early-/late-barreeksen,
-first-/last-third-inputs, normalizedRms en relative-energy barreeksen U08, U16,
-M07, M08 en matched controls op meerdere schalen kunnen vergelijken. Eerst
-brondata, daarna eventueel design; geen nieuwe feature, extractie, versie,
-handoff, Auto Show-wijziging of Upward-gatewerk.
+`GEREED` M24A-5D-4I — read-only multi-scale temporal arrival diagnosis en
+design-PASS. Tijdens workeranalyse bestaan per-bar `normalizedRms`,
+`relative_energy`, normalized onset en normalized silence, maar de volledige
+barreeksen zijn niet bewaard in audit-artifacts, AnalysisLibrary, phrase-cache
+of huidige shadow handoff. Alleen de 4H-E1-randcontext blijft beschikbaar.
+Daarom `MULTISCALE_EXISTING_DATA_STATUS = EXISTING_DATA_STILL_INSUFFICIENT`.
+
+De audit gebruikte E1 (laatste/ eerste bar), E2 (laatste/ eerste twee bars) en
+E4 (laatste/ eerste maximaal vier bars) uitsluitend als diagnostische vensters;
+E2/E4 zijn geen productmetrics en waren zonder tijdelijke barreeksen niet
+berekenbaar. U08 blijft `UPWARD_ARRIVAL` met dalende E1 en stijgende
+section-state; bars 2–4 ontbreken, dus
+`U08_MULTISCALE_EXPLANATION_STATUS = INSUFFICIENT_DATA`. U16 blijft
+`UPWARD_ARRIVAL` met dalende E1 en section-state; bars 2–4 ontbreken en de
+boundary-alignment is `CLEAN`, dus
+`U16_MULTISCALE_EXPLANATION_STATUS = INSUFFICIENT_DATA`. M07 (`NOT_UPWARD`)
+heeft dalende E1 bij licht stijgende section-state; M08 (`UPWARD`) heeft beide
+stijgend. Dit contrast is informatief, maar E2/E4 blijven onbekend.
+
+Boundary alignment is `CLEAN` voor U08, U16, M07 en M08 (M08 terminal); geen
+van de vier anchors vraagt nu om boundaryverschuiving of segmentationdiagnose.
+Onset/silence bestaan per bar in de worker, maar alleen E1-delta is bewaard;
+geen multi-scale conclusie of nieuwe onset-/silencevelden zijn gemaakt. Er is
+geen voldoende onderbouwde multi-scale arrival-routehypothese. Er is geen
+nieuwe audiofeature nodig.
+
+`UPWARD_ARRIVAL_CANDIDATE` blijft niet geïmplementeerd: geen gate, threshold,
+score, classifier, confidence of ranking. Alleen
+`STRUCTURAL_TRANSITION_CANDIDATE` blijft geïmplementeerd. Baseline blijft
+`m14-v5` / `phrase-analysis-v17`; M23A blijft `BEZIG`.
+
+`M24A-5D-4J — Multi-scale temporal shadow exposure design` — `STATUS = NOG
+NIET GESTART`. Volgende stap `A`: uitsluitend ontwerpen hoe bestaande
+worker-barcontext minimaal, geordend en provenance-clean observeerbaar wordt.
+Voorkeur is een korte boundary-gecentreerde sequence boven premature E2/E4-
+aggregaten; schema v2 blijft additive/backward-compatible en shadow/ephemeral/
+Debug-only. Geen code, nieuwe feature, handoffwijziging, gate of persistence.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
