@@ -201,14 +201,49 @@ Baseline blijft `analysis_version = m14-v5` en
 blijft de veilige productionele fallback. Canonical output, Rich Musical
 Events, Auto Show, AnalysisLibrary en cachegedrag zijn ongewijzigd.
 
-Volgende actieve ontwikkelstap: `M24A-5C-3 — multi-track runtimecalibratie van
-de vectorprofielen`, `STATUS = NOG NIET GESTART`. Beoordeel Free Your Mind,
-Levels en Calling naast de geaccepteerde Magnetic-guard op
-boundaryconsistentie, tekenbehoud, origin/destination state, nullgedrag,
-onafhankelijkheid van arrangement identity en structural departure, en
-diagnostische leesbaarheid. Geen track-specifieke tuning en nog geen
-eventinterpretatie. `M24A-5D` blijft pas daarna kandidaat voor shadow event
-interpretation.
+`GEREED` M24A-5C-3 — multi-track menselijke runtime-PASS. De nieuwe
+vectorprofielen zijn zonder track-specifieke tuning of codecorrectie bevestigd
+op The Bausa — Magnetic, Prospa/Cloonee — Free Your Mind, Avicii — Levels
+(Original Version) en Sebastian Ingrosso/Alesso/Ryan Tedder — Calling (Extended
+Club Mix). Preparation en Arrival behouden dezelfde boundary-direction
+evidence; origin- en destination-energy blijven afzonderlijke state; signed
+energy-, onset- en silence-richtingen blijven onafhankelijk. Recurrence en
+family salience blijven buiten Arrival, structural departure blijft zelfstandig
+van lokale arrival magnitude/direction, en eerste/gapped/eind-observations
+behouden veilig nullgedrag. `BuildMomentum` en `DropImpact` blijven
+`unknown/null`; er is geen `ArrivalImpact`-score.
+
+De bestaande Magnetic-guards zijn onderdeel van deze calibratie: upward
+arrivals rond 38.797 en 112.645 s, de Bridge rond 142.184 s met kleine lokale
+arrival maar duidelijke structural departure, en de sterke downward transition
+naar de laatste observation. Free Your Mind bevestigt upward arrival rond
+46.254 s, downward transition rond 74.379 s, een rising-preparation-traject
+rond 136.254–166.255 s zonder BUILD-label en zelfstandige family-exit aan het
+einde. Levels bevestigt afwisselende richtingen binnen dezelfde trackidentity,
+waarbij hoge recurrence/salience en boundary magnitude nooit direction
+bepalen; lokale EnergyDirection kan bovendien afwijken van de gemiddelde
+origin/destination-state. Calling is de cyclische stresstest: zeer hoge
+recurrence en family salience bevatten zowel upward als downward vectors,
+inclusief tegengestelde EnergyDirection/OnsetDirection-tekens. Daarmee zijn
+RecurrenceStrength, FamilySalience en lokale magnitude geen event- of
+ArrivalImpact-proxy.
+
+Cross-track blijft de leidende scheiding:
+`PreparationProfile` = origin-trajectory plus exit, `ArrivalProfile` = lokale
+boundary magnitude plus signed direction plus origin/destination state,
+`StructuralDepartureProfile` = structurele/contextuele departure, en
+Arrangement Identity = recurrence/family salience. Deze lagen worden pas in
+een latere interpretatielaag bovenop elkaar gelezen en niet vooraf tot één
+generieke score samengevoegd. Baseline, canonical output, Rich Musical Events,
+Auto Show, AnalysisLibrary, cache keys/persistence en ephemeral shadowveiligheid
+blijven ongewijzigd; `m14-v5`, `phrase-analysis-v17`, M23A `BEZIG` en v17 als
+veilige productionele fallback blijven gelden.
+
+Volgende stap: `M24A-5D — shadow event interpretation`, `STATUS = NOG NIET
+GESTART`. Eerst read-only ontwerpen; daarna eventueel een kleine,
+verklaarbare shadowlaag bovenop de drie vectorprofielen en Arrangement Identity.
+Geen High/Mid/Low, native type, canonical SectionRole, genre-routering, nieuwe
+Essentia-features, productionele consumptie, thresholds of classifier.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
