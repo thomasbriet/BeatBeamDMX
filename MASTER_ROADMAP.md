@@ -408,13 +408,49 @@ perceptuele coherentie zijn zonder nieuwe gevalideerde semantiek niet
 thresholdvrij als booleaanse gate te evalueren. Geen van de drie voorlopige
 gatevarianten is klaar voor implementatie.
 
-Volgende stap: `M24A-5D-4E — Matched Upward Arrival human controls`,
-`STATUS = NOG NIET GESTART`. Dit wordt geen brede random sample maar een
-kleine matched-controlstudie rond U08- en U16-type tegenvoorbeelden, hoge en
-lage/midden destination-state, terminale replicaties en
-StructuralTransition-overlap. Uitsluitend bestaande evidence en geen nieuwe
-features; nog geen code. BUILD, RETURN en DROP zijn niet geïmplementeerd;
+`GEREED` M24A-5D-4E — read-only matched Upward Arrival human controls. De
+matched set bevatte 12 boundaries op 12 verschillende tracks; geen boundary
+was eerder human-reviewed. De groepen waren M-A U08-type direction-conflict
+(3), M-B U16-type negative/nonpositive StateShift (3), M-C high destination
+(2), M-D lower/mid destination (2) en M-E terminal/StructuralTransition
+replicaties (2). De menselijke verdicts waren 1 `UPWARD_ARRIVAL` (M08), 9
+`NOT_UPWARD_ARRIVAL` (M01–M05, M07, M09–M10, M12) en 2 `AMBIGUOUS` (M06,
+M11). M-A reproduceerde U08 niet (0/3 duidelijke upward); M-B reproduceerde
+U16 evenmin (0/3 duidelijke upward). M07/M08 tonen tegengestelde verdicts
+bij vergelijkbare hoge destination-state. M11 bevestigt dat terminaliteit geen
+algemene blocker is; M12 bevestigt dat StructuralTransition geen Upward-proxy
+is. DestinationRelativeEnergy blijft calibration-evidence zonder threshold.
+
+`GEREED` M24A-5D-4F — read-only matched verdict × evidence diagnosis en human
+design-PASS. `SECTION_AVERAGE_STATE_STATUS = LIKELY_TOO_COARSE`;
+`EXISTING_EVIDENCE_STATUS = SUFFICIENT_IF_REEXPOSE_EXISTING_TEMPORAL_EVIDENCE`.
+U08 is met bestaande lokale boundary-evidence descriptief te onderscheiden van
+de matched NOT-controls, maar dit rechtvaardigt geen gate, score of threshold.
+U16 blijft met de geëxporteerde section-/boundarysamenvattingen onverklaard:
+een negatieve section-average StateShift maakt StateShift niet fout, maar
+StateShift is geen universele representatie van perceptuele arrival. M07/M08
+bevestigen dat Upward niet mag degenereren tot `HIGH_ENERGY_DESTINATION`.
+Relevante fijnere temporal evidence bestaat al in de pipeline; de volgende
+route is B: ontwerp additive shadow-exposure met provenance-clean per-bar,
+voor/na-boundary en bestaande lokale energy-evidence. Geen nieuwe audio- of
+Essentia-feature is nodig. `ENERGY_DIRECTION_POSITIVE_STATUS =
+SUPPORTING_ONLY`; `STATE_SHIFT_NONPOSITIVE_STATUS = NOT_SUPPORTED`;
+`TERMINALITY_STATUS = NOT_A_BLOCKER`; `STRUCTURAL_COEXISTENCE_STATUS =
+SUPPORTED`. OnsetDirection is geen harde eis of blocker; local salience is één
+gecorreleerde evidencefamilie; preparation is alleen supporting context.
+`UPWARD_ARRIVAL_GATE_STATUS = NEEDS_MORE_HUMAN_CONTROLS / EVIDENCE EXPOSURE`;
+er is nog geen shadow gate. BUILD, RETURN en DROP zijn niet geïmplementeerd;
 BREAKDOWN blijft geparkeerd.
+
+Volgende stap: `M24A-5D-4G — Fine-grained temporal shadow evidence design`,
+`STATUS = NOG NIET GESTART`. Dit is uitsluitend ontwerp: inventariseer waar
+bestaande fijnere temporal evidence ontstaat, wat persistent/intermediate
+beschikbaar is, wat nu verloren gaat, minimale additive shadowvelden,
+provenance, dubbel-tellen, Debug-only grenzen, schema-v2 backward compatibility
+en de human controls na exposure. Geen nieuwe features, Essentia-calls,
+thresholds, gate/classifier/score, canonical/native evidence, Rich Musical
+Events of Auto Show-wijziging. Raw audio → bestaande berekeningen → additive
+fine-grained shadow evidence → human calibration → semantische hypothese.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
