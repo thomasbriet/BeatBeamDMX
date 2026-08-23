@@ -628,12 +628,51 @@ productfield-, exposure- of schemawijziging en niet `INCLUDE_NOW`.
 
 ### M24A-5D-4M — Onset/silence temporal calibration audit
 
-`STATUS = NOG NIET GESTART`. 4M blijft uitsluitend read-only en gebruikt exact
-dezelfde tien anchors. Het onderzoekt blind onset- en silence-E1/E2/E4- en
-barshapecontext, met name of U16 verklaard wordt, U05 van energy-false-positives
-wordt onderscheiden en U06 ambigu blijft. Geen code-, shadowveld-, schema-,
-persistence-, cache-, version-, Essentia-, gate-, score-, classifier- of
-thresholdwijziging; geen automatische combinatie met energy.
+`STATUS = GEREED — blind onset/silence temporal calibration audit + human-review
+PASS`. Stopstatus: `4M_CALIBRATION_PASS — READY_FOR_HUMAN_REVIEW_OF_ACTIVITY_RELEASE_FINDINGS`.
+Dezelfde tien 4L-anchors zijn gebruikt; onset/silence zijn eerst blind
+geëxtraheerd en pas daarna met human labels gejoined. U06 bleef `AMBIGUOUS` en
+werd niet als positief of negatief trainingspunt behandeld. Er was geen
+labelgestuurde tuning, threshold- of accuracy-optimalisatie.
+
+De bestaande `onsetStrength` per beatframe gebruikt de gemiddelde positieve
+sample-afgeleide; `silencePercentage` gebruikt het percentage samples met
+`abs(sample) < 0.001`. `aggregate_bars` gebruikt dezelfde bar-indexruimte als
+de raw boundary-context; `robust_normalize` past bestaande mediaan/IQR-
+normalisatie, fallbacks en begrenzing op `[-4,4]` toe. Er zijn geen nieuwe
+audiofeatures of Essentia-calls toegevoegd.
+
+`U16_ACTIVITY_RELEASE_STATUS = DOES_NOT_EXPLAIN`: energy, onset en silence
+verklaren gezamenlijk de menselijke `UPWARD_ARRIVAL` niet. U05 blijft
+`NOT_IMPROVED`; U06 is `EVIDENCE_BECOMES_ONE_SIDED` zonder herlabeling; U08 is
+`ADDS_CLEAR_INFORMATION`; M07/M08 is `CONTRADICTED`.
+
+`ONSET_INCREMENTAL_INFORMATION_STATUS = PARTIALLY_ADDITIVE` en
+`SILENCE_INCREMENTAL_INFORMATION_STATUS = PARTIALLY_ADDITIVE`.
+`LOW_LEVEL_TEMPORAL_EVIDENCE_STATUS = LOW_LEVEL_TEMPORAL_EVIDENCE_NOT_SUFFICIENT`.
+`ONSET/SILENCE EXPOSURE = NOT JUSTIFIED AS NEXT IMPLEMENTATION STEP` en
+`NEW_AUDIO_FEATURES_NEEDED = NO`. Er zijn geen shadow fields, handoffvelden,
+schema-uitbreiding, gate, threshold, score, classifier of confidence toegevoegd.
+
+`NEXT_DIRECTION = D`: terug naar inhoudelijk andere musical, structural en
+contextual evidence; geen verdere stapeling van vergelijkbare low-level
+boundarymetrics. `UPWARD_ARRIVAL_CANDIDATE` blijft niet geïmplementeerd; alleen
+`STRUCTURAL_TRANSITION_CANDIDATE` blijft geïmplementeerd.
+
+### M24A-5D-4N — Musical/structural arrival context audit
+
+`STATUS = NOG NIET GESTART`. 4N wordt uitsluitend een read-only source/data/
+design-audit op exact dezelfde calibration anchors, met U16 als primaire
+moeilijke case. Het onderzoekt reeds bestaande section-family identity,
+recurrence, first/repeated occurrence, family salience, structural role,
+origin/destination-family transitions, preparation/context,
+arrangement-profile shadow, section-character shadow, novelty,
+structural-departure evidence, phrase/section sequence, terminality en
+surrounding structural events waar beschikbaar.
+
+Geen nieuwe audiofeature, Essentia-call, shadow exposure, gate, score,
+threshold, classifier, canonical role, eventsemantiek of productionwijziging.
+Canonical semantic labels worden niet circulair als input gebruikt.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
