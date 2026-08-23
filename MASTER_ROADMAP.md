@@ -661,18 +661,79 @@ boundarymetrics. `UPWARD_ARRIVAL_CANDIDATE` blijft niet geïmplementeerd; alleen
 
 ### M24A-5D-4N — Musical/structural arrival context audit
 
-`STATUS = NOG NIET GESTART`. 4N wordt uitsluitend een read-only source/data/
-design-audit op exact dezelfde calibration anchors, met U16 als primaire
-moeilijke case. Het onderzoekt reeds bestaande section-family identity,
-recurrence, first/repeated occurrence, family salience, structural role,
-origin/destination-family transitions, preparation/context,
-arrangement-profile shadow, section-character shadow, novelty,
-structural-departure evidence, phrase/section sequence, terminality en
-surrounding structural events waar beschikbaar.
+`STATUS = GEREED — blind musical/structural arrival context audit + human-review PASS`.
+Stopstatus: `4N_STRUCTURAL_AUDIT_PASS — READY_FOR_HUMAN_REVIEW_OF_CONTEXT_FINDINGS`.
+De exact dezelfde tien anchors als 4L/4M zijn gebruikt: U08, U16, M07, M08,
+U01, U02, U05, U07, U10 en U06; U06 bleef `AMBIGUOUS`. Structurele evidence
+is eerst blind geëxtraheerd en pas daarna met human labels gejoined. Er was
+geen labelgestuurde tuning, threshold, score of accuracy-optimalisatie.
 
-Geen nieuwe audiofeature, Essentia-call, shadow exposure, gate, score,
-threshold, classifier, canonical role, eventsemantiek of productionwijziging.
-Canonical semantic labels worden niet circulair als input gebruikt.
+De provenance/circularity is vooraf geaudit. Gebruikt zijn alleen provenance-
+clean pre-native raw observations/boundaries, section-family identity,
+occurrence/return-context, recurrence, family salience, membership-exit,
+structural route, terminaliteit en actuele shadowprojectors waar veilig.
+Canonical roles, PhraseType/canonical classification, canonical output,
+native High/Mid/Low als musical meaning, native/Rekordbox phrase types en
+human verdicts als input zijn uitgesloten.
+
+`CANONICAL_ROLE_USED_AS_INPUT = NO`.
+
+U16 gaat van `section-family-002` naar `section-family-001`: destination is
+occurrence 3/3 en een `RETURN`; origin is occurrence 14/14 en structureel
+salienter/recurrenter. Veilige evidence: `MembershipExitStrength ≈ 0.939565`,
+`StructuralEvidence ≈ 0.841682`, `StructuralRoute = family-exit`, destination
+non-terminal. De bestaande `STRUCTURAL_TRANSITION_CANDIDATE` is aanwezig,
+maar was geen input. `U16_STRUCTURAL_CONTEXT_STATUS =
+PARTIAL_CONTEXTUAL_EXPLANATION`: descriptief plausibele structural release/
+return zonder acoustische rise, maar niet breed genoeg voor een arrivalregel.
+
+`U08_STRUCTURAL_ADDED_VALUE = PARTIALLY_ADDITIVE` (same-family return naast
+de nuttige E4-context).
+`M07_M08_STRUCTURAL_CONTRAST = PRESERVED`: M07 is NOT_UPWARD en same-family
+return; M08 is UPWARD, return en terminal; terminaliteit is geen blocker.
+`U05_STRUCTURAL_DISCRIMINATION_STATUS = NOT_IMPROVED`: same-family return,
+maar geen oplossing voor de eerdere energy false-positive.
+`U06_STRUCTURAL_AMBIGUITY_STATUS = PRESERVED`: family context onvoldoende.
+
+Alleen U16 van de tien anchors heeft `STRUCTURAL_TRANSITION_CANDIDATE`; vier
+andere bekende UPWARD-cases missen deze. De candidate is dus geen proxy voor
+`UPWARD_ARRIVAL` en wordt niet aangepast.
+
+`RETURN_RECURRENCE_INFORMATION_STATUS = PARTIALLY_ADDITIVE`.
+`FAMILY_SALIENCE_INFORMATION_STATUS = NOT_INFORMATIVE`.
+`SEQUENCE_CONTEXT_INFORMATION_STATUS = PARTIALLY_ADDITIVE`.
+`STRUCTURAL_TRANSITION_INFORMATION_STATUS = PARTIALLY_ADDITIVE`.
+`MUSICAL_STRUCTURAL_CONTEXT_STATUS = PARTIALLY_INFORMATIVE`.
+`NEW_AUDIO_FEATURES_NEEDED = NO`.
+`NEXT_DIRECTION = C`: recurrence/family evidence is nuttig, maar sequence-
+context moet eerst dieper read-only worden onderzocht. Geen aanvullende
+shadow exposure is daarvoor eerst nodig; bestaande 3B raw observability is
+voldoende.
+
+Geen `UPWARD_ARRIVAL_CANDIDATE`, gate, threshold, score, classifier,
+confidence, nieuwe fields, productionwijziging of nieuwe audiofeature.
+
+### M24A-5D-4O — Sequence-context arrival pattern audit
+
+`STATUS = NOG NIET GESTART`.
+
+4O wordt uitsluitend read-only uitgevoerd op exact dezelfde tien anchors en
+provenance-clean bestaande raw structurele data. Doel is onderzoeken of de
+positie van een boundary in een langere family-sequence human
+`UPWARD_ARRIVAL` beter beschrijft dan één losse origin→destination-relatie.
+
+Minimaal worden previous family → origin family → destination family → next
+family en bredere beschikbare sequences descriptief onderzocht, zonder vooraf
+een patroon te forceren. De audit beantwoordt ten minste: U16-sequence en
+mogelijke tijdelijke excursie; herhaling bij andere UPWARD-cases; tegenvoorbeelden
+bij U05/M07; occurrence ordinal versus return yes/no; lengte/herhaling van de
+origin-run; destination-continuation; en nieuwe provenance-clean relaties die
+4N nog niet expliciet vergeleek.
+
+4O mag geen nieuwe audiofeature, shadowfield, exposure, gate, score, threshold,
+classifier, canonical role, High/Mid/Low semantic input of productionwijziging
+toevoegen. `UPWARD_ARRIVAL_CANDIDATE` blijft niet geïmplementeerd; alleen
+`STRUCTURAL_TRANSITION_CANDIDATE` blijft de bestaande shadow-eventhypothese.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
