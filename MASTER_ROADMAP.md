@@ -589,15 +589,51 @@ uitsluitend calibration derivations. Een gerichte human calibration gebruikt
 ambiguous case), zonder vooraf getoond human verdict. Payloadraming blijft
 circa 10,7 KiB per track en 860 KiB voor de 1.529-boundary auditset.
 
-`M24A-5D-4K — Implement multi-scale temporal shadow exposure` — `STATUS = NOG
-NIET GESTART`. 4K mag uitsluitend deze additive window, schema-v2-serialisatie,
-parser/Debug, tests en fresh deployment implementeren; geen
+`M24A-5D-4K — Implement multi-scale temporal shadow exposure` — `STATUS =
+4K_RUNTIME_PASS — READY_FOR_MULTISCALE_HUMAN_CALIBRATION`. De additive
+temporal context is runtime-gevalideerd met `temporal_context.window.bars[]`:
+maximaal vier origin- en vier destinationbars, offsets `-4…-1,+1…+4`, en
+uitsluitend `RelativeBarOffset`, `NormalizedRms` en `RelativeEnergy`. Schema v2
+is additive, partial/fail-closed en behoudt E1 `-1/+1`-compatibility en de
+`EnergyDelta`-invariant. Onset en silence zijn nog niet geïmplementeerd en er
+zijn geen production semantic wijzigingen. 4K mag uitsluitend deze additive
+window, schema-v2-serialisatie, parser/Debug, tests en fresh deployment implementeren; geen
 `UPWARD_ARRIVAL_CANDIDATE`, gate, threshold, score, classifier, confidence,
 ranking, nieuwe audiofeature/Essentia-call, onset/silence-window,
 AnalysisLibrary-persistence, cachewijziging of version bump. `UPWARD_ARRIVAL_CANDIDATE`
 blijft niet geïmplementeerd; alleen `STRUCTURAL_TRANSITION_CANDIDATE` blijft
 geïmplementeerd. Baseline blijft `m14-v5` / `phrase-analysis-v17`; M23A blijft
 `BEZIG`.
+
+`M24A-5D-4L` = `GEREED — blind multi-scale human calibration + human-review
+PASS`. Stopstatus: `4L_CALIBRATION_PASS — READY_FOR_HUMAN_REVIEW_OF_FINDINGS`.
+De exact tien reeds human-reviewed boundaries (U08, U16, M07, M08, U01, U02,
+U05, U07, U10 en U06) zijn vers blind geanalyseerd en pas daarna aan de labels
+gekoppeld; U06 bleef `AMBIGUOUS`. Er was geen labelgestuurde featureselectie,
+tuning, accuracy- of thresholdoptimalisatie. U08 is
+`EXPLAINS_E1_EXCEPTION`; U16 is `DOES_NOT_EXPLAIN`; het M07/M08-contrast is
+`STRENGTHENED`. E4 voegt descriptief de duidelijkste aanvullende context toe,
+maar positieve energy-windows overlappen met U05 en U06.
+
+`MULTISCALE_ENERGY_CALIBRATION_STATUS = ENERGY_WINDOWS_PARTIALLY_INFORMATIVE`.
+Geen E1-, E2-, E4-, section-delta- of gecombineerde energy-only gate is
+gevalideerd; `UPWARD_ARRIVAL_CANDIDATE` is niet geïmplementeerd. De enige
+bestaande nieuwe shadow-eventhypothese blijft
+`STRUCTURAL_TRANSITION_CANDIDATE`.
+
+`NEXT_DIRECTION = B`: energy-window helpt, maar moeilijke cases vereisen eerst
+read-only onderzoek naar bestaande onset- en silence-temporal context.
+`ONSET_SILENCE_STATUS = READ_ONLY_INVESTIGATION_JUSTIFIED`; dit is geen
+productfield-, exposure- of schemawijziging en niet `INCLUDE_NOW`.
+
+### M24A-5D-4M — Onset/silence temporal calibration audit
+
+`STATUS = NOG NIET GESTART`. 4M blijft uitsluitend read-only en gebruikt exact
+dezelfde tien anchors. Het onderzoekt blind onset- en silence-E1/E2/E4- en
+barshapecontext, met name of U16 verklaard wordt, U05 van energy-false-positives
+wordt onderscheiden en U06 ambigu blijft. Geen code-, shadowveld-, schema-,
+persistence-, cache-, version-, Essentia-, gate-, score-, classifier- of
+thresholdwijziging; geen automatische combinatie met energy.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
