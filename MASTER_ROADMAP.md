@@ -715,25 +715,69 @@ confidence, nieuwe fields, productionwijziging of nieuwe audiofeature.
 
 ### M24A-5D-4O — Sequence-context arrival pattern audit
 
+`STATUS = GEREED — blind sequence-context arrival pattern audit + human-review PASS`.
+Stopstatus: `4O_SEQUENCE_AUDIT_PASS — READY_FOR_HUMAN_REVIEW_OF_SEQUENCE_FINDINGS`.
+Dezelfde tien anchors als 4L/4M/4N zijn gebruikt; U06 bleef `AMBIGUOUS`.
+Sequence-context is eerst blind gereconstrueerd uit provenance-clean 3B raw
+observations/familyvelden en directe raw section ordering, zonder nearest-
+sectionheuristiek, ingevulde identities, canonical/native semantics of
+labelgestuurde tuning. Daarna zijn de human labels gejoined.
+
+`CANONICAL_ROLE_USED_AS_INPUT = NO`.
+
+U16 heeft raw sequence `family-001 × 2 → family-002 × 7 → Unknown →
+family-002 × 7 → family-001 → Unknown`. Rond de boundary is dit
+`family-002 → family-002 → family-002 → family-001 → Unknown`: origin
+family-002, occurrence 14/14, laatste occurrence en actuele contiguous run 7;
+destination family-001, occurrence 3/3, eerder gehoord, return distance 15 en
+geen destination-continuation. De bestaande family-exit/membership-exit-context
+blijft relevant. Dit langere patroon is uniek in de calibratieset.
+
+`U16_SEQUENCE_CONTEXT_STATUS = PARTIAL_SEQUENCE_EXPLANATION`.
+`U08_SEQUENCE_ADDED_VALUE = MOSTLY_REDUNDANT`.
+`M07_M08_SEQUENCE_CONTRAST = STRENGTHENED`.
+`U05_SEQUENCE_DISCRIMINATION_STATUS = PARTIALLY_IMPROVED`.
+`U06_SEQUENCE_AMBIGUITY_STATUS = PRESERVED`.
+`RETURN_DISTANCE_INFORMATION_STATUS = PARTIALLY_ADDITIVE`.
+`OCCURRENCE_POSITION_INFORMATION_STATUS = MOSTLY_REDUNDANT`.
+`RUN_LENGTH_INFORMATION_STATUS = PARTIALLY_ADDITIVE`.
+`DESTINATION_CONTINUATION_INFORMATION_STATUS = NOT_INFORMATIVE`.
+`SEQUENCE_PATTERN_CONTEXT_STATUS = PARTIALLY_INFORMATIVE`.
+
+De combinatie lange origin-run + laatste origin occurrence + return naar een
+gevestigde destination family + afstand 15 + family-exit is een
+`U16-SPECIFIC OBSERVATION`, geen algemene contextual-arrival route. Alleen U16
+heeft in de tien-set `STRUCTURAL_TRANSITION_CANDIDATE`; vier andere UPWARD-
+cases missen hem. De candidate blijft referentie-only en geen UPWARD-proxy.
+
+`NEXT_DIRECTION = C`: zoek eerst gerichte structureel vergelijkbare controls.
+`NEW_AUDIO_FEATURES_NEEDED = NO`.
+`ADDITIONAL_SHADOW_EXPOSURE_NEEDED = NO` voor de eerstvolgende read-only audit;
+bestaande 3B raw observability is voldoende.
+
+Geen `UPWARD_ARRIVAL_CANDIDATE`, gate, threshold, score, classifier,
+confidence, nieuwe fields, exposure, productie- of sequence-contextcode.
+
+### M24A-5D-4P — Targeted sequence-analogue control audit
+
 `STATUS = NOG NIET GESTART`.
 
-4O wordt uitsluitend read-only uitgevoerd op exact dezelfde tien anchors en
-provenance-clean bestaande raw structurele data. Doel is onderzoeken of de
-positie van een boundary in een langere family-sequence human
-`UPWARD_ARRIVAL` beter beschrijft dan één losse origin→destination-relatie.
+4P wordt uitsluitend read-only uitgevoerd. Vanuit bestaande provenance-clean
+raw structural data zoekt de audit blind naar structureel vergelijkbare
+boundaries voor afzonderlijke U16-ingrediënten: lange/repeated origin-run,
+vertrek bij laatste origin occurrence, non-zero returnafstand, return naar een
+gevestigde destination family, family-exit en combinaties daarvan.
 
-Minimaal worden previous family → origin family → destination family → next
-family en bredere beschikbare sequences descriptief onderzocht, zonder vooraf
-een patroon te forceren. De audit beantwoordt ten minste: U16-sequence en
-mogelijke tijdelijke excursie; herhaling bij andere UPWARD-cases; tegenvoorbeelden
-bij U05/M07; occurrence ordinal versus return yes/no; lengte/herhaling van de
-origin-run; destination-continuation; en nieuwe provenance-clean relaties die
-4N nog niet expliciet vergeleek.
+Eerst worden bestaande human-reviewed U/M-controls buiten de huidige subset
+onderzocht; alleen als die onvoldoende zijn wordt een kleine nieuwe kandidaatset
+blind geselecteerd, zonder nieuwe verdicts te verzinnen. Human verdicts worden
+pas na structurele selectie gekoppeld. 4P bepaalt of U16's patroon bij meerdere
+UPWARD-cases, bij NOT_UPWARD-cases, alleen track-specifiek of als gedeeltelijke
+combinatie van ingrediënten voorkomt.
 
-4O mag geen nieuwe audiofeature, shadowfield, exposure, gate, score, threshold,
-classifier, canonical role, High/Mid/Low semantic input of productionwijziging
-toevoegen. `UPWARD_ARRIVAL_CANDIDATE` blijft niet geïmplementeerd; alleen
-`STRUCTURAL_TRANSITION_CANDIDATE` blijft de bestaande shadow-eventhypothese.
+4P mag geen audiofeature, Essentia-call, shadow exposure, productiecode,
+tests, gate, threshold, score, classifier, confidence, canonical role of
+High/Mid/Low semantic input toevoegen. Geen circulariteit.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
