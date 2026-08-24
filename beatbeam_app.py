@@ -60,6 +60,7 @@ REMOTE_ADDRESS_CACHE_TTL = 3.0
 DEFAULT_HTTP_PORT = 8780
 DEFAULT_OSC_PORT = 4461
 DEFAULT_DMX_FPS = 30.0
+SHOW_INTENT_SEMANTIC_HISTORY_MAX_FRAMES = 120000
 API_SCHEMA_VERSION = 4
 DEFAULT_MANUAL_BPM = 124.0
 DEFAULT_MANUAL_PHRASE = "verse"
@@ -9261,7 +9262,12 @@ class TransportController:
 
 
 class DmxController:
-    def __init__(self, osc_listener, structure_behavior_bridge=None):
+    def __init__(
+        self,
+        osc_listener,
+        structure_behavior_bridge=None,
+        show_intent_semantic_history_capacity=SHOW_INTENT_SEMANTIC_HISTORY_MAX_FRAMES,
+    ):
         self.osc = osc_listener
         self.structure_behavior_bridge = structure_behavior_bridge
         self.debug_log = TRIGGER_LOG
@@ -9328,6 +9334,11 @@ class DmxController:
         self._show_intent_observation_lifecycle_resets_by_reason = {}
         self._show_intent_observation_lifecycle_reset_records = []
         self._show_intent_observation_track_keys = {}
+        self._show_intent_semantic_history_capacity = max(
+            1, int(show_intent_semantic_history_capacity)
+        )
+        self._show_intent_semantic_history = deque()
+        self._show_intent_semantic_history_dropped_frame_count = 0
         self._show_intent_shadow_diagnostics = {
             "source_valid": False,
             "input_present": False,
@@ -13428,6 +13439,8 @@ class DmxController:
         self._show_intent_observation_lifecycle_resets_by_reason = {}
         self._show_intent_observation_lifecycle_reset_records = []
         self._show_intent_observation_track_keys = {}
+        self._show_intent_semantic_history.clear()
+        self._show_intent_semantic_history_dropped_frame_count = 0
 
     def _finalize_show_intent_observation_stale_locked(self, now):
         started = self._show_intent_observation_stale_started_monotonic
@@ -13474,7 +13487,32 @@ class DmxController:
             "lifecycle_reset_records": [
                 dict(record) for record in self._show_intent_observation_lifecycle_reset_records
             ],
+            "semantic_history_count": len(self._show_intent_semantic_history),
+            "semantic_history_capacity": self._show_intent_semantic_history_capacity,
+            "semantic_history_dropped_frame_count": (
+                self._show_intent_semantic_history_dropped_frame_count
+            ),
+            "semantic_history_truncated": (
+                self._show_intent_semantic_history_dropped_frame_count > 0
+            ),
         }
+
+    def show_intent_observation_history(self):
+        """Return a passive JSON-safe snapshot without adding an observation frame."""
+        with self.lock:
+            state = self._show_intent_observation_state_locked()
+            return {
+                "session_active": state["session_active"],
+                "semantic_history_count": state["semantic_history_count"],
+                "semantic_history_capacity": state["semantic_history_capacity"],
+                "semantic_history_dropped_frame_count": state[
+                    "semantic_history_dropped_frame_count"
+                ],
+                "semantic_history_truncated": state["semantic_history_truncated"],
+                "semantic_history": [
+                    dict(record) for record in self._show_intent_semantic_history
+                ],
+            }
 
     def start_show_intent_observation(self):
         with self.lock:
@@ -13597,7 +13635,7 @@ class DmxController:
         return next_section, smoothed
 
     def _observe_show_intent_shadow_frame(self, osc, previous_track_identity):
-        """Accumulateer alleen na één authoritative shadowupdate in de send-loop."""
+        """Accumulateer alleen na één authoritative shadowupdate in de renderloop."""
         if not self._show_intent_observation_active:
             return
         now = time.monotonic()
@@ -13657,6 +13695,33 @@ class DmxController:
                 "generation": osc.get("_playback_generation"),
                 "playback_event": osc.get("_playback_event"),
             })
+
+        current_track_identity = (
+            canonical_song_analyzer_track_path(osc.get("track_path"))
+            if osc.get("_active_playback_source") == "virtualdj"
+            else None
+        )
+        semantic_record = {
+            "frame_sequence": self._show_intent_observation_frame_sequence,
+            "session_seconds": self._show_intent_observation_elapsed_seconds,
+            "source_valid": shadow["source_valid"] is True,
+            "candidate_present": shadow["candidate_present"] is True,
+            "input_section_bucket": shadow["input_section_bucket"],
+            "input_energy_modifier": shadow["input_energy_modifier"],
+            "resolved_section_bucket": shadow["resolved_section_bucket"],
+            "resolved_energy_modifier": shadow["resolved_energy_modifier"],
+            "retained_previous": shadow["retained_previous"] is True,
+            "stale_warning": shadow["stale_warning"] is True,
+            "lifecycle_reset": shadow["lifecycle_reset"] is True,
+            "lifecycle_reason": shadow["lifecycle_reason"],
+            "track_key": self._show_intent_observation_track_key_locked(
+                current_track_identity
+            ),
+        }
+        if len(self._show_intent_semantic_history) >= self._show_intent_semantic_history_capacity:
+            self._show_intent_semantic_history.popleft()
+            self._show_intent_semantic_history_dropped_frame_count += 1
+        self._show_intent_semantic_history.append(semantic_record)
 
     @staticmethod
     def _rhythm_change_gate_seconds(bpm):
@@ -15428,6 +15493,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/state":
             self.send_json(full_state())
+            return
+        if path == "/api/show-intent-observation/history":
+            self.send_json(DMX.show_intent_observation_history())
             return
         if path == "/api/developer/playback":
             self.send_json(TRANSPORT.developer_playback_state())
