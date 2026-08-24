@@ -1523,9 +1523,28 @@ Targeted telemetrytests, shadow/pure/packagingregressies en de volledige suite
 zijn PASS (172/172). Beta build/package, relevante bron/bundlehashes, bundled
 imports, arm64/signing, fresh restart, health en API start/stop-smoke zijn PASS.
 
+### Preview-Only Authoritative Show Frame Foundation
+
+`GEREED — shared render tick + preview-only runtime PASS`.
+
+Een authoritative Show frame is losgekoppeld van physical DMX-send. De gedeelde
+renderthread draait ook zonder hardware op de bestaande circa 30 FPS monotonic
+cadence en voert precies eenmaal Auto Show, ShowIntent-shadow/lifecycle,
+observation en render uit. Physical DMX is een optionele downstream sink;
+connected-semantiek blijft behouden, `dmx.connected` blijft truthful en
+`last_sent` blijft physical-only. Backendstate bevat `render_active`,
+`render_frame_sequence` en `last_rendered`; `slot_previews` en `values` blijven
+zonder hardware beschikbaar. Native Preview Map blijft ongewijzigd. Er is geen
+ShowIntent-, Rich Events- of production Auto Show-semantic change.
+
+De nieuwe geïsoleerde tests, alle regressies en de volledige suite (182/182)
+zijn PASS. Beta build/package, bron/bundlehashes, bundled imports,
+arm64/ad-hoc signing, fresh restart, health en preview-only runtime-smoke zijn
+PASS; observation accumuleert aantoonbaar zonder fysieke DMX.
+
 ### ShowIntent Representative Shadow Observation Run
 
-`NOG NIET GESTART` — draai een expliciete manual observation session tijdens
+`NOG NIET GESTART — PREVIEW-ONLY READY` — draai een expliciete manual observation session tijdens
 representatieve echte VirtualDJ/SongAnalyzer playback over meerdere tracks en
 relevante normale/gap/seek/deck-overgangen. Evalueer daarna pas de Promotion
 Gate, zonder vooraf vastgelegde threshold.
