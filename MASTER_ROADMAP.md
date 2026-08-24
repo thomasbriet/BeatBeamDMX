@@ -1048,8 +1048,8 @@ Voor iedere fixture(groep) moet afzonderlijk bepaald kunnen worden welk programm
 
 ## 4.3 Parallel architectuurcheckpoint — Auto Show Intent Continuity Foundation
 
-`GEREED — minimal architecture contract` — Dit checkpoint legt uitsluitend het
-minimale architectuurcontract vast; de implementatie staat op `NOG NIET GESTART`.
+`GEREED — pure offline foundation + tests PASS` — Dit checkpoint bevat het
+minimale architectuurcontract en de geïsoleerde foundationimplementatie.
 
 `ShowIntent` is de interne, fixture-onafhankelijke visual-intent state tussen
 muzikale/contextuele interpretatie en latere fixture-/group-programselectie:
@@ -1097,16 +1097,29 @@ semantic roles, handoff-schemawijzigingen, VirtualDJ en productie-DMX.
 
 ### Volgende parallelle stap
 
-`Auto Show Intent Continuity Foundation — implementation` — `NOG NIET GESTART`.
+`Auto Show Intent Continuity Foundation — implementation` — `GEREED — pure offline foundation + tests PASS`.
 
-Voorgenomen scope: nieuwe pure module `show_intent.py` en nieuwe synthetische
-testmodule `tests/test_show_intent.py`, bij voorkeur zonder bestaande codefiles
-te wijzigen. De foundation blijft immutable, offline testbaar en
-niet-production-wired. Tests dekken minimaal neutral initial state,
-bucket/energy-validatie, immutability, behoud bij `None`, vervanging door een
-expliciete candidate, meerdere synthetische sequences en afwezigheid van
-fixture-/DMX-afhankelijkheid. Zolang niets production-wired is, is geen runtime
-deployment nodig.
+GEREED: de nieuwe pure module `show_intent.py` en synthetische testmodule
+`tests/test_show_intent.py` bevatten een immutable `ShowIntent` met uitsluitend
+`section_bucket` en `energy_modifier`. De bucketset is `intro`, `verse`,
+`build`, `chorus`, `drop`, `down`, `break`, `outro` en `unknown`; een ongeldige
+bucket valt terug op `unknown`. De energy modifier blijft binnen `-0.08 …
++0.08`; een ongeldige of niet-finite modifier valt terug op `0.0`.
+
+De neutrale beginstate is `ShowIntent("unknown", 0.0)`. Bij een aanwezige
+`previous` en `candidate = None` blijft exact dezelfde vorige intent behouden.
+Een aanwezige candidate vervangt de vorige state atomair en immutable, zonder
+hidden carry-over. Er is geen production wiring en geen fixture-, DMX-, UI-,
+SongAnalyzer- of VirtualDJ-afhankelijkheid. De volledige BeatBeam-suite is
+`119/119 PASS`; deployment is niet nodig. De production Auto Show is volledig
+ongewijzigd.
+
+Volgende parallelle ontwerpstap: `Show Interpreter Input Contract Audit` —
+`NOG NIET GESTART`. Doel is read-only bepalen welke bestaande
+production-safe muzikale/structurele input later een ShowIntent-candidate mag
+vormen, zonder current_event/next_event production-wiring, SongAnalyzer
+semantic wijzigingen, UPWARD_ARRIVAL of fixture-/DMX-mapping. Er wordt geen
+implementatiescope vastgelegd voordat deze audit is afgerond.
 
 ---
 
