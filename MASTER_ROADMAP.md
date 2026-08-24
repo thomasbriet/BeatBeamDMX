@@ -894,7 +894,8 @@ layering resolved through verified M24 foundation prerequisite commit;
 dual-compute legacy authority preserved; ready for calibration + human
 acceptance`.
 
-Foundationcommit `cdbe50ee8bdcf70e19cb90acc1ec76911d0d4d31` legt de bestaande
+Foundationcommits `f79c071918ed914ab7e70ea860ca08eb44400bf3` en
+`cdbe50ee8bdcf70e19cb90acc1ec76911d0d4d31` leggen de bestaande
 RawSectionObservation/ArrangementProfileShadow-laag vast; candidatecommit
 `b6b04d051b1ca88d349a786f790a4189f0a19808` bevat de zuivere sidecar-delta.
 Beide committed snapshots bouwen in Release met 0 warnings/0 errors. De
@@ -906,7 +907,7 @@ nieuwe audiofeatures en gebruikt geen numeric role score/weight/threshold.
 
 ### M24 CALIBRATION + ACCEPTANCE MILESTONE — Canonical Candidate Semantic Quality
 
-`STATUS = NOG NIET GESTART`.
+`STATUS = BEZIG — automated calibration / blinded human-review preparation`.
 
 Pas in deze volgende mijlpaal volgen corpuscandidate-run, distributionele en
 deterministische controles, candidate-versus-legacydiagnostiek en geblindeerde
