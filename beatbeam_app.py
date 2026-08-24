@@ -31,6 +31,12 @@ from enttec_open_dmx import (
     load_fixture_profiles,
     values_for_fixture,
 )
+from show_intent import resolve_show_intent
+from show_intent_candidate_mapper import map_show_intent_candidate
+from show_interpreter_input_adapter import (
+    ShowInterpreterEffectiveContext,
+    project_show_interpreter_input,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -9291,6 +9297,18 @@ class DmxController:
         self.playback_runtime_resets = 0
         self.active_virtualdj_beat_pulse = None
         self.active_virtualdj_beat_pulse_preview = None
+        self._show_intent_shadow_resolved = None
+        self._show_intent_shadow_diagnostics = {
+            "source_valid": False,
+            "input_present": False,
+            "candidate_present": False,
+            "input_section_bucket": None,
+            "input_energy_modifier": None,
+            "resolved_section_bucket": None,
+            "resolved_energy_modifier": None,
+            "retained_previous": False,
+            "stale_warning": False,
+        }
         self.config = self._load_config()
         self.virtualdj_beat_pulse_scheduler = VirtualDjBeatPulseScheduler(
             self._dispatch_virtualdj_beat_pulse,
@@ -10605,6 +10623,7 @@ class DmxController:
                 "active_slot": config["active_slot"],
                 "blackout_active": config["blackout_active"],
                 "auto_show": auto_show,
+                "show_intent_shadow": dict(self._show_intent_shadow_diagnostics),
                 "slot_order": list(config["slot_order"]),
                 "slots": config["slots"],
                 "slot_ranges": {
@@ -12848,7 +12867,7 @@ class DmxController:
             "motion_active": realized_motion["motion_active"],
         }
 
-    def _auto_show_state(self, osc, auto_show_config):
+    def _auto_show_evaluation(self, osc, auto_show_config):
         config = self._clean_auto_show_config(auto_show_config)
         now = time.time()
         override_phrase = auto_show_phrase_override_name(config.get("override_phrase"))
@@ -12909,6 +12928,11 @@ class DmxController:
         style = auto_show_style(style_name)
         osc_effective = dict(osc)
         structure_behavior = self._structure_behavior_state(osc)
+        canonical_mapped_behavior_bucket = structure_behavior.get("mapped_behavior_bucket")
+        source_is_valid = (
+            structure_behavior.get("eligible") is True
+            and structure_behavior.get("effective_source") == "song_analyzer"
+        )
         if override_phrase != "none":
             osc_effective["phrase_current"] = override_phrase
         elif structure_behavior["effective_source"] == "song_analyzer":
@@ -13012,6 +13036,15 @@ class DmxController:
             -SONG_ANALYZER_MAX_ENERGY_MODIFIER,
             min(SONG_ANALYZER_MAX_ENERGY_MODIFIER,
                 float(song_analyzer_energy) * SONG_ANALYZER_ENERGY_Z_SCORE_MODIFIER_PER_UNIT),
+        )
+        shadow_context = (
+            ShowInterpreterEffectiveContext(
+                source_is_valid=True,
+                section_bucket=phrase_bucket(canonical_mapped_behavior_bucket),
+                energy_modifier=song_analyzer_energy_modifier,
+            )
+            if source_is_valid
+            else None
         )
         # Rich SongAnalyzer energy is additive and bounded: phrase buckets and
         # all existing fixture safety controls remain authoritative.
@@ -13154,7 +13187,7 @@ class DmxController:
             override_parts.append(f"Cue {one_shot['label']}")
         if override_parts:
             cue_label += " • Override: " + " / ".join(override_parts)
-        return {
+        production_auto_show = {
             "enabled": bool(config["enabled"]),
             "available": override_active or not bool(osc.get("stale")),
             "style": style_name,
@@ -13259,6 +13292,32 @@ class DmxController:
             "one_shot_cue": one_shot["id"] if one_shot else "none",
             "one_shot_label": one_shot["label"] if one_shot else "None",
             "one_shot_progress": one_shot["progress"] if one_shot else 0.0,
+        }
+        return production_auto_show, shadow_context
+
+    def _auto_show_state(self, osc, auto_show_config):
+        """Behoud de bestaande productionresultaat-API zonder shadow-state."""
+        production_auto_show, _ = self._auto_show_evaluation(osc, auto_show_config)
+        return production_auto_show
+
+    def _update_show_intent_shadow(self, context):
+        """Werk uitsluitend de private observer-state van één DMX-frame bij."""
+        interpreter_input = project_show_interpreter_input(context)
+        candidate = map_show_intent_candidate(interpreter_input)
+        previous = self._show_intent_shadow_resolved
+        retained_previous = candidate is None and previous is not None
+        resolved = resolve_show_intent(previous, candidate)
+        self._show_intent_shadow_resolved = resolved
+        self._show_intent_shadow_diagnostics = {
+            "source_valid": context is not None and context.source_is_valid is True,
+            "input_present": interpreter_input is not None,
+            "candidate_present": candidate is not None,
+            "input_section_bucket": None if interpreter_input is None else interpreter_input.section_bucket,
+            "input_energy_modifier": None if interpreter_input is None else interpreter_input.energy_modifier,
+            "resolved_section_bucket": resolved.section_bucket,
+            "resolved_energy_modifier": resolved.energy_modifier,
+            "retained_previous": retained_previous,
+            "stale_warning": retained_previous,
         }
 
     def _resolved_behavior_section(
@@ -14442,7 +14501,10 @@ class DmxController:
                     config = self._clean_full_config(dict(self.config))
                     osc = self.osc.snapshot_for_render()
                     self._observe_active_playback_generation(osc)
-                    auto_show = self._auto_show_state(osc, config["auto_show"])
+                    auto_show, shadow_context = self._auto_show_evaluation(
+                        osc, config["auto_show"]
+                    )
+                    self._update_show_intent_shadow(shadow_context)
                     values = self._render_values(
                         render_now,
                         config=config,
