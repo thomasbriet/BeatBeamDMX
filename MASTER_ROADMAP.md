@@ -889,11 +889,29 @@ human product decisions.
 
 ### M24 BOUNDED IMPLEMENTATION MILESTONE — Precanonical Profile → Canonical Candidate Path
 
-`STATUS = BEZIG`.
+`GEREED — provenance-clean canonical candidate sidecar implemented; Git
+layering resolved through verified M24 foundation prerequisite commit;
+dual-compute legacy authority preserved; ready for calibration + human
+acceptance`.
 
-De provenance-clean candidate wordt als ephemeral dual-compute sidecar
-geïmplementeerd; legacy authority, persistence, handoff en versions blijven
-ongewijzigd.
+Foundationcommit `cdbe50ee8bdcf70e19cb90acc1ec76911d0d4d31` legt de bestaande
+RawSectionObservation/ArrangementProfileShadow-laag vast; candidatecommit
+`b6b04d051b1ca88d349a786f790a4189f0a19808` bevat de zuivere sidecar-delta.
+Beide committed snapshots bouwen in Release met 0 warnings/0 errors. De
+candidatecommit bevat 52 nieuwe candidate-tests; de schone snapshot haalt
+901/901 .NET-tests (de eerdere 909 bevatte acht beschermde, ongecommitteerde
+testgevallen). Legacy authority, persistence, versions en BeatBeam/VirtualDJ
+handoff zijn ongewijzigd. De candidate heeft geen authority, introduceert geen
+nieuwe audiofeatures en gebruikt geen numeric role score/weight/threshold.
+
+### M24 CALIBRATION + ACCEPTANCE MILESTONE — Canonical Candidate Semantic Quality
+
+`STATUS = NOG NIET GESTART`.
+
+Pas in deze volgende mijlpaal volgen corpuscandidate-run, distributionele en
+deterministische controles, candidate-versus-legacydiagnostiek en geblindeerde
+menselijke semantic-role review. Geen candidatepromotion, persistence of
+runtime-authority zonder afzonderlijk acceptatiebesluit.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
