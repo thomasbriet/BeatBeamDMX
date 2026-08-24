@@ -1286,10 +1286,31 @@ SAFE_NEW_FILES_ONLY`: uitsluitend `show_interpreter_input_adapter.py` en
 
 ### ShowInterpreterInput Upstream Adapter Foundation
 
-`NOG NIET GESTART` — immutable pure effective context, strikt
-source-validitysignaal, `None`/invalid source naar `None`, valid source naar
-`ShowInterpreterInput`, `unknown`/`0.0` pass-through, zonder production imports
-of duplicatie van bestaande logica.
+`GEREED — pure offline adapter + tests PASS` —
+`LEGACY_FALLBACK_ADAPTER_POLICY = CANONICAL_ONLY`. De nieuwe immutable
+`ShowInterpreterEffectiveContext` bevat exact `source_is_valid`,
+`section_bucket` en `energy_modifier`. Alleen `source_is_valid is True` wordt
+geaccepteerd; `None` of iedere andere validitywaarde geeft `None`. Een geldige
+canonical bron wordt een `ShowInterpreterInput`; `unknown` en `0.0` blijven
+geldige aanwezige input.
+
+De adapter hergebruikt uitsluitend de bestaande
+`ShowInterpreterInput`-normalisatie. Hij dupliceert geen bucketclassificatie of
+energyformule en bezit geen state, events, transport/reset, fixtures/DMX of
+production wiring. De gerichte suite is `8/8 PASS`; de volledige BeatBeam-suite
+is `145/145 PASS`; deployment is niet nodig.
+
+### ShowIntent Shadow Wiring Contract Audit
+
+`NOG NIET GESTART` — read-only ontwerpen hoe dezelfde bestaande
+production-evaluatie later canonical-only `section_bucket`, `energy_modifier`
+en source validity naar de nieuwe pure keten kan projecteren in SHADOW/DEBUG,
+zonder Auto Show-, fixture- of DMX-output te beïnvloeden. De audit onderzoekt
+de minimale wijziging in `beatbeam_app.py`, de canonical bucket vóór
+legacy/override-contaminatie, hergebruik van de effectieve energy modifier, één
+coherente snapshot, opslag van shadow ShowIntent-state en zichtbaar
+stale-intent-risico bij trackwissels. `TRACK_BOUNDARY_RESET_POLICY` blijft een
+aparte beslissing. Nog geen wiring implementeren.
 
 ---
 
