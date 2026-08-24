@@ -1234,13 +1234,62 @@ volledige BeatBeam-suite `137/137 PASS`. Deployment is niet nodig.
 
 ### ShowIntent Upstream Adapter Contract Audit
 
-`NOG NIET GESTART` — read-only bepalen hoe bestaande production-safe
-BeatBeam-bronnen later naar `ShowInterpreterInput | None` worden geprojecteerd.
-De audit bepaalt de effectieve bucket-source of truth, de exacte bron van
-`energy_modifier`, raw-invalid/missing → `None`, hergebruik van
-StructureBehaviorBridge, het vermijden van dubbele classificatie en eventuele
-production wiring zonder de huidige Auto Show direct te vervangen. Track reset
-blijft een aparte productbeslissing. Geen adapterimplementatie in deze stap.
+`SHOW_INTENT_UPSTREAM_ADAPTER_AUDIT_PASS — READY_FOR_DECISION`.
+
+`LEGACY_FALLBACK_ADAPTER_POLICY = CANONICAL_ONLY`: de bestaande Auto Show
+legacy fallback blijft onveranderd voor production-compatibiliteit, maar is
+geen ShowInterpreterInput-v0-bron. De finale `auto_show["phrase_bucket"]` kan
+immers een canonical mapping, legacy fallback of manual override zijn; manual
+override is downstream en geen muzikale input.
+
+`SOURCE_PRESENCE_SIGNAL_STATUS = EXISTING_EXPLICIT_SIGNAL`. Toekomstige
+production-validiteit vereist in dezelfde huidige evaluatie `eligible=True`,
+`effective_source="song_analyzer"`, exact track match,
+`availability="available_current"`, status `in_segment|in_final_segment`, een
+geldig huidig segment en een mappable canonical label/bucket. Deze pure
+foundation voert die validatie niet uit.
+
+`SECTION_BUCKET_SOURCE_OWNER = AUTO_SHOW_STATE` en
+`SECTION_BUCKET_ADAPTER_INPUT_STATUS = SOURCE_VALIDITY_AMBIGUOUS`: zonder
+provenance guard is de finale bucket niet veilig te gebruiken. Toekomstige
+canonical-only wiring neemt de reeds effectieve canonical bucket vóór
+legacy-/override-contaminatie, zonder classificatie te dupliceren.
+
+`ENERGY_MODIFIER_SOURCE_OWNER = AUTO_SHOW_STATE` en
+`ENERGY_MODIFIER_ADAPTER_INPUT_STATUS = DIRECTLY_REUSABLE`: in dezelfde
+huidige evaluatie is dit al effectief bepaald als canonical finite
+`rich_current.energy → clamp(energy * 0.04, -0.08, +0.08)`, anders `0.0`.
+De adapter dupliceert deze formule niet.
+
+`INPUT_SNAPSHOT_COHERENCE = POTENTIAL_MIXED_SOURCE_RISK`; met de
+canonical-only guard kan een coherente snapshot ontstaan.
+`ADAPTER_STRATEGY = WRAP_EXISTING_EFFECTIVE_VALUES`. De nieuwe pure immutable
+`ShowInterpreterEffectiveContext` heeft exact `source_is_valid: bool`,
+`section_bucket: str` en `energy_modifier: float`; `source_is_valid` is alleen
+het upstream-established canonical-validitysignaal en wordt niet uit waarden
+afgeleid. De adapter accepteert uitsluitend exact `True`, waarna hij
+`ShowInterpreterInput` construeert; `None` of een ongeldige bron geeft `None`.
+Een geldige canonical `unknown` en `0.0` passeren door.
+
+De toekomstige flow is `raw/current → validation → effectives → pure context
+of None → adapter → input of None → mapper → candidate → resolver`. Raw,
+missing, stale, mismatch en legacy-only geven `None`; de resolver behoudt dan
+previous en er wordt geen neutrale waarde gefabriceerd.
+
+`TRACK_BOUNDARY_RESET_POLICY = NEEDS_PRODUCT_DECISION`: de pure adapter reset
+niet; een toekomstige shadow-state kan bij trackwissel zichtbaar stale blijven.
+`RICH_EVENT_DEPENDENCY_V0 = NONE`.
+`SHADOW_WIRING_FEASIBILITY = SAFE_WITH_SMALL_EXISTING_FILE_CHANGE`, maar deze
+foundation bevat geen wiring. `UPSTREAM_ADAPTER_IMPLEMENTATION_SAFETY =
+SAFE_NEW_FILES_ONLY`: uitsluitend `show_interpreter_input_adapter.py` en
+`tests/test_show_interpreter_input_adapter.py` zijn nodig; geen deployment.
+
+### ShowInterpreterInput Upstream Adapter Foundation
+
+`NOG NIET GESTART` — immutable pure effective context, strikt
+source-validitysignaal, `None`/invalid source naar `None`, valid source naar
+`ShowInterpreterInput`, `unknown`/`0.0` pass-through, zonder production imports
+of duplicatie van bestaande logica.
 
 ---
 
