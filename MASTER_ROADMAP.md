@@ -1391,22 +1391,24 @@ DMX-interpretatie toe.
 
 ### ShowIntent Shadow Wiring Foundation
 
-`NOG NIET GESTART` — voorgenomen minimale scope: selectieve wijziging van
-`beatbeam_app.py`; canonical bucket lokaal capturen vóór legacy/override;
-bestaande energy modifier hergebruiken; één coherente local context; private
-shadow-state op DmxController; adapter → mapper → resolver eenmaal per
-`_send_loop()`-frame; backend Debug-exposure via `DmxController.state()`;
-`retained_previous`/`stale_warning`-diagnostiek; absoluut geen production
-render-/DMX-impact; geen native UI-wijziging. Er komt een nieuwe geïsoleerde
-testmodule; bestaande dirty tests worden niet gewijzigd.
+`GEREED — shadow runtime wiring + technical runtime PASS`. `beatbeam_app.py`
+captuurt de canonical mapped bucket vóór legacy/override, projecteert alleen
+`eligible is True` plus `effective_source == "song_analyzer"`, en hergebruikt
+de bestaande lokale `song_analyzer_energy_modifier` in één coherente evaluatie.
+De productionvorm van `_auto_show_state()` blijft shadow-state-free; alleen de
+authoritative `_send_loop()` verwerkt context → adapter → mapper → resolver,
+exact eenmaal per DMX-frame en vóór `_render_values()`.
 
-Deze volgende implementation is runtime-relevant. Na codewijziging zijn
-verplicht: build → package → install → sign → verify → restart →
-source/bundle-hash- of versiecontrole → technische runtime smoke, via de
-bestaande repositoryconforme Beta packaging/deploymentroute. Omdat
-`beatbeam_app.py` in de Beta-app wordt gebundeld, moet de Beta-bundle opnieuw
-worden gebouwd/geïnstalleerd wanneer die file wijzigt. Native UI hoeft niet
-functioneel te veranderen.
+De private `DmxController`-shadow-state is backend-only beschikbaar als
+JSON-safe `show_intent_shadow`, inclusief `retained_previous`/`stale_warning`.
+Er is geen track-resetpolicy, Rich Events-input, native UI, fixture-/program-
+of render-/DMX-terugkoppeling. Legacy fallback en manual phrase override blijven
+production-only. De nieuwe geïsoleerde wiringtests zijn `8/8 PASS`; pure
+regressies en packagingtest zijn PASS en de volledige BeatBeam-suite is
+`154/154 PASS`. De verse Beta-build/package, hashvergelijking, bundled imports,
+arm64/ad-hoc strict signing, fresh restart, health op 8781 en technische
+runtime-smoke zijn PASS. Zonder live geldige canonical context blijft de
+runtime-debugstate aantoonbaar fail-closed.
 
 #### Packaging prerequisite
 
