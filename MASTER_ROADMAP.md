@@ -855,7 +855,7 @@ synthesis.
 
 ### M24A-5D-4V — Broader ArrangementProfile context boundary synthesis
 
-`STATUS = NOG NIET GESTART — tijdelijk geparkeerd tot afronding van de reeds geplande BeatBeam Bounded NO-OP Parity Runtime Acceptance Run`.
+`STATUS = NOG NIET GESTART — volgende geparkeerde SongAnalyzer-stap na de afgeronde BeatBeam Bounded NO-OP Parity Runtime Acceptance Run`.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
@@ -1702,9 +1702,22 @@ ongewijzigd.
 
 ### Bounded NO-OP Parity Runtime Acceptance Run
 
-`NOG NIET GESTART` — een preview-only VirtualDJ-run van 8–12 minuten met gate
-OFF die bestaand production-pair en actuele ShowIntent-candidate longitudinaal
-vergelijkt vóór eventuele authority enable.
+`GEREED — longitudinal runtime parity PASS; authority remained OFF; ready for bounded enable design decision`.
+
+De preview-only VirtualDJ-observatie duurde `2.050,637 s` (34,177 min) en
+bevriest zonder truncation op 50.728 aligned semantic- en parity-records. Van
+14.156 canonical eligible comparison frames waren section, energy modifier en
+het volledige pair elk exact gelijk (`0` mismatches). Production identity bleef
+op alle 50.728 frames `existing_autoshow`; de gate bleef `False`.
+
+Negen `track_changed`/`deck_changed`-boundaries zijn waargenomen: één met
+directe same-frame candidate-handoff, zeven met een latere canonical recovery
+die weer exact parity leverde, en één terminale wissel zonder recovery vóór
+stop. Er waren geen selector failures, geen production ShowIntent-authority en
+geen runtime-observeerbare manual override. `BOUNDED_NO_OP_PARITY_CONTRACT =
+PASS`; `SHOWINTENT_BOUNDED_PROMOTION_DECISION =
+READY_FOR_BOUNDED_ENABLE_DESIGN`. Een mogelijk bounded-enable ontwerp blijft
+een afzonderlijke expliciete vervolgbeslissing.
 
 ---
 
