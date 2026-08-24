@@ -850,17 +850,26 @@ evidence is `REDUNDANT` en surviving neighbour evidence families zijn `NONE`.
 Het composite context model blijft `NOT_READY`, `NEW_AUDIO_FEATURE_NEEDED = NO`
 en implementation is `NO`.
 
-Volgende analyzerstap: M24A-5D-4V — Broader ArrangementProfile context boundary
-synthesis.
-
 ### M24A-5D-4V — Broader ArrangementProfile context boundary synthesis
+
+`GEREED — arrangement-context synthesis PASS; microhypothesis search closed;
+ready for precanonical profile→canonical architecture contract`.
+
+De 4L–4U-microhypotheselijn is formeel afgesloten. Structure-first architecture
+is `SUPPORTED`; audio is supporting multi-role context, family topology is
+supporting structural context en canonical interpretation blijft downstream.
+Er is geen nieuwe audiofeature nodig en structural microhypothesis search is
+`STOP`. De composite context architecture is ready for design; de resterende
+gap is het eenrichtingscontract van precanonical profile naar canonical role.
+
+### M24 Architecture Contract Milestone — Precanonical Profile → Canonical One-Way Input Contract
 
 `STATUS = BEZIG`.
 
-De BeatBeam Bounded NO-OP Parity Runtime Acceptance Run is `GEREED/PASS`; een
-bounded-enable-besluit blijft een afzonderlijke vervolgstap en de ShowIntent-
-authority blijft `OFF`. M24A-5D-4V hervat nu als de eerstvolgende
-SongAnalyzer-stap.
+Deze gecombineerde mijlpaal omvat de eerdere kleine 4W-audit en levert meteen
+het bounded implementation design op: consumer/dataflow, precanonical input,
+provenance/missingness, feedback-exclusion, legacy boundary, test/fallback en
+implementation-readiness. Geen classifierheuristiek of runtime authority.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
