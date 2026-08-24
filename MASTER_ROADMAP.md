@@ -760,24 +760,26 @@ confidence, nieuwe fields, exposure, productie- of sequence-contextcode.
 
 ### M24A-5D-4P — Targeted sequence-analogue control audit
 
-`STATUS = NOG NIET GESTART`.
+`STATUS = GEREED — blinded human-review PASS; analogue evidence MIXED`.
+De blindering-integriteit is PASS; zes vooraf vastgelegde verdicts zijn pas na
+unblinding met de selectiekey vergeleken. Complete U16-like coreanalogues:
+2 `UPWARD`, 1 `NOT_UPWARD`; de partial family-exit analogue is `AMBIGUOUS`, de
+partial last-origin/non-zero-return analogue `UPWARD` en het origin-not-last
+contrast `NOT_UPWARD`.
 
-4P wordt uitsluitend read-only uitgevoerd. Vanuit bestaande provenance-clean
-raw structural data zoekt de audit blind naar structureel vergelijkbare
-boundaries voor afzonderlijke U16-ingrediënten: lange/repeated origin-run,
-vertrek bij laatste origin occurrence, non-zero returnafstand, return naar een
-gevestigde destination family, family-exit en combinaties daarvan.
+Long run + last origin + non-zero return is dus geen algemene arrivalregel.
+De exacte U16 plus-family-exit context blijft onvoldoende extern gecontroleerd;
+U08 wordt niet als sequence-regel versterkt. `NEW_AUDIO_FEATURE_NEEDED = NO`.
 
-Eerst worden bestaande human-reviewed U/M-controls buiten de huidige subset
-onderzocht; alleen als die onvoldoende zijn wordt een kleine nieuwe kandidaatset
-blind geselecteerd, zonder nieuwe verdicts te verzinnen. Human verdicts worden
-pas na structurele selectie gekoppeld. 4P bepaalt of U16's patroon bij meerdere
-UPWARD-cases, bij NOT_UPWARD-cases, alleen track-specifiek of als gedeeltelijke
-combinatie van ingrediënten voorkomt.
+### M24A-5D-4Q — Mixed contextual-evidence synthesis audit
 
-4P mag geen audiofeature, Essentia-call, shadow exposure, productiecode,
-tests, gate, threshold, score, classifier, confidence, canonical role of
-High/Mid/Low semantic input toevoegen. Geen circulariteit.
+`STATUS = BEZIG`.
+
+4Q synthetiseert read-only de bestaande structurele, sequence- en audio-
+evidence inclusief 4P-tegenvoorbeelden in een provenance-clean hypothesematrix.
+Doel: de kleinste thresholdvrije volgende onderzoeksbeslissing bepalen, zonder
+nieuwe audiofeature, analyzerregel, classifier, gate, score, exposure of
+runtimewijziging.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
