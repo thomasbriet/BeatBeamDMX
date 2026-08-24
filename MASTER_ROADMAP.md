@@ -864,12 +864,23 @@ gap is het eenrichtingscontract van precanonical profile naar canonical role.
 
 ### M24 Architecture Contract Milestone — Precanonical Profile → Canonical One-Way Input Contract
 
+`GEREED/HOLD — precanonical one-way contract PASS; bounded implementation
+blocked only by missing provenance-clean canonical semantic decision contract`.
+
+De shadow/precanonical pipeline is canonical-independent `PASS`; one-way,
+missingness en provenance zijn contractueel vastgelegd. High/Mid/Low is
+verboden als nieuwe canonical input, genre blijft buiten het eerste bounded
+pad en dual-compute met legacy authority is gekozen. Zolang de candidate een
+ephemeral sidecar blijft is geen version/persistence bump nodig. De enige
+resterende blocker is een pure canonical semantic candidate policy.
+
+### M24 CANONICAL SEMANTIC DESIGN MILESTONE — Provenance-clean Candidate Role Decision Contract
+
 `STATUS = BEZIG`.
 
-Deze gecombineerde mijlpaal omvat de eerdere kleine 4W-audit en levert meteen
-het bounded implementation design op: consumer/dataflow, precanonical input,
-provenance/missingness, feedback-exclusion, legacy boundary, test/fallback en
-implementation-readiness. Geen classifierheuristiek of runtime authority.
+Deze laatste geplande designmijlpaal legt vocabulary, role semantics,
+evidence-/conflict-/abstentioncontract, pure decision graph, diagnostics en het
+bounded implementation- en acceptanceplan vast zonder runtime authority.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
