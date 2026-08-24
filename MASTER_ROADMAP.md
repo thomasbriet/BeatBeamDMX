@@ -1046,6 +1046,68 @@ Voor iedere fixture(groep) moet afzonderlijk bepaald kunnen worden welk programm
 - `TODO` Override kunnen teruggeven aan Auto Show.
 - `TODO` Vastleggen of overrides tijdelijk, per sectie of persistent zijn.
 
+## 4.3 Parallel architectuurcheckpoint — Auto Show Intent Continuity Foundation
+
+`GEREED — minimal architecture contract` — Dit checkpoint legt uitsluitend het
+minimale architectuurcontract vast; de implementatie staat op `NOG NIET GESTART`.
+
+`ShowIntent` is de interne, fixture-onafhankelijke visual-intent state tussen
+muzikale/contextuele interpretatie en latere fixture-/group-programselectie:
+
+`musical/context input → Show Interpreter → ShowIntent → fixture/group
+interpretation → DMX rendering`
+
+De huidige production Auto Show wordt hierdoor nog niet vervangen of gewijzigd.
+
+### ShowIntent v0
+
+De foundation bevat uitsluitend reeds afgesproken, fixture-onafhankelijke
+inhoud:
+
+- de bestaande section/phrase bucket;
+- de bestaande begrensde energy modifier, met de huidige BeatBeam-semantiek,
+  types en bounds als source of truth.
+
+Er wordt geen nieuwe phrase-taxonomie of energy-normalisatie ontworpen. Tension,
+danceability, drop, impact, transition strength, repetition variation, fixture
+program, fixture identity, fixture group, DMX values, human override en
+canonical SongAnalyzer-semantic uitbreiding vallen buiten v0 en blijven
+downstream, voorlopig of toekomstig.
+
+### Continuity-contract
+
+`candidate = None` betekent: behoud de bestaande actuele `ShowIntent`. “Geen
+nieuw event” betekent dus niet neutral, lights off, defaultprogramma of intent
+reset.
+
+Alleen wanneer geen eerdere intent bestaat, wordt een expliciete neutrale,
+fail-closed initiële state gebruikt, waarbij latere implementatie bestaande
+BeatBeam-neutral/fail-closed-semantiek hergebruikt. Een geldige expliciete
+candidate vervangt de vorige intent als één immutable nieuwe state; partial
+mutation en hidden carry-over buiten dit contract zijn niet toegestaan.
+
+Fixture-/group-programselectie, handmatige override, DMX safety bounds,
+fixture-rendering en DMX-output blijven buiten ShowIntent v0. Manual override en
+safety blijven downstream leidend; ShowIntent mag die niet omzeilen.
+
+ShowIntent is geen `event → hardcoded DMX-effect`-mapping, maar beschrijft
+doorlopende fixture-onafhankelijke visuele intentie. Deze foundation is
+onafhankelijk van M24A-5D-4P-verdicts, UPWARD_ARRIVAL, nieuwe SongAnalyzer
+semantic roles, handoff-schemawijzigingen, VirtualDJ en productie-DMX.
+
+### Volgende parallelle stap
+
+`Auto Show Intent Continuity Foundation — implementation` — `NOG NIET GESTART`.
+
+Voorgenomen scope: nieuwe pure module `show_intent.py` en nieuwe synthetische
+testmodule `tests/test_show_intent.py`, bij voorkeur zonder bestaande codefiles
+te wijzigen. De foundation blijft immutable, offline testbaar en
+niet-production-wired. Tests dekken minimaal neutral initial state,
+bucket/energy-validatie, immutability, behoud bij `None`, vervanging door een
+expliciete candidate, meerdere synthetische sequences en afwezigheid van
+fixture-/DMX-afhankelijkheid. Zolang niets production-wired is, is geen runtime
+deployment nodig.
+
 ---
 
 # 5. BeatBeam UI — iPad / live bediening
