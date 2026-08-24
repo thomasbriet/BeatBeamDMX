@@ -820,12 +820,29 @@ als zachte context.
 
 ### M24A-5D-4T — Generalizable family-recurrence topology boundary audit
 
+`STATUS = GEREED — topology boundary PASS; predecessor/successor relation topology selected for targeted evidence audit`.
+
+Track-lokale family IDs zijn uitgesloten. Occurrence/order/neighbour-relations
+zijn derived stable; `StructuralRoute` is `RAW_STRUCTURAL` maar deels gekoppeld
+aan membership/context en low-level boundary evidence. Topology audio
+independence is `PARTIALLY_AUDIO_DERIVED`.
+
+Occurrence/return/destination-aliases zijn grotendeels redundant;
+predecessor/successor-beschikbaarheid is hoog, terwijl relationele
+neighbourvelden low–medium dekking hebben. Recurrence topology blijft soft-
+context candidate, destination topology is `TOO_REDUNDANT` en predecessor/
+successor field readiness is `READY_FOR_TARGETED_EVIDENCE_AUDIT`. Forbidden
+reconstructions blijven actief; composite context model is `NOT_READY`,
+`NEW_AUDIO_FEATURE_NEEDED = NO` en implementation is `NO`.
+
+### M24A-5D-4U — Local predecessor/successor relation topology targeted evidence audit
+
 `STATUS = BEZIG`.
 
-4T inventariseert read-only de generaliseerbare raw family/topologyvelden,
-hun provenance, dekking, afhankelijkheden en bestaande labeldekking. Doel: één
-niet-gecirculariseerde soft-context evidencefamilie begrenzen voor een volgende
-gerichte audit, zonder classifierregel, score, threshold, feature of runtime.
+4U onderzoekt read-only of bestaande local neighbour relations buiten
+run-equivalente aliases daadwerkelijk incrementele, provenance-clean zachte
+structurele context bevatten. Geen U16-route, classifier, score, threshold,
+audiofeature of runtimewijziging.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
