@@ -1121,6 +1121,50 @@ vormen, zonder current_event/next_event production-wiring, SongAnalyzer
 semantic wijzigingen, UPWARD_ARRIVAL of fixture-/DMX-mapping. Er wordt geen
 implementatiescope vastgelegd voordat deze audit is afgerond.
 
+### Show Interpreter Input Contract Audit
+
+`GEREED — architecture/source audit PASS` —
+`SHOW_INTERPRETER_INPUT_AUDIT_PASS — READY_FOR_DECISION`.
+
+Het minimale immutable `ShowInterpreterInput` bevat uitsluitend de twee
+`REQUIRED_V0`-velden `section_bucket: str` en `energy_modifier: float`; v0
+bevat geen metadata. `section_bucket` is de reeds effectieve BeatBeam
+section/phrase bucket, wordt upstream bepaald en wordt door Show Interpreter
+v0 niet opnieuw geclassificeerd. `energy_modifier` is de reeds upstream
+afgeleide en begrensde modifier binnen `-0.08 … +0.08`; v0 interpreteert geen
+raw energy opnieuw. Er is dus geen dubbele bucketclassificatie of tweede
+energy-classifier.
+
+`OPTIONAL_V0`, maar nu niet geïmplementeerd: huidig segment
+label/start/end/progress/confidence en rich-current level/progress/confidence.
+`FUTURE_ONLY`: semantic section role/occurrence/family/energy,
+`current_event`, `next_event` en Rich Musical Events. M23A/Rich Musical Events
+blijven `BEZIG` en `RICH_EVENT_DEPENDENCY_V0 = NONE`. `DO_NOT_USE` in v0:
+transportpositie, BPM, beat/bar, playback generation, discontinuity, raw rich
+energy, M24/shadowcontext, native High/Mid/Low, manual overrides, fixtures en
+DMX.
+
+`STATE_OWNERSHIP_STATUS = CONTINUITY_RESOLVER_ONLY`: input bevat geen previous
+ShowIntent; een toekomstige interpreter is een pure mapping naar een
+ShowIntent-candidate of `None`, terwijl state en continuity bij
+`resolve_show_intent(...)` blijven. Ongeldige of onvoldoende required input
+mag geen musical meaning fabriceren: de latere interpreter mag `None`
+retourneren en de resolver behoudt previous; zonder previous geldt
+`ShowIntent("unknown", 0.0)`. `TRACK_BOUNDARY_RESET_POLICY =
+NEEDS_PRODUCT_DECISION`; trackwissel, playback-generation en discontinuity
+vallen buiten deze foundation.
+
+`INPUT_CONTRACT_IMPLEMENTATION_SAFETY = SAFE_NEW_FILES_ONLY`. De voorgenomen
+nieuwe files zijn `show_interpreter_input.py` en
+`tests/test_show_interpreter_input.py`; er is geen productionfile of runtime
+deployment nodig.
+
+### Show Interpreter Input Contract Foundation
+
+`NOG NIET GESTART` — voorgenomen scope: een puur immutable, gevalideerd
+inputmodel zonder pass-through naar ShowIntent, candidate-generation of
+production wiring.
+
 ---
 
 # 5. BeatBeam UI — iPad / live bediening
