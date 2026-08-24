@@ -1544,10 +1544,21 @@ PASS; observation accumuleert aantoonbaar zonder fysieke DMX.
 
 ### ShowIntent Representative Shadow Observation Run
 
-`NOG NIET GESTART — PREVIEW-ONLY READY` — draai een expliciete manual observation session tijdens
-representatieve echte VirtualDJ/SongAnalyzer playback over meerdere tracks en
-relevante normale/gap/seek/deck-overgangen. Evalueer daarna pas de Promotion
-Gate, zonder vooraf vastgelegde threshold.
+`GEREED — first representative preview-only observation completed; promotion held for semantic-history + broader lifecycle/stale evidence`.
+
+De handmatige preview-only sessie duurde `2248.506588 s` / `37.475110 min` en
+registreerde 58.007 authoritative frames met gemiddeld `25.798012 FPS`.
+Source-valid/candidate was 75,9581%; valid canonical unknown bleef 0. Er waren
+14 stale episodes (`533.782446 s` totaal, `119.347113 s` maximum) en 13
+lifecycle-resets, alle `track_changed`. Runtime integrity is PASS; promotion
+blijft HOLD omdat per-frame semantic history ontbreekt en hard-seek/deck/
+same-path lifecyclecoverage nog onvolledig is. Geen production authority.
+
+### ShowIntent Semantic Stability Observation Telemetry Foundation
+
+`NOG NIET GESTART` — bounded authoritative-frame semantic history voor
+bucket/modifier plus source/candidate/stale/lifecyclecontext, zonder
+`/api/state`-polling te verzwaren.
 
 ---
 
