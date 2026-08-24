@@ -1500,9 +1500,35 @@ health op poort 8781 en runtime-shadowsmoke zijn PASS.
 
 ### ShowIntent Shadow Runtime Observation / Promotion Gate Audit
 
-`NOG NIET GESTART` — toekomstige observatie-only stap. Analyseer eerst live
-shadow lifecycle-telemetrie en afwijkingen zonder productie-authoriteit,
-fixture-/DMX-terugkoppeling of uitbreiding van de lifecyclepolicy.
+`GEREED — promotion-gate observability audit PASS`.
+
+De audit heeft `SNAPSHOT_ONLY` vastgesteld en een expliciete handmatige,
+longitudinale shadowobservatiesessie als kleinste veilige vervolg bepaald.
+
+### ShowIntent Shadow Observation Telemetry Foundation
+
+`GEREED — longitudinal shadow telemetry + technical runtime PASS`.
+
+Private `DmxController`-observatiestate biedt een handmatige, idempotente
+start/stop-sessie. Alleen één authoritative `_send_loop()`-frame ná de
+shadowupdate accumuleert frame- en monotonic metrics: source/candidate/unknown,
+retained/stale en stale episodes met current/total/max duur. Lifecycle-resets
+worden totaal, per bestaande reason en als geordend sparse record vastgelegd.
+Records gebruiken sessie-scoped opaque `track-####`-keys; volledige paden worden
+niet gepubliceerd. `state()`-/API-reads zijn passief en frozen resultaten
+blijven stabiel na stop. Er zijn geen thresholds, quality score,
+production-authority, render-/fixture-/DMX-terugkoppeling of Rich Events.
+
+Targeted telemetrytests, shadow/pure/packagingregressies en de volledige suite
+zijn PASS (172/172). Beta build/package, relevante bron/bundlehashes, bundled
+imports, arm64/signing, fresh restart, health en API start/stop-smoke zijn PASS.
+
+### ShowIntent Representative Shadow Observation Run
+
+`NOG NIET GESTART` — draai een expliciete manual observation session tijdens
+representatieve echte VirtualDJ/SongAnalyzer playback over meerdere tracks en
+relevante normale/gap/seek/deck-overgangen. Evalueer daarna pas de Promotion
+Gate, zonder vooraf vastgelegde threshold.
 
 ---
 
