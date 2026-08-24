@@ -1220,9 +1220,27 @@ runtime deployment.
 
 ### ShowIntent Candidate Mapper Foundation
 
-`NOG NIET GESTART` — scope uitsluitend: optional input, `None → None`,
-canonical input → exacte ShowIntent, geen content gating, state, side effects,
-events, transport, fixtures of DMX.
+`GEREED — pure offline mapper + tests PASS` — de nieuwe module
+`show_intent_candidate_mapper.py` bevat de pure stateless functie
+`map_show_intent_candidate`. Deze accepteert optional `ShowInterpreterInput`:
+`None → None`; aanwezige canonical input → exact een nieuwe `ShowIntent`.
+`unknown` passeert door en `ShowInterpreterInput("unknown", 0.0)` wordt niet
+onderdrukt. Er is geen content-based gating.
+
+Input-presence en raw-validity blijven bij de upstream adapter; de continuity
+resolver blijft de enige state-eigenaar. Er zijn geen events, track reset,
+fixtures, DMX of production wiring. De gerichte suite is `9/9 PASS` en de
+volledige BeatBeam-suite `137/137 PASS`. Deployment is niet nodig.
+
+### ShowIntent Upstream Adapter Contract Audit
+
+`NOG NIET GESTART` — read-only bepalen hoe bestaande production-safe
+BeatBeam-bronnen later naar `ShowInterpreterInput | None` worden geprojecteerd.
+De audit bepaalt de effectieve bucket-source of truth, de exacte bron van
+`energy_modifier`, raw-invalid/missing → `None`, hergebruik van
+StructureBehaviorBridge, het vermijden van dubbele classificatie en eventuele
+production wiring zonder de huidige Auto Show direct te vervangen. Track reset
+blijft een aparte productbeslissing. Geen adapterimplementatie in deze stap.
 
 ---
 
