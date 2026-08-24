@@ -837,12 +837,25 @@ reconstructions blijven actief; composite context model is `NOT_READY`,
 
 ### M24A-5D-4U — Local predecessor/successor relation topology targeted evidence audit
 
-`STATUS = BEZIG`.
+`STATUS = GEREED — neighbour evidence PASS; mostly redundant; no surviving independent neighbour evidence family`.
 
-4U onderzoekt read-only of bestaande local neighbour relations buiten
-run-equivalente aliases daadwerkelijk incrementele, provenance-clean zachte
-structurele context bevatten. Geen U16-route, classifier, score, threshold,
-audiofeature of runtimewijziging.
+De transition universe omvat 1.529 overgangen, met 489 volledige P/O/D/S-
+windows en 13 relation signatures. De signatures worden gedomineerd door
+redundante continuity/run-patterns: `P=O` en `D=S` zijn directe run-aliases,
+`P=D` is een immediate-return-alias, `O=S` is een
+next-occurrence-distance-1-alias en `O=D` is een same-family-transition-alias.
+`P=S` blijft onafhankelijk maar onvoldoende gelabeld. De incremental
+information van neighbour evidence is daarom `MOSTLY_REDUNDANT`; neighbour
+evidence is `REDUNDANT` en surviving neighbour evidence families zijn `NONE`.
+Het composite context model blijft `NOT_READY`, `NEW_AUDIO_FEATURE_NEEDED = NO`
+en implementation is `NO`.
+
+Volgende analyzerstap: M24A-5D-4V — Broader ArrangementProfile context boundary
+synthesis.
+
+### M24A-5D-4V — Broader ArrangementProfile context boundary synthesis
+
+`STATUS = NOG NIET GESTART — tijdelijk geparkeerd tot afronding van de reeds geplande BeatBeam Bounded NO-OP Parity Runtime Acceptance Run`.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
