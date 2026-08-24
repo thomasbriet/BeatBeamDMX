@@ -1302,15 +1302,111 @@ is `145/145 PASS`; deployment is niet nodig.
 
 ### ShowIntent Shadow Wiring Contract Audit
 
-`NOG NIET GESTART` — read-only ontwerpen hoe dezelfde bestaande
-production-evaluatie later canonical-only `section_bucket`, `energy_modifier`
-en source validity naar de nieuwe pure keten kan projecteren in SHADOW/DEBUG,
-zonder Auto Show-, fixture- of DMX-output te beïnvloeden. De audit onderzoekt
-de minimale wijziging in `beatbeam_app.py`, de canonical bucket vóór
-legacy/override-contaminatie, hergebruik van de effectieve energy modifier, één
-coherente snapshot, opslag van shadow ShowIntent-state en zichtbaar
-stale-intent-risico bij trackwissels. `TRACK_BOUNDARY_RESET_POLICY` blijft een
-aparte beslissing. Nog geen wiring implementeren.
+`SHOW_INTENT_SHADOW_WIRING_AUDIT_PASS — READY_FOR_DECISION` —
+`GEREED — production dataflow/lifecycle audit PASS`.
+
+De authoritative productionflow is `DmxController._send_loop()`: één actuele
+OSC/transport-snapshot, één `_auto_show_state()`-evaluatie, render met exact
+dat resultaat en daarna DMX-send. `_auto_show_state()` roept eenmaal
+`StructureBehaviorBridge.resolve()` aan, verwerkt daarna legacy/manual override
+en berekent de bestaande rich-energy-modifier.
+
+`CANONICAL_BUCKET_SHADOW_TAP = DmxController._auto_show_state():
+structure_behavior["mapped_behavior_bucket"]`, direct na
+`structure_behavior = self._structure_behavior_state(osc)` en vóór
+legacy-fallback, `override_phrase` en `osc_effective`-mutatie.
+`CANONICAL_BUCKET_TAP_STATUS = REQUIRES_LOCAL_CAPTURE`. De uiteindelijke
+`auto_show["phrase_bucket"]` is geen shadow-input omdat die legacy of manual
+override kan bevatten.
+
+`ENERGY_MODIFIER_SHADOW_TAP = DmxController._auto_show_state(): de bestaande
+lokale song_analyzer_energy_modifier`, na de bestaande validatie en begrenzing.
+`ENERGY_TAP_STATUS = CLEAN_EXISTING_VALUE`; er komt geen tweede energyformule.
+
+`CANONICAL_VALIDITY_TAP_STATUS = SMALL_BOOLEAN_PROJECTION`: shadow gebruikt
+uitsluitend `structure_behavior["eligible"] is True` én
+`structure_behavior["effective_source"] == "song_analyzer"`. De bridge heeft
+dan al actieve VirtualDJ-context, exacte track match,
+`availability=available_current`, een geldige current projection/segment en
+een mappable canonical label fail-closed bewezen. Er komt geen tweede
+eligibility-classifier.
+
+`SHADOW_SNAPSHOT_COHERENCE = REQUIRES_NEW_LOCAL_SNAPSHOT`: binnen dezelfde
+`_auto_show_state()`-evaluatie wordt conceptueel één local context vastgelegd
+uit source validity, de canonical bucket en de bestaande energy modifier. Deze
+waarden worden niet tussen evaluaties of ticks gemengd.
+
+`LEGACY_OVERRIDE_ISOLATION_STATUS = CLEANLY_SEPARABLE` en
+`LEGACY_FALLBACK_ADAPTER_POLICY = CANONICAL_ONLY`. Production legacy fallback
+en manual phrase override blijven ongewijzigd en leidend; shadow blijft
+canonical-only. Bij ongeldige canonical source geeft shadow `None`, ook als
+production legacy/override `chorus` toont.
+
+`SHADOW_STATE_OWNER = DMX_CONTROLLER_PRIVATE_FIELD`: latere runtime
+previous/resolved ShowIntent-state leeft als private DmxController-state onder
+de bestaande controller-lock, uitsluitend voor shadow, niet globaal en niet
+als fixture-/DMX-renderstate. Hij blijft Debug read-only beschikbaar en later
+afzonderlijk resetbaar. Adapter, mapper en resolver blijven stateless volgens
+hun bestaande contracten.
+
+Omdat `_auto_show_state()` minstens tien directe/relevante callsites heeft,
+geldt `AUTO_SHOW_STATE_MUTATION_SAFETY = MULTIPLE_CALLS_STATE_MUTATION_UNSAFE`.
+Shadow-state mag daar niet muteren. Het exacte uitvoerpunt is
+`SHADOW_WIRING_EXECUTION_POINT = DmxController._send_loop()`, direct na de ene
+authoritative `_auto_show_state()`-evaluatie en vóór `_render_values()`; daar
+draait effective context → adapter → candidate mapper → continuity resolver
+exact eenmaal per echte DMX-frame.
+
+Shadow wiring krijgt een harde observer-only guard: geen invloed op
+`auto_show`, `phrase_current`, `phrase_bucket`, energy, slot selection, fixture
+programs, movement, color, dimmer, strobe, manual override, safety,
+renderwaarden, `values_for_fixture()` of `DMX.send()`.
+
+`TRACK_BOUNDARY_RESET_POLICY = NEEDS_PRODUCT_DECISION` en
+`SHADOW_WITHOUT_TRACK_RESET_STATUS = SAFE_WITH_VISIBLE_STALE_WARNING`.
+Zonder reset kan intent A bij track B en tijdelijk ontbrekende canonical source
+onbeperkt worden behouden totdat een nieuwe candidate, procesrestart of latere
+reset ontstaat. De eerste wiring toont daarom bij `candidate=None` plus
+previous expliciet `retained_previous=true` en `stale_warning=true`; dit is
+uitsluitend diagnostiek.
+
+`SHADOW_DEBUG_EXPOSURE = BACKEND_DEBUG_ONLY_SUFFICIENT`. De eerste wiring
+exposeert alleen via bestaande backend state/API-conventies, bij voorkeur
+`DmxController.state()`; native UI-wijziging is niet nodig. Minimale data:
+`source_valid`, `input_present`, `candidate_present`,
+`input_section_bucket`, `input_energy_modifier`, `resolved_section_bucket`,
+`resolved_energy_modifier`, `retained_previous` en `stale_warning`.
+
+`BEATBEAM_APP_DIRTY_OVERLAP = NO_OVERLAP` voor deze route: de bestaande dirty
+hunks raken niet `_auto_show_state()`, DmxController-init, `_send_loop()` of
+`DmxController.state()`. `beatbeam_debug_state()` blijft in de eerste wiring
+ongemoeid wegens bestaande dirty overlap.
+
+`RICH_EVENT_DEPENDENCY_V0 = NONE`: geen `current_event`, `next_event` of Rich
+Musical Events. De candidate mapper blijft pure pass-through; shadow voegt
+geen drop-, transition-, UPWARD-, tension-, danceability-, event-, fixture- of
+DMX-interpretatie toe.
+
+`SHADOW_WIRING_IMPLEMENTATION_SAFETY = SAFE_WITH_SMALL_EXISTING_FILE_CHANGE`.
+
+### ShowIntent Shadow Wiring Foundation
+
+`NOG NIET GESTART` — voorgenomen minimale scope: selectieve wijziging van
+`beatbeam_app.py`; canonical bucket lokaal capturen vóór legacy/override;
+bestaande energy modifier hergebruiken; één coherente local context; private
+shadow-state op DmxController; adapter → mapper → resolver eenmaal per
+`_send_loop()`-frame; backend Debug-exposure via `DmxController.state()`;
+`retained_previous`/`stale_warning`-diagnostiek; absoluut geen production
+render-/DMX-impact; geen native UI-wijziging. Er komt een nieuwe geïsoleerde
+testmodule; bestaande dirty tests worden niet gewijzigd.
+
+Deze volgende implementation is runtime-relevant. Na codewijziging zijn
+verplicht: build → package → install → sign → verify → restart →
+source/bundle-hash- of versiecontrole → technische runtime smoke, via de
+bestaande repositoryconforme Beta packaging/deploymentroute. Omdat
+`beatbeam_app.py` in de Beta-app wordt gebundeld, moet de Beta-bundle opnieuw
+worden gebouwd/geïnstalleerd wanneer die file wijzigt. Native UI hoeft niet
+functioneel te veranderen.
 
 ---
 
