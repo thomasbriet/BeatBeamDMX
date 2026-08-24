@@ -1584,9 +1584,25 @@ same-path deck boundary niet. Semantic stability is PASS; promotion blijft HOLD.
 
 ### ShowIntent Same-Path Deck + Canonical Recovery Observation Run
 
-`NOG NIET GESTART` — één gerichte runtime-run vanaf geldige canonical state
-om same-track identity over een echte deck boundary en canonical
-invalid/recovery rond normale boundaries te observeren.
+`GEREED — final promotion gates PASS; ready for bounded NO-OP parity design`.
+
+De finale preview-only sessie duurde `714.963242 s` / `11.916054 min` en
+registreerde 19.105 semantic-history records. De geldige canonical baseline is
+PASS. Twee same-path deck boundaries zijn geobserveerd, beide met `0 s`
+candidate/source-recovery en zonder neutral flash; ook twee normale
+trackwissels hadden `0 s` recovery. Retained continuity bleef volledig
+consistent, input/resolved mismatches waren `0`, en valid canonical unknown was
+`0`. Lifecycle-evidence is daarmee compleet voor de promotion gate: Gate A,
+Gate B, Gate C, Gate D en Gate E zijn PASS; Gate F is
+`READY_FOR_BOUNDED_PROMOTION_DESIGN`. Er is geen production authority
+toegevoegd.
+
+### Bounded NO-OP Parity Source Substitution Design Audit
+
+`BEZIG` — ontwerp van de kleinste production promotion waarbij ShowIntent
+uitsluitend als begrensde bron voor bestaande `section_bucket` /
+`energy_modifier` wordt gebruikt, met bestaande Auto Show fallback en zonder
+nieuwe showsemantiek.
 
 ---
 
