@@ -61,6 +61,9 @@ DEFAULT_HTTP_PORT = 8780
 DEFAULT_OSC_PORT = 4461
 DEFAULT_DMX_FPS = 30.0
 SHOW_INTENT_SEMANTIC_HISTORY_MAX_FRAMES = 120000
+# Fase 1 van de bounded promotion: uitsluitend parity-diagnostiek. Deze private
+# gate heeft geen UI, persistence of runtime-endpoint en blijft default uit.
+SHOWINTENT_BOUNDED_PARITY_SOURCE_ENABLED = False
 API_SCHEMA_VERSION = 4
 DEFAULT_MANUAL_BPM = 124.0
 DEFAULT_MANUAL_PHRASE = "verse"
@@ -5026,6 +5029,63 @@ def phrase_bucket(phrase):
     return "unknown"
 
 
+def _select_showintent_bounded_parity_source(
+    feature_gate_enabled,
+    manual_phrase_override,
+    existing_section_bucket,
+    existing_energy_modifier,
+    source_valid,
+    input_present,
+    candidate_present,
+    candidate_section_bucket,
+    candidate_energy_modifier,
+):
+    """Kies lokaal één bestaand semantic-pair, met fail-closed parity fallback."""
+    result = {
+        "gate_enabled": feature_gate_enabled is True,
+        "showintent_eligible": False,
+        "existing_section_bucket": existing_section_bucket,
+        "existing_energy_modifier": existing_energy_modifier,
+        "candidate_section_bucket": candidate_section_bucket,
+        "candidate_energy_modifier": candidate_energy_modifier,
+        "production_semantic_source": "existing_autoshow",
+        "production_section_bucket": existing_section_bucket,
+        "production_energy_modifier": existing_energy_modifier,
+        "fallback_reason": None,
+    }
+    if feature_gate_enabled is not True:
+        result["fallback_reason"] = "feature_gate_off"
+        return result
+    if manual_phrase_override is True:
+        result["fallback_reason"] = "manual_phrase_override"
+        return result
+    if source_valid is not True:
+        result["fallback_reason"] = "source_invalid"
+        return result
+    if input_present is not True:
+        result["fallback_reason"] = "input_absent"
+        return result
+    if candidate_present is not True:
+        result["fallback_reason"] = "candidate_absent"
+        return result
+    if (
+        not isinstance(candidate_section_bucket, str)
+        or isinstance(candidate_energy_modifier, bool)
+        or not isinstance(candidate_energy_modifier, (int, float))
+        or not math.isfinite(float(candidate_energy_modifier))
+    ):
+        result["fallback_reason"] = "selector_failure"
+        return result
+    result.update({
+        "showintent_eligible": True,
+        "production_semantic_source": "showintent_candidate",
+        "production_section_bucket": candidate_section_bucket,
+        "production_energy_modifier": float(candidate_energy_modifier),
+        "fallback_reason": "showintent_selected",
+    })
+    return result
+
+
 def build_phrase_stage(phrase):
     key = normalize_phrase(phrase)
     if not (key.startswith("up") or key.startswith("build")):
@@ -9339,6 +9399,21 @@ class DmxController:
         )
         self._show_intent_semantic_history = deque()
         self._show_intent_semantic_history_dropped_frame_count = 0
+        self._show_intent_bounded_parity_pending = None
+        self._show_intent_bounded_parity_history = deque()
+        self._show_intent_bounded_parity_history_dropped_frame_count = 0
+        self._show_intent_bounded_parity_diagnostics = {
+            "gate_enabled": SHOWINTENT_BOUNDED_PARITY_SOURCE_ENABLED,
+            "showintent_eligible": False,
+            "existing_section_bucket": None,
+            "existing_energy_modifier": None,
+            "candidate_section_bucket": None,
+            "candidate_energy_modifier": None,
+            "production_semantic_source": "existing_autoshow",
+            "production_section_bucket": None,
+            "production_energy_modifier": None,
+            "fallback_reason": "feature_gate_off",
+        }
         self._show_intent_shadow_diagnostics = {
             "source_valid": False,
             "input_present": False,
@@ -10664,6 +10739,9 @@ class DmxController:
                 "blackout_active": config["blackout_active"],
                 "auto_show": auto_show,
                 "show_intent_shadow": dict(self._show_intent_shadow_diagnostics),
+                "show_intent_bounded_parity": dict(
+                    self._show_intent_bounded_parity_diagnostics
+                ),
                 "show_intent_observation": self._show_intent_observation_state_locked(),
                 "slot_order": list(config["slot_order"]),
                 "slots": config["slots"],
@@ -12974,17 +13052,53 @@ class DmxController:
             structure_behavior.get("eligible") is True
             and structure_behavior.get("effective_source") == "song_analyzer"
         )
+        rich_current = ((structure_behavior.get("projection") or {}).get("rich_current") or {}) \
+            if structure_behavior["effective_source"] == "song_analyzer" else {}
+        song_analyzer_energy = rich_current.get("energy")
+        if isinstance(song_analyzer_energy, bool) or not isinstance(song_analyzer_energy, (int, float)) \
+                or not math.isfinite(float(song_analyzer_energy)):
+            song_analyzer_energy = None
+        existing_energy_modifier = 0.0 if song_analyzer_energy is None else max(
+            -SONG_ANALYZER_MAX_ENERGY_MODIFIER,
+            min(SONG_ANALYZER_MAX_ENERGY_MODIFIER,
+                float(song_analyzer_energy) * SONG_ANALYZER_ENERGY_Z_SCORE_MODIFIER_PER_UNIT),
+        )
         if override_phrase != "none":
             osc_effective["phrase_current"] = override_phrase
         elif structure_behavior["effective_source"] == "song_analyzer":
             osc_effective["phrase_current"] = structure_behavior["mapped_behavior_bucket"]
         if structure_behavior["effective_source"] != "song_analyzer":
             self._prewarm_track_show_plans(style_name, osc_effective)
-        section = (
+        existing_section_bucket = (
             override_phrase
             if override_phrase != "none"
             else phrase_bucket(osc_effective.get("phrase_current"))
         )
+        shadow_context = (
+            ShowInterpreterEffectiveContext(
+                source_is_valid=True,
+                section_bucket=phrase_bucket(canonical_mapped_behavior_bucket),
+                energy_modifier=existing_energy_modifier,
+            )
+            if source_is_valid
+            else None
+        )
+        interpreter_input = project_show_interpreter_input(shadow_context)
+        candidate = map_show_intent_candidate(interpreter_input)
+        parity_selection = _select_showintent_bounded_parity_source(
+            SHOWINTENT_BOUNDED_PARITY_SOURCE_ENABLED,
+            override_phrase != "none",
+            existing_section_bucket,
+            existing_energy_modifier,
+            source_is_valid,
+            interpreter_input is not None,
+            candidate is not None,
+            None if candidate is None else candidate.section_bucket,
+            None if candidate is None else candidate.energy_modifier,
+        )
+        self._show_intent_bounded_parity_pending = parity_selection
+        section = parity_selection["production_section_bucket"]
+        song_analyzer_energy_modifier = parity_selection["production_energy_modifier"]
         beat_value = float(osc.get("beat_value") or 0.0)
         beat_step = int(math.floor(beat_value)) % 4 + 1
         bpm = float(osc.get("bpm") or 0.0)
@@ -13066,26 +13180,6 @@ class DmxController:
             + float(waveform_analysis.get("transient") or 0.0) * 0.03
             + drum_profile["impact"] * 0.04
             + drum_profile["sparkle"] * 0.015
-        )
-        rich_current = ((structure_behavior.get("projection") or {}).get("rich_current") or {}) \
-            if structure_behavior["effective_source"] == "song_analyzer" else {}
-        song_analyzer_energy = rich_current.get("energy")
-        if isinstance(song_analyzer_energy, bool) or not isinstance(song_analyzer_energy, (int, float)) \
-                or not math.isfinite(float(song_analyzer_energy)):
-            song_analyzer_energy = None
-        song_analyzer_energy_modifier = 0.0 if song_analyzer_energy is None else max(
-            -SONG_ANALYZER_MAX_ENERGY_MODIFIER,
-            min(SONG_ANALYZER_MAX_ENERGY_MODIFIER,
-                float(song_analyzer_energy) * SONG_ANALYZER_ENERGY_Z_SCORE_MODIFIER_PER_UNIT),
-        )
-        shadow_context = (
-            ShowInterpreterEffectiveContext(
-                source_is_valid=True,
-                section_bucket=phrase_bucket(canonical_mapped_behavior_bucket),
-                energy_modifier=song_analyzer_energy_modifier,
-            )
-            if source_is_valid
-            else None
         )
         # Rich SongAnalyzer energy is additive and bounded: phrase buckets and
         # all existing fixture safety controls remain authoritative.
@@ -13441,6 +13535,8 @@ class DmxController:
         self._show_intent_observation_track_keys = {}
         self._show_intent_semantic_history.clear()
         self._show_intent_semantic_history_dropped_frame_count = 0
+        self._show_intent_bounded_parity_history.clear()
+        self._show_intent_bounded_parity_history_dropped_frame_count = 0
 
     def _finalize_show_intent_observation_stale_locked(self, now):
         started = self._show_intent_observation_stale_started_monotonic
@@ -13495,6 +13591,14 @@ class DmxController:
             "semantic_history_truncated": (
                 self._show_intent_semantic_history_dropped_frame_count > 0
             ),
+            "parity_history_count": len(self._show_intent_bounded_parity_history),
+            "parity_history_capacity": self._show_intent_semantic_history_capacity,
+            "parity_history_dropped_frame_count": (
+                self._show_intent_bounded_parity_history_dropped_frame_count
+            ),
+            "parity_history_truncated": (
+                self._show_intent_bounded_parity_history_dropped_frame_count > 0
+            ),
         }
 
     def show_intent_observation_history(self):
@@ -13511,6 +13615,23 @@ class DmxController:
                 "semantic_history_truncated": state["semantic_history_truncated"],
                 "semantic_history": [
                     dict(record) for record in self._show_intent_semantic_history
+                ],
+            }
+
+    def show_intent_observation_parity_history(self):
+        """Return a passive JSON-safe parity snapshot without adding a frame."""
+        with self.lock:
+            state = self._show_intent_observation_state_locked()
+            return {
+                "session_active": state["session_active"],
+                "parity_history_count": state["parity_history_count"],
+                "parity_history_capacity": state["parity_history_capacity"],
+                "parity_history_dropped_frame_count": state[
+                    "parity_history_dropped_frame_count"
+                ],
+                "parity_history_truncated": state["parity_history_truncated"],
+                "parity_history": [
+                    dict(record) for record in self._show_intent_bounded_parity_history
                 ],
             }
 
@@ -13722,6 +13843,26 @@ class DmxController:
             self._show_intent_semantic_history.popleft()
             self._show_intent_semantic_history_dropped_frame_count += 1
         self._show_intent_semantic_history.append(semantic_record)
+
+        parity = self._show_intent_bounded_parity_diagnostics
+        parity_record = {
+            "frame_sequence": self._show_intent_observation_frame_sequence,
+            "session_seconds": self._show_intent_observation_elapsed_seconds,
+            "gate_enabled": parity["gate_enabled"] is True,
+            "showintent_eligible": parity["showintent_eligible"] is True,
+            "existing_section_bucket": parity["existing_section_bucket"],
+            "existing_energy_modifier": parity["existing_energy_modifier"],
+            "candidate_section_bucket": parity["candidate_section_bucket"],
+            "candidate_energy_modifier": parity["candidate_energy_modifier"],
+            "production_semantic_source": parity["production_semantic_source"],
+            "production_section_bucket": parity["production_section_bucket"],
+            "production_energy_modifier": parity["production_energy_modifier"],
+            "fallback_reason": parity["fallback_reason"],
+        }
+        if len(self._show_intent_bounded_parity_history) >= self._show_intent_semantic_history_capacity:
+            self._show_intent_bounded_parity_history.popleft()
+            self._show_intent_bounded_parity_history_dropped_frame_count += 1
+        self._show_intent_bounded_parity_history.append(parity_record)
 
     @staticmethod
     def _rhythm_change_gate_seconds(bpm):
@@ -14804,6 +14945,10 @@ class DmxController:
                 auto_show, shadow_context = self._auto_show_evaluation(
                     osc, config["auto_show"]
                 )
+                if isinstance(self._show_intent_bounded_parity_pending, dict):
+                    self._show_intent_bounded_parity_diagnostics = dict(
+                        self._show_intent_bounded_parity_pending
+                    )
                 previous_shadow_track_identity = self._show_intent_shadow_last_track_identity
                 self._update_show_intent_shadow(shadow_context, osc)
                 self._observe_show_intent_shadow_frame(
@@ -15496,6 +15641,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/show-intent-observation/history":
             self.send_json(DMX.show_intent_observation_history())
+            return
+        if path == "/api/show-intent-observation/parity-history":
+            self.send_json(DMX.show_intent_observation_parity_history())
             return
         if path == "/api/developer/playback":
             self.send_json(TRANSPORT.developer_playback_state())
