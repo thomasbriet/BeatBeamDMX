@@ -1161,9 +1161,28 @@ deployment nodig.
 
 ### Show Interpreter Input Contract Foundation
 
-`NOG NIET GESTART` — voorgenomen scope: een puur immutable, gevalideerd
-inputmodel zonder pass-through naar ShowIntent, candidate-generation of
-production wiring.
+`GEREED — pure offline foundation + tests PASS` — de nieuwe pure module
+`show_interpreter_input.py` en testmodule
+`tests/test_show_interpreter_input.py` bevatten een immutable
+`ShowInterpreterInput` met exact `section_bucket` en `energy_modifier`.
+De bestaande bucketset wordt hergebruikt; een ongeldige bucket wordt
+`unknown`. De modifier blijft binnen `-0.08 … +0.08`; ongeldige, niet-finite
+of boolean invoer wordt `0.0`.
+
+V0 bevat geen optional metadata, Rich Musical Events-dependency, state
+ownership of track-resetpolicy. Er is geen ShowIntent-generation en geen
+production wiring; geen bestaande productionfile is gewijzigd. De gerichte
+suite is `9/9 PASS` en de volledige BeatBeam-suite `128/128 PASS`. Deployment
+is niet nodig.
+
+### Show Interpreter Candidate Mapping Audit
+
+`NOG NIET GESTART` — read-only bepalen wanneer een geldige
+`ShowInterpreterInput` een nieuwe ShowIntent-candidate moet opleveren versus
+`None`. Deze audit bewaakt geen dubbele bucketclassificatie, geen nieuwe
+energyinterpretatie, `None = no new candidate`, continuity buiten interpreter,
+track reset als aparte productbeslissing en current_event/next_event buiten v0
+tenzij later expliciet besloten.
 
 ---
 
