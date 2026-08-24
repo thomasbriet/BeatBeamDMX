@@ -1177,12 +1177,52 @@ is niet nodig.
 
 ### Show Interpreter Candidate Mapping Audit
 
-`NOG NIET GESTART` — read-only bepalen wanneer een geldige
-`ShowInterpreterInput` een nieuwe ShowIntent-candidate moet opleveren versus
-`None`. Deze audit bewaakt geen dubbele bucketclassificatie, geen nieuwe
-energyinterpretatie, `None = no new candidate`, continuity buiten interpreter,
-track reset als aparte productbeslissing en current_event/next_event buiten v0
-tenzij later expliciet besloten.
+`SHOW_INTERPRETER_MAPPING_AUDIT_PASS — READY_FOR_DECISION`.
+
+`INPUT_PRESENCE_OWNERSHIP = UPSTREAM_ADAPTER`: de toekomstige production
+adapter/source-validatielaag beslist of voldoende bruikbare actuele broncontext
+bestaat om een `ShowInterpreterInput` aan te leveren. Zonder bruikbare context
+wordt geen input geconstrueerd en ontvangt de mapper `None`.
+
+`MAPPER_OPTIONAL_INPUT_STATUS = REQUIRED` en `V0_MAPPING_MODEL =
+PURE_PASS_THROUGH`: de mapper accepteert `ShowInterpreterInput | None`.
+`None` wordt `None`; aanwezige canonical input wordt een nieuwe ShowIntent met
+exact dezelfde `section_bucket` en `energy_modifier`, zonder verdere muzikale
+interpretatie.
+
+`UNKNOWN_BUCKET_MAPPING_POLICY = PASS_THROUGH`: `unknown` is een geldige
+canonical BeatBeam-bucket. `NEUTRAL_VALUE_SUPPRESSION = FORBIDDEN`:
+`ShowInterpreterInput("unknown", 0.0)` mag niet op basis van zijn waarden naar
+`None` worden onderdrukt. Na normalisatie is raw-validity niet herleidbaar;
+`RAW_INVALID_FAIL_CLOSED_OWNER = UPSTREAM_ADAPTER`. De toekomstige flow is:
+
+`raw source → upstream validity check → ShowInterpreterInput | None →
+candidate mapper → ShowIntent | None → resolve_show_intent`
+
+Raw invalid/missing wordt dus `None` vóór candidate construction; de continuity
+resolver behoudt vervolgens previous en er ontstaat geen gefabriceerde neutrale
+candidate.
+
+`STATE_OWNERSHIP_STATUS = CONTINUITY_RESOLVER_ONLY`: de mapper ontvangt geen
+previous ShowIntent, bezit geen state, voert geen continuity uit en kent geen
+intent lifetime. `TRACK_BOUNDARY_RESET_POLICY = NEEDS_PRODUCT_DECISION`; mapper
+v0 kent geen track-id, playback-generation, transportpositie of discontinuity.
+`RICH_EVENT_DEPENDENCY_V0 = NONE`; `current_event`, `next_event` en Rich
+Musical Events blijven buiten v0.
+
+De nieuwe module is `show_intent_candidate_mapper.py`, bewust geen volledige
+Show Interpreter. De pure API is
+`map_show_intent_candidate(source: ShowInterpreterInput | None) -> ShowIntent | None`.
+`CANDIDATE_MAPPING_IMPLEMENTATION_SAFETY = SAFE_NEW_FILES_ONLY`: alleen
+`show_intent_candidate_mapper.py` en
+`tests/test_show_intent_candidate_mapper.py` zijn nodig; geen productionfile of
+runtime deployment.
+
+### ShowIntent Candidate Mapper Foundation
+
+`NOG NIET GESTART` — scope uitsluitend: optional input, `None → None`,
+canonical input → exacte ShowIntent, geen content gating, state, side effects,
+events, transport, fixtures of DMX.
 
 ---
 
