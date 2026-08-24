@@ -9302,6 +9302,27 @@ class DmxController:
         self._show_intent_shadow_last_track_identity = None
         self._show_intent_shadow_last_playback_generation = None
         self._show_intent_shadow_last_playback_event = None
+        self._show_intent_observation_active = False
+        self._show_intent_observation_started_monotonic = None
+        self._show_intent_observation_elapsed_seconds = 0.0
+        self._show_intent_observation_frame_sequence = 0
+        self._show_intent_observation_authoritative_frame_count = 0
+        self._show_intent_observation_source_valid_frame_count = 0
+        self._show_intent_observation_candidate_present_frame_count = 0
+        self._show_intent_observation_resolved_unknown_frame_count = 0
+        self._show_intent_observation_valid_canonical_unknown_frame_count = 0
+        self._show_intent_observation_retained_previous_frame_count = 0
+        self._show_intent_observation_stale_frame_count = 0
+        self._show_intent_observation_stale_episode_count = 0
+        self._show_intent_observation_stale_started_monotonic = None
+        self._show_intent_observation_stale_closed_seconds = 0.0
+        self._show_intent_observation_stale_current_seconds = 0.0
+        self._show_intent_observation_stale_total_seconds = 0.0
+        self._show_intent_observation_stale_max_seconds = 0.0
+        self._show_intent_observation_lifecycle_reset_count = 0
+        self._show_intent_observation_lifecycle_resets_by_reason = {}
+        self._show_intent_observation_lifecycle_reset_records = []
+        self._show_intent_observation_track_keys = {}
         self._show_intent_shadow_diagnostics = {
             "source_valid": False,
             "input_present": False,
@@ -10630,6 +10651,7 @@ class DmxController:
                 "blackout_active": config["blackout_active"],
                 "auto_show": auto_show,
                 "show_intent_shadow": dict(self._show_intent_shadow_diagnostics),
+                "show_intent_observation": self._show_intent_observation_state_locked(),
                 "slot_order": list(config["slot_order"]),
                 "slots": config["slots"],
                 "slot_ranges": {
@@ -13382,6 +13404,93 @@ class DmxController:
             "lifecycle_reason": lifecycle_reason,
         }
 
+    def _reset_show_intent_observation_session_locked(self, now):
+        self._show_intent_observation_active = True
+        self._show_intent_observation_started_monotonic = now
+        self._show_intent_observation_elapsed_seconds = 0.0
+        self._show_intent_observation_frame_sequence = 0
+        self._show_intent_observation_authoritative_frame_count = 0
+        self._show_intent_observation_source_valid_frame_count = 0
+        self._show_intent_observation_candidate_present_frame_count = 0
+        self._show_intent_observation_resolved_unknown_frame_count = 0
+        self._show_intent_observation_valid_canonical_unknown_frame_count = 0
+        self._show_intent_observation_retained_previous_frame_count = 0
+        self._show_intent_observation_stale_frame_count = 0
+        self._show_intent_observation_stale_episode_count = 0
+        self._show_intent_observation_stale_started_monotonic = None
+        self._show_intent_observation_stale_closed_seconds = 0.0
+        self._show_intent_observation_stale_current_seconds = 0.0
+        self._show_intent_observation_stale_total_seconds = 0.0
+        self._show_intent_observation_stale_max_seconds = 0.0
+        self._show_intent_observation_lifecycle_reset_count = 0
+        self._show_intent_observation_lifecycle_resets_by_reason = {}
+        self._show_intent_observation_lifecycle_reset_records = []
+        self._show_intent_observation_track_keys = {}
+
+    def _finalize_show_intent_observation_stale_locked(self, now):
+        started = self._show_intent_observation_stale_started_monotonic
+        if started is None:
+            return
+        duration = max(0.0, now - started)
+        self._show_intent_observation_stale_closed_seconds += duration
+        self._show_intent_observation_stale_current_seconds = 0.0
+        self._show_intent_observation_stale_total_seconds = (
+            self._show_intent_observation_stale_closed_seconds
+        )
+        self._show_intent_observation_stale_max_seconds = max(
+            self._show_intent_observation_stale_max_seconds, duration
+        )
+        self._show_intent_observation_stale_started_monotonic = None
+
+    def _show_intent_observation_track_key_locked(self, identity):
+        if identity is None:
+            return None
+        key = self._show_intent_observation_track_keys.get(identity)
+        if key is None:
+            key = f"track-{len(self._show_intent_observation_track_keys) + 1:04d}"
+            self._show_intent_observation_track_keys[identity] = key
+        return key
+
+    def _show_intent_observation_state_locked(self):
+        return {
+            "session_active": self._show_intent_observation_active,
+            "session_elapsed_seconds": self._show_intent_observation_elapsed_seconds,
+            "frame_sequence": self._show_intent_observation_frame_sequence,
+            "authoritative_frame_count": self._show_intent_observation_authoritative_frame_count,
+            "source_valid_frame_count": self._show_intent_observation_source_valid_frame_count,
+            "candidate_present_frame_count": self._show_intent_observation_candidate_present_frame_count,
+            "resolved_unknown_frame_count": self._show_intent_observation_resolved_unknown_frame_count,
+            "valid_canonical_unknown_frame_count": self._show_intent_observation_valid_canonical_unknown_frame_count,
+            "retained_previous_frame_count": self._show_intent_observation_retained_previous_frame_count,
+            "stale_frame_count": self._show_intent_observation_stale_frame_count,
+            "stale_episode_count": self._show_intent_observation_stale_episode_count,
+            "stale_current_seconds": self._show_intent_observation_stale_current_seconds,
+            "stale_total_seconds": self._show_intent_observation_stale_total_seconds,
+            "stale_max_seconds": self._show_intent_observation_stale_max_seconds,
+            "lifecycle_reset_count": self._show_intent_observation_lifecycle_reset_count,
+            "lifecycle_resets_by_reason": dict(self._show_intent_observation_lifecycle_resets_by_reason),
+            "lifecycle_reset_records": [
+                dict(record) for record in self._show_intent_observation_lifecycle_reset_records
+            ],
+        }
+
+    def start_show_intent_observation(self):
+        with self.lock:
+            if not self._show_intent_observation_active:
+                self._reset_show_intent_observation_session_locked(time.monotonic())
+            return self._show_intent_observation_state_locked()
+
+    def stop_show_intent_observation(self):
+        with self.lock:
+            if self._show_intent_observation_active:
+                now = time.monotonic()
+                self._show_intent_observation_elapsed_seconds = max(
+                    0.0, now - self._show_intent_observation_started_monotonic
+                )
+                self._finalize_show_intent_observation_stale_locked(now)
+                self._show_intent_observation_active = False
+            return self._show_intent_observation_state_locked()
+
     def _resolved_behavior_section(
         self,
         section,
@@ -13484,6 +13593,68 @@ class DmxController:
             "lock_until_beat": lock_until_beat,
         }
         return next_section, smoothed
+
+    def _observe_show_intent_shadow_frame(self, osc, previous_track_identity):
+        """Accumulateer alleen na één authoritative shadowupdate in de send-loop."""
+        if not self._show_intent_observation_active:
+            return
+        now = time.monotonic()
+        shadow = self._show_intent_shadow_diagnostics
+        self._show_intent_observation_frame_sequence += 1
+        self._show_intent_observation_authoritative_frame_count += 1
+        self._show_intent_observation_elapsed_seconds = max(
+            0.0, now - self._show_intent_observation_started_monotonic
+        )
+        if shadow["source_valid"] is True:
+            self._show_intent_observation_source_valid_frame_count += 1
+        if shadow["candidate_present"] is True:
+            self._show_intent_observation_candidate_present_frame_count += 1
+        if shadow["resolved_section_bucket"] == "unknown":
+            self._show_intent_observation_resolved_unknown_frame_count += 1
+        if shadow["source_valid"] is True and shadow["candidate_present"] is True \
+                and shadow["input_section_bucket"] == "unknown":
+            self._show_intent_observation_valid_canonical_unknown_frame_count += 1
+        if shadow["retained_previous"] is True:
+            self._show_intent_observation_retained_previous_frame_count += 1
+
+        stale = shadow["stale_warning"] is True
+        if stale:
+            self._show_intent_observation_stale_frame_count += 1
+            if self._show_intent_observation_stale_started_monotonic is None:
+                self._show_intent_observation_stale_episode_count += 1
+                self._show_intent_observation_stale_started_monotonic = now
+            current = max(0.0, now - self._show_intent_observation_stale_started_monotonic)
+            self._show_intent_observation_stale_current_seconds = current
+            self._show_intent_observation_stale_total_seconds = (
+                self._show_intent_observation_stale_closed_seconds + current
+            )
+            self._show_intent_observation_stale_max_seconds = max(
+                self._show_intent_observation_stale_max_seconds, current
+            )
+        else:
+            self._finalize_show_intent_observation_stale_locked(now)
+
+        if shadow["lifecycle_reset"] is True:
+            self._show_intent_observation_lifecycle_reset_count += 1
+            reason = shadow["lifecycle_reason"]
+            if isinstance(reason, str):
+                self._show_intent_observation_lifecycle_resets_by_reason[reason] = (
+                    self._show_intent_observation_lifecycle_resets_by_reason.get(reason, 0) + 1
+                )
+            current_track_identity = (
+                canonical_song_analyzer_track_path(osc.get("track_path"))
+                if osc.get("_active_playback_source") == "virtualdj"
+                else None
+            )
+            self._show_intent_observation_lifecycle_reset_records.append({
+                "frame_sequence": self._show_intent_observation_frame_sequence,
+                "session_seconds": self._show_intent_observation_elapsed_seconds,
+                "reason": reason,
+                "previous_track_key": self._show_intent_observation_track_key_locked(previous_track_identity),
+                "current_track_key": self._show_intent_observation_track_key_locked(current_track_identity),
+                "generation": osc.get("_playback_generation"),
+                "playback_event": osc.get("_playback_event"),
+            })
 
     @staticmethod
     def _rhythm_change_gate_seconds(bpm):
@@ -14566,7 +14737,11 @@ class DmxController:
                     auto_show, shadow_context = self._auto_show_evaluation(
                         osc, config["auto_show"]
                     )
+                    previous_shadow_track_identity = self._show_intent_shadow_last_track_identity
                     self._update_show_intent_shadow(shadow_context, osc)
+                    self._observe_show_intent_shadow_frame(
+                        osc, previous_shadow_track_identity
+                    )
                     values = self._render_values(
                         render_now,
                         config=config,
@@ -15309,6 +15484,14 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/developer/virtualdj-beat-pulse-preview/stop":
                 self.send_json(DMX.stop_virtualdj_beat_pulse_preview_test())
+                return
+            if path == "/api/show-intent-observation/start":
+                DMX.start_show_intent_observation()
+                self.send_json(full_state())
+                return
+            if path == "/api/show-intent-observation/stop":
+                DMX.stop_show_intent_observation()
+                self.send_json(full_state())
                 return
         except Exception as exc:
             self.send_json({"error": str(exc), "state": full_state()}, status=400)
