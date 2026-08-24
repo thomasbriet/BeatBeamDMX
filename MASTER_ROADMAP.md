@@ -855,7 +855,12 @@ synthesis.
 
 ### M24A-5D-4V — Broader ArrangementProfile context boundary synthesis
 
-`STATUS = NOG NIET GESTART — volgende geparkeerde SongAnalyzer-stap na de afgeronde BeatBeam Bounded NO-OP Parity Runtime Acceptance Run`.
+`STATUS = BEZIG`.
+
+De BeatBeam Bounded NO-OP Parity Runtime Acceptance Run is `GEREED/PASS`; een
+bounded-enable-besluit blijft een afzonderlijke vervolgstap en de ShowIntent-
+authority blijft `OFF`. M24A-5D-4V hervat nu als de eerstvolgende
+SongAnalyzer-stap.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
