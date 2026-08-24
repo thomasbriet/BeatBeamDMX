@@ -9268,7 +9268,9 @@ class DmxController:
         self.lock = threading.Lock()
         self.dmx_send_lock = threading.Lock()
         self.dmx = None
-        self.thread = None
+        self.render_thread = None
+        self.render_stop_event = threading.Event()
+        self.render_active = False
         self.running = False
         self.connected = False
         self.port = None
@@ -9276,8 +9278,11 @@ class DmxController:
         self.error = None
         self.dmx_dispatch_failures = 0
         self.last_sent = None
+        self.render_frame_sequence = 0
+        self.last_rendered = None
         self.current_values = {}
         self.current_slot_previews = {}
+        self.current_auto_show = None
         self.conflicts = []
         self.motion_states = {}
         self.slot_rhythm_states = {}
@@ -10428,6 +10433,31 @@ class DmxController:
             if matched_summary:
                 self._track_show_plan_for_summary(matched_summary, style_name)
 
+    def start_show_engine(self):
+        """Start exactly one authoritative render loop, independent of DMX hardware."""
+        with self.lock:
+            if self.render_thread and self.render_thread.is_alive():
+                return False
+            self.render_stop_event.clear()
+            self.render_active = True
+            thread = threading.Thread(target=self._render_loop, daemon=True)
+            self.render_thread = thread
+        thread.start()
+        return True
+
+    def stop_show_engine(self):
+        with self.lock:
+            thread = self.render_thread
+            self.render_active = False
+            self.render_stop_event.set()
+
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.5)
+
+        with self.lock:
+            if self.render_thread is thread:
+                self.render_thread = None
+
     def connect(self, port, fps=DEFAULT_DMX_FPS):
         self.disconnect()
         dmx = EnttecOpenDmx(port)
@@ -10439,22 +10469,16 @@ class DmxController:
             self.connected = True
             self.error = None
             self.debug_log.log("DMX_CONNECT", port=port, fps=self.fps)
-        self.thread = threading.Thread(target=self._send_loop, daemon=True)
-        self.thread.start()
 
     def disconnect(self):
         self.flush_config()
         with self.lock:
             dmx = self.dmx
-            thread = self.thread
             fps = self.fps
             self.running = False
             self.active_one_shot_cue = None
 
         self.virtualdj_beat_pulse_scheduler.stop("dmx_disconnected")
-
-        if thread and thread.is_alive():
-            thread.join(timeout=1.5)
 
         if dmx:
             interval = 1 / fps if fps else 1 / DEFAULT_DMX_FPS
@@ -10467,11 +10491,14 @@ class DmxController:
 
         with self.lock:
             self.dmx = None
-            self.thread = None
             self.connected = False
             self.port = None
             self.running = False
             self.debug_log.log("DMX_DISCONNECT")
+
+    def shutdown(self):
+        self.stop_show_engine()
+        self.disconnect()
 
     def update_config(self, payload):
         stop_beat_pulse_test = False
@@ -10481,6 +10508,7 @@ class DmxController:
             config = self._clean_full_config(dict(self.config))
             osc = self.osc.snapshot_for_render()
             auto_show = self._auto_show_state(osc, config["auto_show"])
+            self.current_auto_show = auto_show
             values = self._render_values(
                 now,
                 config=config,
@@ -10533,6 +10561,7 @@ class DmxController:
             self.config["blackout_active"] = False
             config = self._clean_full_config(dict(self.config))
             auto_show = self._auto_show_state(osc, config["auto_show"])
+            self.current_auto_show = auto_show
             self.current_values = self._render_values(
                 now,
                 config=config,
@@ -10605,40 +10634,10 @@ class DmxController:
         self._observe_virtualdj_beat_pulse_preview_test(developer_playback_state)
         with self.lock:
             config = self._clean_full_config(dict(self.config))
-            now = time.time()
             osc = self.osc.snapshot_for_render()
-            self._observe_active_playback_generation(osc)
-            auto_show = self._auto_show_state(osc, config["auto_show"])
-            try:
-                if self.connected and self.running:
-                    live_values = dict(self.current_values)
-                    slot_previews = dict(self.current_slot_previews)
-                    if not slot_previews:
-                        slot_previews = self._build_slot_previews(
-                            config,
-                            osc,
-                            now,
-                            auto_show=auto_show,
-                        )
-                else:
-                    live_values = self._render_values(
-                        now,
-                        advance_motion=True,
-                        config=config,
-                        osc=osc,
-                        auto_show=auto_show,
-                    )
-                    self.current_values = live_values
-                    slot_previews = self._build_slot_previews(
-                        config,
-                        osc,
-                        now,
-                        auto_show=auto_show,
-                    )
-                    self.current_slot_previews = slot_previews
-            except Exception:
-                live_values = dict(self.current_values)
-                slot_previews = dict(self.current_slot_previews)
+            auto_show = dict(self.current_auto_show or {})
+            live_values = dict(self.current_values)
+            slot_previews = dict(self.current_slot_previews)
             slot_previews = self._apply_virtualdj_beat_pulse_preview_overlay_locked(slot_previews)
             values = dict(sorted(live_values.items()))
             return {
@@ -10647,6 +10646,9 @@ class DmxController:
                 "fps": self.fps,
                 "error": self.error,
                 "last_sent": self.last_sent,
+                "render_active": self.render_active,
+                "render_frame_sequence": self.render_frame_sequence,
+                "last_rendered": self.last_rendered,
                 "active_slot": config["active_slot"],
                 "blackout_active": config["blackout_active"],
                 "auto_show": auto_show,
@@ -14721,60 +14723,99 @@ class DmxController:
         )
         return _apply_audience_pan_focus_to_motion(motion, slot_context, config=config)
 
-    def _send_loop(self):
-        while True:
-            developer_playback_state = None
-            with self.lock:
-                if not self.running or not self.dmx:
-                    return
-                dmx = self.dmx
-                fps = self.fps
-                try:
-                    render_now = time.time()
-                    config = self._clean_full_config(dict(self.config))
-                    osc = self.osc.snapshot_for_render()
-                    self._observe_active_playback_generation(osc)
-                    auto_show, shadow_context = self._auto_show_evaluation(
-                        osc, config["auto_show"]
-                    )
-                    previous_shadow_track_identity = self._show_intent_shadow_last_track_identity
-                    self._update_show_intent_shadow(shadow_context, osc)
-                    self._observe_show_intent_shadow_frame(
-                        osc, previous_shadow_track_identity
-                    )
-                    values = self._render_values(
-                        render_now,
-                        config=config,
-                        osc=osc,
-                        auto_show=auto_show,
-                    )
-                    self.current_values = values
-                    self.current_slot_previews = self._build_slot_previews(
-                        config,
-                        osc,
-                        render_now,
-                        auto_show=auto_show,
-                    )
-                    developer_playback_state = self.osc.developer_playback_state()
-                except Exception as exc:
-                    self.error = str(exc)
-                    values = dict(self.current_values)
-
-            self._observe_virtualdj_beat_pulse_test(developer_playback_state)
-            started = time.monotonic()
+    def _render_tick(self):
+        """Evaluate one authoritative show frame; DMX output is an optional sink."""
+        developer_playback_state = None
+        dmx = None
+        values = None
+        with self.lock:
+            if not self.render_active:
+                return False
             try:
-                with self.lock:
-                    if not self.running or self.dmx is not dmx:
-                        continue
-                    values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
-                    self._send_dmx_frame(dmx, values)
-                    self.error = None
-                    self.last_sent = time.time()
+                render_now = time.time()
+                config = self._clean_full_config(dict(self.config))
+                osc = self.osc.snapshot_for_render()
+                self._observe_active_playback_generation(osc)
+                auto_show, shadow_context = self._auto_show_evaluation(
+                    osc, config["auto_show"]
+                )
+                previous_shadow_track_identity = self._show_intent_shadow_last_track_identity
+                self._update_show_intent_shadow(shadow_context, osc)
+                self._observe_show_intent_shadow_frame(
+                    osc, previous_shadow_track_identity
+                )
+                values = self._render_values(
+                    render_now,
+                    config=config,
+                    osc=osc,
+                    auto_show=auto_show,
+                )
+                self.current_auto_show = auto_show
+                self.current_values = values
+                self.current_slot_previews = self._build_slot_previews(
+                    config,
+                    osc,
+                    render_now,
+                    auto_show=auto_show,
+                )
+                self.render_frame_sequence += 1
+                self.last_rendered = render_now
+                developer_playback_state = self.osc.developer_playback_state()
+                if self.connected and self.running and self.dmx is not None:
+                    dmx = self.dmx
             except Exception as exc:
-                with self.lock:
-                    self.error = str(exc)
-                    self.dmx_dispatch_failures += 1
+                self.error = str(exc)
+                return False
+
+        self._observe_virtualdj_beat_pulse_test(developer_playback_state)
+        if dmx is None:
+            return False
+
+        try:
+            with self.lock:
+                if (
+                    not self.render_active
+                    or not self.connected
+                    or not self.running
+                    or self.dmx is not dmx
+                ):
+                    return False
+                output_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
+                self._send_dmx_frame(dmx, output_values)
+                self.error = None
+                self.last_sent = time.time()
+        except Exception as exc:
+            with self.lock:
+                self.error = str(exc)
+                self.dmx_dispatch_failures += 1
+            return True
+        return False
+
+    def _render_loop(self):
+        while not self.render_stop_event.is_set():
+            started = time.monotonic()
+            dispatch_failed = self._render_tick()
+            if dispatch_failed:
+                self.render_stop_event.wait(0.25)
+                continue
+            with self.lock:
+                fps = self.fps
+            elapsed = time.monotonic() - started
+            self.render_stop_event.wait(max(0, (1 / fps) - elapsed))
+
+    def _send_loop(self):
+        """Compatibility path for legacy direct callers; runtime uses _render_loop."""
+        with self.lock:
+            self.render_active = True
+        while True:
+            with self.lock:
+                if not self.running or self.dmx is None:
+                    return
+                fps = self.fps
+            started = time.monotonic()
+            if self._render_tick():
                 time.sleep(0.25)
+                continue
             elapsed = time.monotonic() - started
             time.sleep(max(0, (1 / fps) - elapsed))
 
@@ -15559,7 +15600,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
 
 def shutdown():
-    DMX.disconnect()
+    DMX.shutdown()
     TRANSPORT.stop()
 
 
@@ -15576,6 +15617,7 @@ def main():
     REMOTE_ACCESS_CONFIG = load_remote_access_config()
     OSC.port = args.osc_port
     TRANSPORT.start()
+    DMX.start_show_engine()
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)
     TRIGGER_LOG.log("BACKEND_START", host=args.host, port=args.port, osc_port=args.osc_port)
     print(f"{APP_NAME} running at http://{args.host}:{args.port}")
