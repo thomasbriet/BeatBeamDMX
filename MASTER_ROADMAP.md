@@ -773,13 +773,28 @@ U08 wordt niet als sequence-regel versterkt. `NEW_AUDIO_FEATURE_NEEDED = NO`.
 
 ### M24A-5D-4Q — Mixed contextual-evidence synthesis audit
 
+`STATUS = GEREED — synthesis PASS; recurrence-core rejected; exact U16 family-exit/destination/non-terminal conjunction requires targeted controls`.
+
+De U16 recurrence-core is als algemene regel verworpen: run length + origin-last
++ non-zero return is `NON_DISCRIMINATING`. Family-exit is
+`PARTIALLY_INFORMATIVE` maar ondergecontroleerd; destination identity is
+`INCONCLUSIVE` en terminaliteit `NON_DISCRIMINATING`. Bestaande audio-evidence
+blijft `SUPPORTING_SOFT_CONTEXT`; een algemene upward rule is `NOT_READY` en
+multiple context routes zijn plausibel maar niet gevalideerd.
+
+`NEW_AUDIO_FEATURE_NEEDED = NO`; implementation readiness is `NOT_READY`.
+Het primaire gat blijft: externe provenance-clean controls voor de exacte U16
+family-exit + recurring destination + non-terminal conjunction.
+
+### M24A-5D-4R — Family-exit conjunction control-universe audit
+
 `STATUS = BEZIG`.
 
-4Q synthetiseert read-only de bestaande structurele, sequence- en audio-
-evidence inclusief 4P-tegenvoorbeelden in een provenance-clean hypothesematrix.
-Doel: de kleinste thresholdvrije volgende onderzoeksbeslissing bepalen, zonder
-nieuwe audiofeature, analyzerregel, classifier, gate, score, exposure of
-runtimewijziging.
+4R inventariseert read-only het bestaande provenance-clean corpus voor complete
+en partial controls van de exacte U16-conjunctie. Doel: vaststellen of een
+directe vergelijking, een kleine blinde review, of corpus-gapbesluit de
+kleinste volgende stap is, zonder nieuwe feature, analyzerregel, classifier,
+gate, score, exposure of runtimewijziging.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
