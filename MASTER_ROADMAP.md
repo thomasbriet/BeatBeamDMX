@@ -1424,10 +1424,73 @@ en is `READY TO RESUME`.
 
 ### ShowIntent Track Boundary / Continuity Policy Audit
 
-`NOG NIET GESTART` — read-only beslissen wat shadow en latere production
-ShowIntent doen bij track switch, playback-generation change, hard
-seek/discontinuity en tijdelijke canonical-source-gap. Nog geen reset
-implementeren.
+`GEREED — lifecycle/provenance audit + product decision PASS`.
+
+`SHOW_INTENT_TRACK_CONTINUITY_AUDIT_PASS — READY_FOR_DECISION`
+
+`TRACK_IDENTITY_SOURCE = canonical_song_analyzer_track_path(osc["track_path"])`.
+Dit is `STABLE_FILE_IDENTITY`: stabiel tijdens normale playback en seek,
+beschikbaar vóór geldige SongAnalyzer-projectie, lexicaal genormaliseerd en
+geen content-hash. Dezelfde opname via een ander pad is een andere runtime-
+identiteit.
+
+`playback_generation` is de bestaande in-memory `TransportController`-teller.
+Hij verandert bij actieve bron-, availability-, deck-, trackpad- en
+`last_discontinuity`-wijzigingen. `PLAYBACK_GENERATION_POLICY_VALUE =
+GENERAL_DISCONTINUITY_SIGNAL`: bruikbaar als lifecycle-resetbewijs, maar niet
+zelfstandig voldoende om trackwissel, hard seek of een andere discontinuity te
+classificeren; de bestaande reason/provenance blijft leidend.
+
+De vastgelegde v0-policy is:
+
+- `SAME_TRACK_TEMPORARY_SOURCE_GAP_POLICY = RETAIN_PREVIOUS`: bij dezelfde
+  bewezen lifecycle en tijdelijk ontbrekende canonical candidate blijven
+  previous, `retained_previous=true` en `stale_warning=true` behouden.
+- `TRACK_CHANGE_WITH_VALID_CANDIDATE_POLICY = REPLACE_DIRECTLY`.
+- `TRACK_CHANGE_WITHOUT_CANDIDATE_POLICY = RESET_TO_NEUTRAL`.
+- `SAME_TRACK_HARD_SEEK_POLICY = RESET_BEFORE_NEW_CANDIDATE`; een geldige
+  candidate wordt direct overgedragen, zonder neutral flash.
+- `PAUSE_POLICY = RETAIN_PREVIOUS`.
+- `SAME_TRACK_NEW_PLAYBACK_POLICY = RESET_LIFECYCLE`, uitsluitend bij bewezen
+  generation/discontinuity-boundary; nooit op basis van alleen pad, positie,
+  bucket of energy.
+- `NO_ACTIVE_TRACK_POLICY = RETAIN_PREVIOUS_UNTIL_EXPLICIT_BOUNDARY`.
+  `source_unavailable` is ambigu tussen tijdelijke bronuitval, nog niet
+  beschikbare transportbron en stop/unload en is op zichzelf geen resetbewijs.
+  Een toekomstige expliciete stop/unload → neutral-regel vereist eerst een
+  ondubbelzinnig runtime-signaal; geen timeout of N-secondenheuristiek.
+
+`SHOW_INTENT_RESET_OWNER = DMX_CONTROLLER_SEND_LOOP` en
+`CONTINUITY_RESOLVER_CHANGE_NEEDED = NO`. Bij een bewezen boundary wordt
+conceptueel `previous_for_frame = None` gebruikt vóór de bestaande pure
+resolver: met candidate volgt direct de candidate, zonder candidate volgt de
+neutrale initial state. `SAME_FRAME_NEW_TRACK_CANDIDATE_HANDOFF =
+DIRECT_NO_NEUTRAL_FLASH`.
+
+`SHADOW_LIFECYCLE_DEBUG_REQUIREMENT = ADD_RESET_REASON_FIELDS`: latere shadow
+diagnostiek krijgt minimaal `lifecycle_reset` en `lifecycle_reason`, gevoed
+door bestaande transport/provenance-reasons. De stale-semantiek is expliciet:
+retained same-lifecycle gap → stale; reset zonder candidate → neutral zonder
+stale; reset met candidate → directe candidate zonder stale.
+
+`CONTINUITY_POLICY_SCOPE = SHADOW_ONLY_FOR_NOW_BUT_PRODUCTION_COMPATIBLE`.
+`RICH_EVENT_DEPENDENCY_V0 = NONE`: lifecycle gebruikt geen bucket, energy,
+events, drop, UPWARD, tension, danceability of andere musical semantics.
+`TRACK_CONTINUITY_IMPLEMENTATION_SAFETY = SAFE_WITH_SMALL_EXISTING_FILE_CHANGE`.
+
+### ShowIntent Shadow Lifecycle Reset Foundation
+
+`NOG NIET GESTART` — toekomstige shadow-only runtime-stap. Scope: bestaande
+transport/generation/discontinuity-provenance hergebruiken; boundary-besluit
+uitsluitend in `_send_loop()`; `previous_for_frame = None` bij bewezen boundary;
+pure resolver ongewijzigd; directe same-frame candidate handoff; neutral alleen
+bij reset zonder candidate; `lifecycle_reset`/`lifecycle_reason` backend-debug;
+`source_unavailable` zonder expliciete boundary behoudt previous. Geen nieuwe
+detector, timeout, native UI, Rich Events, fixture- of DMX-terugkoppeling.
+
+Deze volgende implementation is runtime-relevant. Na wijziging zijn verplicht:
+build → package → install → sign → verify → restart → source/bundle-hash-
+controle → health → technische runtime-smoke vóór runtimeacceptatie.
 
 ---
 
