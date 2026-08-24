@@ -159,8 +159,17 @@ PLIST
 
 chmod +x "${MACOS}/${APP_NAME}"
 
-cp beatbeam_app.py "${BACKEND_RESOURCES}/"
-cp enttec_open_dmx.py "${BACKEND_RESOURCES}/"
+BACKEND_PYTHON_SOURCES=(
+  beatbeam_app.py
+  enttec_open_dmx.py
+  show_intent.py
+  show_interpreter_input.py
+  show_intent_candidate_mapper.py
+  show_interpreter_input_adapter.py
+)
+for backend_source in "${BACKEND_PYTHON_SOURCES[@]}"; do
+  cp "${backend_source}" "${BACKEND_RESOURCES}/"
+done
 cp fixtures.json "${BACKEND_RESOURCES}/"
 cp beatbeam_config.json "${BACKEND_RESOURCES}/"
 cp "${ICON_MASTER}" "${RESOURCES}/BrandMark.png"
