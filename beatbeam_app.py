@@ -9298,6 +9298,10 @@ class DmxController:
         self.active_virtualdj_beat_pulse = None
         self.active_virtualdj_beat_pulse_preview = None
         self._show_intent_shadow_resolved = None
+        self._show_intent_shadow_lifecycle_seen = False
+        self._show_intent_shadow_last_track_identity = None
+        self._show_intent_shadow_last_playback_generation = None
+        self._show_intent_shadow_last_playback_event = None
         self._show_intent_shadow_diagnostics = {
             "source_valid": False,
             "input_present": False,
@@ -9308,6 +9312,8 @@ class DmxController:
             "resolved_energy_modifier": None,
             "retained_previous": False,
             "stale_warning": False,
+            "lifecycle_reset": False,
+            "lifecycle_reason": None,
         }
         self.config = self._load_config()
         self.virtualdj_beat_pulse_scheduler = VirtualDjBeatPulseScheduler(
@@ -13300,14 +13306,68 @@ class DmxController:
         production_auto_show, _ = self._auto_show_evaluation(osc, auto_show_config)
         return production_auto_show
 
-    def _update_show_intent_shadow(self, context):
+    def _show_intent_lifecycle_decision(self, osc):
+        """Bepaal een shadow-boundary uit bestaande transportprovenance."""
+        if osc is None:
+            return False, None, None, None, None
+        active_source = osc.get("_active_playback_source")
+        track_identity = (
+            canonical_song_analyzer_track_path(osc.get("track_path"))
+            if active_source == "virtualdj"
+            else None
+        )
+        generation = osc.get("_playback_generation")
+        generation = generation if isinstance(generation, int) else None
+        event = osc.get("_playback_event")
+        event = event if isinstance(event, str) else None
+        if not self._show_intent_shadow_lifecycle_seen:
+            return False, None, track_identity, generation, event
+
+        track_changed = (
+            track_identity is not None
+            and self._show_intent_shadow_last_track_identity is not None
+            and track_identity != self._show_intent_shadow_last_track_identity
+        )
+        generation_changed = (
+            generation is not None
+            and self._show_intent_shadow_last_playback_generation is not None
+            and generation != self._show_intent_shadow_last_playback_generation
+        )
+        explicit_reason = event in {
+            "deck_changed",
+            "position_jump_backward",
+            "position_jump_forward",
+        }
+        explicit_boundary = explicit_reason and (
+            generation_changed or event != self._show_intent_shadow_last_playback_event
+        )
+        if track_changed:
+            return True, "track_changed", track_identity, generation, event
+        if explicit_boundary:
+            return True, event, track_identity, generation, event
+        return False, None, track_identity, generation, event
+
+    def _commit_show_intent_lifecycle(self, track_identity, generation, event):
+        """Bewaar uitsluitend provenance van een authoritative shadow-frame."""
+        self._show_intent_shadow_lifecycle_seen = True
+        if track_identity is not None:
+            self._show_intent_shadow_last_track_identity = track_identity
+        if generation is not None:
+            self._show_intent_shadow_last_playback_generation = generation
+        self._show_intent_shadow_last_playback_event = event
+
+    def _update_show_intent_shadow(self, context, osc=None):
         """Werk uitsluitend de private observer-state van één DMX-frame bij."""
         interpreter_input = project_show_interpreter_input(context)
         candidate = map_show_intent_candidate(interpreter_input)
+        lifecycle_reset, lifecycle_reason, track_identity, generation, event = \
+            self._show_intent_lifecycle_decision(osc)
         previous = self._show_intent_shadow_resolved
-        retained_previous = candidate is None and previous is not None
-        resolved = resolve_show_intent(previous, candidate)
+        previous_for_frame = None if lifecycle_reset else previous
+        retained_previous = candidate is None and previous_for_frame is not None
+        resolved = resolve_show_intent(previous_for_frame, candidate)
         self._show_intent_shadow_resolved = resolved
+        self._commit_show_intent_lifecycle(track_identity, generation, event)
         self._show_intent_shadow_diagnostics = {
             "source_valid": context is not None and context.source_is_valid is True,
             "input_present": interpreter_input is not None,
@@ -13318,6 +13378,8 @@ class DmxController:
             "resolved_energy_modifier": resolved.energy_modifier,
             "retained_previous": retained_previous,
             "stale_warning": retained_previous,
+            "lifecycle_reset": lifecycle_reset,
+            "lifecycle_reason": lifecycle_reason,
         }
 
     def _resolved_behavior_section(
@@ -14504,7 +14566,7 @@ class DmxController:
                     auto_show, shadow_context = self._auto_show_evaluation(
                         osc, config["auto_show"]
                     )
-                    self._update_show_intent_shadow(shadow_context)
+                    self._update_show_intent_shadow(shadow_context, osc)
                     values = self._render_values(
                         render_now,
                         config=config,

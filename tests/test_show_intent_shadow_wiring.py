@@ -174,7 +174,9 @@ class ShowIntentShadowWiringTests(unittest.TestCase):
         original_update = controller._update_show_intent_shadow
 
         controller._auto_show_evaluation = lambda *_: (auto_show, context)
-        controller._update_show_intent_shadow = lambda value: (updates.append(value), original_update(value))[1]
+        controller._update_show_intent_shadow = lambda value, osc: (
+            updates.append((value, osc)), original_update(value, osc)
+        )[1]
         controller._render_values = lambda *args, **kwargs: setattr(controller, "running", False) or {}
         controller._build_slot_previews = lambda *args, **kwargs: {}
         controller.running = True
@@ -182,7 +184,7 @@ class ShowIntentShadowWiringTests(unittest.TestCase):
 
         controller._send_loop()
 
-        self.assertEqual([context], updates)
+        self.assertEqual([(context, transport.snapshot_for_render())], updates)
         self.assertEqual("build", controller._show_intent_shadow_diagnostics["resolved_section_bucket"])
 
     def test_shadow_processing_does_not_change_production_auto_show_or_render_values(self):
@@ -210,7 +212,7 @@ class ShowIntentShadowWiringTests(unittest.TestCase):
         self.assertEqual({
             "source_valid", "input_present", "candidate_present", "input_section_bucket",
             "input_energy_modifier", "resolved_section_bucket", "resolved_energy_modifier",
-            "retained_previous", "stale_warning",
+            "retained_previous", "stale_warning", "lifecycle_reset", "lifecycle_reason",
         }, set(payload))
         json.dumps(payload)
         source = (Path(__file__).parents[1] / "beatbeam_app.py").read_text(encoding="utf-8")
