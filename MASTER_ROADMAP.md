@@ -1556,9 +1556,24 @@ same-path lifecyclecoverage nog onvolledig is. Geen production authority.
 
 ### ShowIntent Semantic Stability Observation Telemetry Foundation
 
-`NOG NIET GESTART` — bounded authoritative-frame semantic history voor
-bucket/modifier plus source/candidate/stale/lifecyclecontext, zonder
-`/api/state`-polling te verzwaren.
+`GEREED — bounded per-frame semantic history + technical runtime PASS`.
+
+History bestaat uitsluitend tijdens een handmatige observation session en
+registreert precies één record per authoritative renderframe: input/resolved
+bucket + modifier, source/candidate/retained/stale/lifecyclecontext en opaque
+track keys. De production cap is 120.000 frames; dropped/truncated status is
+expliciet observeerbaar. De volledige history zit niet in `/api/state`, maar
+achter een dedicated read-only history endpoint; reads zijn passief en na stop
+frozen. Dit blijft preview-only compatibel, zonder runtime quality judgement of
+production authority. Tests, build en technische runtime-smoke zijn PASS.
+
+### ShowIntent Targeted Semantic + Lifecycle Observation Run
+
+`NOG NIET GESTART` — een nieuwe preview-only manual observation session met
+meerdere tracks, normale track changes, minimaal één forward en backward seek,
+pause/resume en indien praktisch één same-path/deck boundary. Daarna volgen
+offline semantic-historyanalyse, stale correlation, lifecycle coverage en de
+Promotion Gate Evaluation, zonder vooraf gekozen quality threshold.
 
 ---
 
