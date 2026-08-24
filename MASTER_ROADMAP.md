@@ -1599,10 +1599,34 @@ toegevoegd.
 
 ### Bounded NO-OP Parity Source Substitution Design Audit
 
-`BEZIG` — ontwerp van de kleinste production promotion waarbij ShowIntent
-uitsluitend als begrensde bron voor bestaande `section_bucket` /
-`energy_modifier` wordt gebruikt, met bestaande Auto Show fallback en zonder
-nieuwe showsemantiek.
+`GEREED — design accepted`.
+
+De eerste promotion blijft `NO_OP_PARITY_SOURCE_SUBSTITUTION`: uitsluitend de
+bron van bestaande `section_bucket` / `energy_modifier` kan later begrensd
+wisselen. `CURRENT_CANDIDATE_ONLY`, exacte bestaande Auto Show fallback,
+unknown/`0.0`, handmatige override-prioriteit en directe same-frame boundaries
+zijn contractueel vastgelegd. Er is geen Rich Event-, fixture-, render- of
+DMX-authority toegevoegd.
+
+### Bounded NO-OP Parity Diagnostics Foundation
+
+`GEREED — selector present, authority OFF, parity diagnostics runtime PASS`.
+
+De private backend gate staat default `False`, zonder UI, persistence of
+runtime-enable endpoint. De lokale selector valt fail-closed terug op het
+bestaande Auto Show-pair en gebruikt uitsluitend een actuele candidate wanneer
+de gate later expliciet aanstaat. Current parity-debug, begrensde parallelle
+history (`120.000` frames) en een passief parity-history endpoint zijn aanwezig;
+de volledige history zit niet in `/api/state`. Gate OFF is getest als exacte
+production-baseline. Tests, Beta-package, hash/import/signing en een verse
+preview-only runtime-smoke zijn PASS; fixture/render/DMX-semantiek bleef
+ongewijzigd.
+
+### Bounded NO-OP Parity Runtime Acceptance Run
+
+`NOG NIET GESTART` — een preview-only VirtualDJ-run van 8–12 minuten met gate
+OFF die bestaand production-pair en actuele ShowIntent-candidate longitudinaal
+vergelijkt vóór eventuele authority enable.
 
 ---
 
