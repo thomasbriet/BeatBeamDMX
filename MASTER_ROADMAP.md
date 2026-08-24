@@ -876,11 +876,24 @@ resterende blocker is een pure canonical semantic candidate policy.
 
 ### M24 CANONICAL SEMANTIC DESIGN MILESTONE — Provenance-clean Candidate Role Decision Contract
 
+`GEREED — semantic design PASS; pure provenance-clean canonical candidate
+contract ready for bounded implementation`.
+
+De vocabulary is de clean subset Intro / Verse / PreChorus / Chorus / Bridge /
+Outro; Unknown/abstention is geldig en er is geen Other. Structure leidt
+character evidence via multi-evidence interpretation with abstention. De eerste
+bounded path krijgt geen numeric confidence. Legacy blijft uitsluitend
+comparison/authority en nooit candidate input. Versioning/persistence blijven
+ongewijzigd; implementation kan één milestone zijn en er zijn geen resterende
+human product decisions.
+
+### M24 BOUNDED IMPLEMENTATION MILESTONE — Precanonical Profile → Canonical Candidate Path
+
 `STATUS = BEZIG`.
 
-Deze laatste geplande designmijlpaal legt vocabulary, role semantics,
-evidence-/conflict-/abstentioncontract, pure decision graph, diagnostics en het
-bounded implementation- en acceptanceplan vast zonder runtime authority.
+De provenance-clean candidate wordt als ephemeral dual-compute sidecar
+geïmplementeerd; legacy authority, persistence, handoff en versions blijven
+ongewijzigd.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
