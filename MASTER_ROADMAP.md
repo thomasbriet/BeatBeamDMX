@@ -1408,6 +1408,25 @@ bestaande repositoryconforme Beta packaging/deploymentroute. Omdat
 worden gebouwd/geïnstalleerd wanneer die file wijzigt. Native UI hoeft niet
 functioneel te veranderen.
 
+#### Packaging prerequisite
+
+`GEREED — BETA_BUNDLE_MISSING_PURE_MODULE_PACKAGING opgelost`. De expliciete
+backend-bestandslijst in `build_native_app.sh` bundelt nu naast de bestaande
+backend de vier pure modules `show_intent.py`, `show_interpreter_input.py`,
+`show_intent_candidate_mapper.py` en `show_interpreter_input_adapter.py`.
+Bron- en bundle-SHA-256 zijn per relevante file identiek; de bundled
+importsmoke is PASS. Beta build/package, ad-hoc signing, strict codesign
+verification, fresh restart en health op poort 8781 zijn PASS. Er is nog geen
+shadow wiring. `ShowIntent Shadow Wiring Foundation` blijft `NOG NIET GESTART`
+en is `READY TO RESUME`.
+
+### ShowIntent Track Boundary / Continuity Policy Audit
+
+`NOG NIET GESTART` — read-only beslissen wat shadow en latere production
+ShowIntent doen bij track switch, playback-generation change, hard
+seek/discontinuity en tijdelijke canonical-source-gap. Nog geen reset
+implementeren.
+
 ---
 
 # 5. BeatBeam UI — iPad / live bediening
