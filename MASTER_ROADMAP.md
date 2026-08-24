@@ -788,13 +788,29 @@ family-exit + recurring destination + non-terminal conjunction.
 
 ### M24A-5D-4R — Family-exit conjunction control-universe audit
 
+`STATUS = GEREED — control-universe PASS; broad U16 conjunction falsified as general rule`.
+
+De provenance-clean control universe omvat 173 tracks, 1.529 transitions,
+1.150 evaluable transitions en 379 `UNKNOWN`/non-evaluable transitions.
+Predicate: `FAMILY_EXIT + DESTINATION_SEEN_BEFORE + NON_TERMINAL`. Er zijn 10
+complete matches en 9 onafhankelijke externe complete controls, met bestaande
+complete verdicts: 1 `UPWARD`, 2 `NOT_UPWARD`, 1 `AMBIGUOUS`, 6 `UNREVIEWED`.
+B3-0441 en B3-0883 zijn onafhankelijke complete `NOT_UPWARD`-controls; de
+brede drie-conditionele U16-conjunction is daarom
+`FALSIFIED_AS_GENERAL_RULE` en de density `VERY_SPARSE`.
+
+U16's f002→f001 family-ID-wissel heeft geen externe vergelijkbare control.
+`NEW_HUMAN_CONTROL_REVIEW_NEEDED = NO`; `NEW_AUDIO_FEATURE_NEEDED = NO` en
+implementation readiness blijft `NOT_READY`.
+
+### M24A-5D-4S — Corpus gap / hypothesis deprioritization decision
+
 `STATUS = BEZIG`.
 
-4R inventariseert read-only het bestaande provenance-clean corpus voor complete
-en partial controls van de exacte U16-conjunctie. Doel: vaststellen of een
-directe vergelijking, een kleine blinde review, of corpus-gapbesluit de
-kleinste volgende stap is, zonder nieuwe feature, analyzerregel, classifier,
-gate, score, exposure of runtimewijziging.
+4S legt read-only vast welke gefalsificeerde U16-hypotheses niet als harde
+regel mogen terugkeren, begrenst de unieke track-lokale U16-subcontext tegen
+overfitting en kiest één bestaande, generaliseerbare volgende
+onderzoekshypothese zonder feature-, classifier- of runtimewijziging.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
