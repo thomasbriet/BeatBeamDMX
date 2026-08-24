@@ -1569,11 +1569,24 @@ production authority. Tests, build en technische runtime-smoke zijn PASS.
 
 ### ShowIntent Targeted Semantic + Lifecycle Observation Run
 
-`NOG NIET GESTART` — een nieuwe preview-only manual observation session met
-meerdere tracks, normale track changes, minimaal één forward en backward seek,
-pause/resume en indien praktisch één same-path/deck boundary. Daarna volgen
-offline semantic-historyanalyse, stale correlation, lifecycle coverage en de
-Promotion Gate Evaluation, zonder vooraf gekozen quality threshold.
+`GEREED — semantic stability PASS; promotion held for canonical availability +
+same-path deck-boundary runtime evidence`.
+
+De gerichte preview-only sessie duurde `1007.924241 s` / `16.798737 min` en
+registreerde 26.865 authoritative frames met `26.653789 FPS`.
+Source-valid/candidate was 77,5731%; valid canonical unknown bleef 0. Retained/
+stale betrof 6.022 frames in 9 episodes (`225.215348 s` totaal,
+`135.788383 s` maximum); de chronology is verklaarbaar als loading,
+transition of recovery en retained continuity was volledig consistent.
+Lifecycle registreerde track_changed 7, position_jump_forward 11 en
+position_jump_backward 5 keer; forward en backward seek zijn runtime observed,
+same-path deck boundary niet. Semantic stability is PASS; promotion blijft HOLD.
+
+### ShowIntent Same-Path Deck + Canonical Recovery Observation Run
+
+`NOG NIET GESTART` — één gerichte runtime-run vanaf geldige canonical state
+om same-track identity over een echte deck boundary en canonical
+invalid/recovery rond normale boundaries te observeren.
 
 ---
 
