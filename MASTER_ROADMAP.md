@@ -1480,17 +1480,29 @@ events, drop, UPWARD, tension, danceability of andere musical semantics.
 
 ### ShowIntent Shadow Lifecycle Reset Foundation
 
-`NOG NIET GESTART` — toekomstige shadow-only runtime-stap. Scope: bestaande
-transport/generation/discontinuity-provenance hergebruiken; boundary-besluit
-uitsluitend in `_send_loop()`; `previous_for_frame = None` bij bewezen boundary;
-pure resolver ongewijzigd; directe same-frame candidate handoff; neutral alleen
-bij reset zonder candidate; `lifecycle_reset`/`lifecycle_reason` backend-debug;
-`source_unavailable` zonder expliciete boundary behoudt previous. Geen nieuwe
-detector, timeout, native UI, Rich Events, fixture- of DMX-terugkoppeling.
+`GEREED — shadow lifecycle-reset runtime PASS`.
 
-Deze volgende implementation is runtime-relevant. Na wijziging zijn verplicht:
-build → package → install → sign → verify → restart → source/bundle-hash-
-controle → health → technische runtime-smoke vóór runtimeacceptatie.
+`DmxController._send_loop()` geeft het authoritative transportsnapshot nu door
+aan de private ShowIntent-shadow lifecyclebeslissing. Alleen een canonieke
+trackwijziging of de bestaande expliciete reasons `deck_changed`,
+`position_jump_backward` en `position_jump_forward` resetten de vorige intent.
+Generation is uitsluitend bevestigende provenance; `source_unavailable`, pause
+en een generationwijziging zonder expliciete boundary behouden previous. Een
+reset met candidate handofft direct zonder neutrale tussenframe; zonder candidate
+is de uitkomst `unknown`/`0.0`. De pure resolver en production Auto Show/render/
+DMX blijven ongewijzigd. Shadowdebug bevat JSON-safe `lifecycle_reset` en
+`lifecycle_reason`; state reads zijn passief.
+
+Targeted lifecycletests, bestaande wiringtests, pure regressies, packaging en
+de volledige BeatBeam-suite zijn PASS (162/162). Beta build/package, exacte
+bron/bundle-manifestvergelijking, bundled imports, arm64/signing, fresh restart,
+health op poort 8781 en runtime-shadowsmoke zijn PASS.
+
+### ShowIntent Shadow Runtime Observation / Promotion Gate Audit
+
+`NOG NIET GESTART` — toekomstige observatie-only stap. Analyseer eerst live
+shadow lifecycle-telemetrie en afwijkingen zonder productie-authoriteit,
+fixture-/DMX-terugkoppeling of uitbreiding van de lifecyclepolicy.
 
 ---
 
