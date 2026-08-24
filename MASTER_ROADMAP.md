@@ -805,12 +805,27 @@ implementation readiness blijft `NOT_READY`.
 
 ### M24A-5D-4S — Corpus gap / hypothesis deprioritization decision
 
+`STATUS = GEREED — deprioritization PASS; U16-specific route stopped, family topology retained only as bounded soft-context research boundary`.
+
+De brede U16-conjunction blijft rejected. Het U16 family-ID-paar is
+track-lokaal; er is geen established cross-track relationele U16-subcontext en
+het overfit-risico is `HIGH`. `CONTINUE_U16_SPECIFIC_CONTROL_SEARCH = NO`.
+Multiple context routes blijven plausibel maar niet gevalideerd; bestaande audio
+blijft `SUPPORTING_SOFT_CONTEXT`, `NEW_AUDIO_FEATURE_NEEDED = NO`, classifier
+rule readiness is `NOT_READY` en context-model readiness is
+`NEEDS_MORE_TARGETED_EVIDENCE`.
+
+De behouden structurele richting is raw family recurrence/topology uitsluitend
+als zachte context.
+
+### M24A-5D-4T — Generalizable family-recurrence topology boundary audit
+
 `STATUS = BEZIG`.
 
-4S legt read-only vast welke gefalsificeerde U16-hypotheses niet als harde
-regel mogen terugkeren, begrenst de unieke track-lokale U16-subcontext tegen
-overfitting en kiest één bestaande, generaliseerbare volgende
-onderzoekshypothese zonder feature-, classifier- of runtimewijziging.
+4T inventariseert read-only de generaliseerbare raw family/topologyvelden,
+hun provenance, dekking, afhankelijkheden en bestaande labeldekking. Doel: één
+niet-gecirculariseerde soft-context evidencefamilie begrenzen voor een volgende
+gerichte audit, zonder classifierregel, score, threshold, feature of runtime.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
