@@ -2,6 +2,7 @@
 
 > Centrale, levende product- en ontwikkelroadmap voor **SongAnalyzer** en **BeatBeam**.
 > Dit bestand moet tijdens programmeerwerk actief worden geraadpleegd en bijgewerkt.
+> Zie ook `CURRENT_ROADMAP.md` voor de compacte actuele status, prioriteiten en blockers.
 
 ## Werkwijze voor Codex / programmeersessies
 
