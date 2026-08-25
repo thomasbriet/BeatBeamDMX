@@ -931,14 +931,21 @@ terugkeer naar mood/native, literal family-ID, neighbour- of family-exitregels.
 
 ### M24 CANONICAL ROLE CALIBRATION — Human-Grounded Role Semantics
 
-`STATUS = BEZIG — projector calibration + frozen blind holdout`.
+`STATUS = BEZIG — projector v2 implemented/calibrated; awaiting frozen blinded
+holdout review`.
 
-De bestaande 24-case menselijke review is uitsluitend calibration-evidence:
-7/18 Produced exact, met Bridge-overbreadth, Verse-underdetectie, mogelijke
-Chorus-overbreadth, een waarschijnlijk praktisch onbereikbaar
-PreChorus-contract en mogelijke over-abstention. Een nieuwe onafhankelijke
-24-track holdout wordt vóór projectorwijzigingen bevroren. Candidate blijft
-sidecar/no-authority en legacy blijft production authority.
+SongAnalyzer-commit `1a6d3262664d62127ef78222b4bd6f05a2e80814` implementeert
+Semantic Role Contract v2 met tracklokale recurrence-runs, gevestigde
+focal/bodycycles, scoreloze predecessor/departure-resolutie en orthogonale
+section-character. De oorspronkelijke 24 cases zijn uitsluitend calibration:
+23 valide cases verbeterden 7→12 exact en 5→4 possible over-abstention. Op 173
+frozen tracks gingen Verse 17→329, Bridge 231→6, Chorus 710→642 en volledig
+abstained 57→58; PreChorus is abstract relationeel bereikbaar maar geen frozen
+input voldoet aan het volledige contract. Een nieuwe onafhankelijke 24-track
+holdout is vóór tuning bevroren, heeft nul overlap met de eerdere reviewtracks
+en is klaar voor blinde review. Candidate blijft sidecar/no-authority; legacy
+blijft production authority; persistence, versions en BeatBeam/VirtualDJ-handoff
+zijn ongewijzigd.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
