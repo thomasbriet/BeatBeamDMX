@@ -962,8 +962,8 @@ onafhankelijke validation set vóór enige authority-overweging.
 
 ### M24 CANONICAL ROLE REFINEMENT — Bounded Holdout-Grounded Semantic Corrections
 
-`STATUS = BEZIG — v3 refinement implemented; awaiting independent blinded
-validation`.
+`STATUS = GEREED — M24_CANONICAL_ROLE_REFINEMENT_PARTIAL —
+SPECIFIC_SEMANTIC_BLOCKER_REMAINS`.
 
 De eerdere role-calibration blijft `GEREED — PARTIAL`: projector v2
 generaliseert aantoonbaar, maar één bounded, holdout-grounded semantic
@@ -987,8 +987,24 @@ De derde validation-set is vóór coding bevroren: 18 unieke tracks/sections,
 byte-identiek. Op 173 frozen tracks gaat Produced 1193→1230, PreChorus 0→41 en
 Bridge 6→15, met determinism/relabel PASS 173/173. Candidate authority blijft
 NONE; legacy authority, persistence, versions en BeatBeam/VirtualDJ-handoff zijn
-ongewijzigd. Stop vóór unblinding: alle 18 validationverdicts moeten eerst
-definitief worden vastgelegd.
+ongewijzigd.
+
+De onafhankelijke, vóór refinement bevroren Set C is integer: 18 unieke tracks
+met nul eerdere human-overlap; één geval is valide `UNCLEAR`, geen audio/window-
+fout (focus binnen de laatste raw section en vóór de echte audiogrens). Op 17
+valide semantic cases is de onafhankelijke delta MIXED: v2 11→v3 10 exact,
+mismatch 3→5 en abstention 3→2. Intro is 2/2, Chorus 3/3 en Outro 1/1; Bridge
+heeft één menselijke case, gemist zonder false-positive Bridge. De concrete
+blocker is PreChorus: 0/4 exact, twee abstentions, twee Verse/Chorus-mismatches
+en twee Verse→PreChorus false positives. Overfit risk is MODERATE, beperkt tot
+die v3-route. Architecture acceptance blijft PASS; semantic-classifier en
+production-authority acceptance zijn HOLD. Candidate blijft NONE; legacy,
+persistence, versions en handoffs zijn ongewijzigd.
+
+Exacte volgende milestone: `M24 CANONICAL PRECHORUS EVIDENCE BOUNDARY
+DECISION`. Die ene bounded beslissing bepaalt of bestaande evidence een
+generaliseerbare canonical PreChorus kan dragen of fail-closed buiten de
+candidate baseline moet blijven; nog niet gestart.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
