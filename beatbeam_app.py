@@ -37,6 +37,7 @@ from show_interpreter_input_adapter import (
     ShowInterpreterEffectiveContext,
     project_show_interpreter_input,
 )
+from rich_musical_events import observe_rich_musical_events, parse_rich_musical_event_handoff
 
 
 ROOT = Path(__file__).resolve().parent
@@ -178,6 +179,7 @@ class SongAnalyzerStructureTrack:
     rich_segments: tuple = ()
     rich_events: tuple = ()
     semantic_sections: tuple = ()
+    rich_musical_events: object = None
 
 
 @dataclass(frozen=True)
@@ -298,6 +300,7 @@ class SongAnalyzerStructureHandoff:
             rich_segments = ()
             rich_events = ()
             semantic_sections = ()
+            rich_musical_events = None
             rich = track_raw.get("rich_analysis")
             if rich is not None:
                 if schema != SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION or not isinstance(rich, dict):
@@ -387,6 +390,14 @@ class SongAnalyzerStructureHandoff:
                         section_values.append(SongAnalyzerSemanticSection(expected_index, start, end, role, occurrence, family_id, energy, confidence, start_bar, end_bar, source_count))
                         previous_section_end = end
                     semantic_sections = tuple(section_values)
+            rich_musical_events_raw = track_raw.get("rich_musical_events")
+            if rich_musical_events_raw is not None:
+                if schema != SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION:
+                    raise ValueError("rich_musical_events requires schema version 2")
+                rich_musical_events = parse_rich_musical_event_handoff(rich_musical_events_raw)
+                analysis_hash = cls._optional_text(track_raw.get("analysis_hash"), "analysis_hash")
+                if analysis_hash is None or rich_musical_events.track_key != analysis_hash:
+                    raise ValueError("rich_musical_events track identity is invalid")
             tracks[canonical_path] = SongAnalyzerStructureTrack(
                 canonical_path,
                 cls._optional_text(track_raw.get("content_sha256"), "content_sha256"),
@@ -395,7 +406,7 @@ class SongAnalyzerStructureHandoff:
                 cls._optional_text(track_raw.get("phrase_analysis_version"), "phrase_analysis_version"),
                 availability,
                 model,
-                tuple(segments), rich_model, rich_energy_scale, rich_segments, rich_events, semantic_sections,
+                tuple(segments), rich_model, rich_energy_scale, rich_segments, rich_events, semantic_sections, rich_musical_events,
             )
         active_raw = raw.get("active_track")
         active = None
@@ -510,7 +521,7 @@ class SongAnalyzerStructureHandoff:
             "bars_to_next": None,
         }
 
-    def project(self, playback):
+    def project(self, playback, include_rich_events=False):
         # The renderer and developer endpoint use this same cache concurrently.
         # Serialize refresh/projection so a reload cannot expose a half-updated
         # in-memory index to a DMX frame.
@@ -539,6 +550,7 @@ class SongAnalyzerStructureHandoff:
                 "model": None,
                 "active_track": None,
                 "rich_analysis": None,
+                "rich_musical_events": None,
                 "semantic_section": None,
                 "rich_current": None,
                 "current_event": None,
@@ -624,6 +636,14 @@ class SongAnalyzerStructureHandoff:
                         for event in track.rich_events
                     ],
                 }
+            if include_rich_events and track.rich_musical_events is not None:
+                result["rich_musical_events"] = {
+                    "mode": "SHADOW_ONLY",
+                    "availability": track.rich_musical_events.availability,
+                    "event_count": len(track.rich_musical_events.events),
+                    "event_types": [event.event_type for event in track.rich_musical_events.events],
+                    "observation": None,
+                }
             if track.availability == "missing":
                 return result
             position = state.get("time_seconds")
@@ -631,6 +651,9 @@ class SongAnalyzerStructureHandoff:
                 result["projection_status"] = "position_unavailable"
                 return result
             position = float(position)
+            if include_rich_events and track.rich_musical_events is not None:
+                result["rich_musical_events"]["observation"] = observe_rich_musical_events(
+                    track.rich_musical_events, position)
             for section in track.semantic_sections:
                 if section.start_seconds <= position < section.end_seconds or (section == track.semantic_sections[-1] and position == section.end_seconds):
                     result["semantic_section"] = {
@@ -15495,7 +15518,7 @@ def beatbeam_debug_state(osc_state=None):
     position_age = None
     if isinstance(observed_at, int) and observed_at >= 0:
         position_age = max(0, int(time.time() * 1000) - observed_at)
-    projection = SONG_ANALYZER_STRUCTURE.project(state)
+    projection = SONG_ANALYZER_STRUCTURE.project(state, include_rich_events=True)
     behavior = structure_behavior_state(state)
     auto_show = (DMX.state().get("auto_show") or {})
     bridge = SONG_ANALYZER_BRIDGE_DIAGNOSTICS.snapshot()
@@ -15533,6 +15556,7 @@ def beatbeam_debug_state(osc_state=None):
             "track_match": projection.get("track_match"),
             "availability": projection.get("availability"),
             "rich_analysis": projection.get("rich_analysis"),
+            "rich_musical_events": projection.get("rich_musical_events"),
             "fallback_reason": fallback,
             "effective_source": behavior.get("effective_source"),
             "selected_source": behavior.get("selected_source"),

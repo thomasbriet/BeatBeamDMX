@@ -39,7 +39,7 @@ De eerdere Python 3.14 `site-packages`-reproduceerbaarheidskwestie in `build_nat
 
 # M23A — Rich Musical Events voor BeatBeam
 
-`BEZIG` — bounded architecture + first implementation: bestaande software-
+`GEREED` — bounded foundation plus runtime-shadowacceptatie: bestaande software-
 onafhankelijke SongAnalyzer-evidence wordt geprojecteerd naar een expliciet Rich
 Musical Events-contract voor read-only/shadow-consumptie door BeatBeam. De
 projectie gebruikt structurele boundaries, recurrence/families, section-character,
@@ -79,10 +79,39 @@ voor deze bounded shadowfoundation niet vereist. M24 authority blijft afgesloten
 als `LEGACY_ONLY_PRODUCTION_CANDIDATE_SHADOW_RETAINED`; production lighting en
 VirtualDJ zijn identiek en deployment is niet uitgevoerd.
 
-`NEXT_MAJOR_MILESTONE = M23A runtime-shadowacceptatie + evidencebeschikbaarheid op het volledige 173-track corpus`.
-Doel: de bestaande ephemeral software-onafhankelijke input voor het corpus
-beschikbaar maken en de read-only BeatBeam-observatie uitvoeren, zonder semantic
-tuning, authorityheropening, live-showwiring of deployment.
+`GEREED — M23A_RUNTIME_SHADOW_FULL_CORPUS_PASS`. De lifecycle-audit bewees dat
+`rawSectionObservations` uitsluitend uit de fresh phrase-workerresponse werden
+geparseerd en via `PhraseAnalysisBatchItem.ShadowProjection` tijdelijk bereikbaar
+bleven. `PhraseAnalysisSessionCache` en de persistente `TrackAnalysisResult`
+bewaarden alleen `PhraseAnalysisResult`; een cache-hit bouwde daardoor bewust een
+lege shadowprojectie. De historische 13/173 was dus `CACHE_HIT_MISSINGNESS` plus
+een ephemeral/serialization-gap, niet true upstream-evidence-missingness.
+
+De gekozen architectuur is `SAME_LIFECYCLE_PROJECTION + COMPACT_RICH_EVENT_CACHE`:
+de bestaande projector draait direct na fresh raw/shadowprojectie en uitsluitend
+de compacte Rich Musical Events plus `rich-musical-events-v1` worden in het
+bestaande analysisresult gecachet. Raw observations, section/arrangementprofielen
+en shadow event evidence worden niet breed persistent gemaakt. Een oude cache
+zonder deze compacte projection-version wordt expliciet stale en volgt éénmaal de
+normale analyseflow; forced reanalysis is geen blijvende productoplossing.
+
+De echte `PhraseAnalysisService` → analysis store →
+`JsonBeatBeamStructureHandoffStore`-route is op het volledige 173-trackcorpus fresh
+en daarna met een nieuwe bridge-runner als cache-hit gevalideerd. Resultaat:
+173/173 tracks gematcht, 173/173 met benodigde upstream evidence, 1.702 raw
+sections, 1.529 boundaries, 173/173 met Rich Events en 0 zonder. De 6.594 events
+zijn: SECTION_START 1.702, SECTION_END 1.702, BUILD 236, RELEASE 215, DROP 114,
+BREAK 304, ARRIVAL 1.356, DEPARTURE 6, RETURN 953 en TRANSITION 6. Duplicaten zijn
+0; determinisme en family-relabel invariance zijn PASS. BeatBeam parseerde alle
+173 compacte handoffs als exact/current, exposeerde ze uitsluitend via Debug als
+`SHADOW_ONLY` en via 0/173 production projections. Auto Show, lighting/DMX,
+VirtualDJ, legacy authority en disabled canonical-candidate authority bleven
+ongewijzigd; runtime deployment is niet uitgevoerd.
+
+`M23A_RUNTIME_SHADOW_ACCEPTANCE = GEREED`; deze lijn heeft geen directe
+semantic-tuning- of human-reviewvervolgstap. De bestaande show-readinessrichting
+blijft leidend; Rich Event-semantiek wordt pas opnieuw geopend bij een concrete,
+hoorbare vraag.
 
 `BEZIG` — backward-compatible uitbreiding van het canonical rich-analysiscontract met een conservatieve eerste eventset: BUILD, DROP, CHORUS, BREAKDOWN en TRANSITION. Native phrase-semantiek is de primaire eventbron; eventconfidence is type-specifiek en los van boundaryconfidence. De bestaande cache is breed gekarakteriseerd; menselijke muzikale runtimevalidatie blijft nodig. Scope: bar-alignment waar beschikbaar, current/next-eventprojectie en read-only BeatBeam Debug-zichtbaarheid. Smart Hot Cues en een uitgebreide event-driven Auto Show blijven toekomstig.
 
@@ -2295,9 +2324,11 @@ Deze punten zijn bewust geschrapt en mogen niet zonder expliciete productbesliss
 Aanbevolen volgorde vanaf de huidige productrichting:
 
 1. `BEZIG` Volledige VirtualDJ-playlist show-readiness, daarna feature freeze.
-2. `BEZIG` M23A: menselijke runtimevalidatie van phrase-analysis-v17.
+2. `GEREED` M23A: Rich Musical Events runtime-shadowacceptatie en full-corpus
+   fresh/cache availability.
 3. `BEZIG` M24A: muzikale shadow-calibratie op een kleine representatieve trackset.
-4. `TODO` Rich Musical Events en verdere hiërarchische analyse na show-readiness.
+4. `TODO` Verdere hiërarchische analyse pas na show-readiness en alleen vanuit
+   bewezen nieuwe evidencebehoefte.
 5. `TODO` Geen nieuwe Essentia-features zonder aantoonbare evidence gap.
 
 ---
