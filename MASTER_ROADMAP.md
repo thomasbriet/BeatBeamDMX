@@ -931,8 +931,8 @@ terugkeer naar mood/native, literal family-ID, neighbour- of family-exitregels.
 
 ### M24 CANONICAL ROLE CALIBRATION — Human-Grounded Role Semantics
 
-`STATUS = BEZIG — projector v2 implemented/calibrated; awaiting frozen blinded
-holdout review`.
+`STATUS = GEREED — M24_CANONICAL_ROLE_CALIBRATION_PARTIAL —
+ONE_BOUNDED_SEMANTIC_REFINEMENT_REQUIRED`.
 
 SongAnalyzer-commit `1a6d3262664d62127ef78222b4bd6f05a2e80814` implementeert
 Semantic Role Contract v2 met tracklokale recurrence-runs, gevestigde
@@ -941,11 +941,24 @@ section-character. De oorspronkelijke 24 cases zijn uitsluitend calibration:
 23 valide cases verbeterden 7→12 exact en 5→4 possible over-abstention. Op 173
 frozen tracks gingen Verse 17→329, Bridge 231→6, Chorus 710→642 en volledig
 abstained 57→58; PreChorus is abstract relationeel bereikbaar maar geen frozen
-input voldoet aan het volledige contract. Een nieuwe onafhankelijke 24-track
-holdout is vóór tuning bevroren, heeft nul overlap met de eerdere reviewtracks
-en is klaar voor blinde review. Candidate blijft sidecar/no-authority; legacy
-blijft production authority; persistence, versions en BeatBeam/VirtualDJ-handoff
-zijn ongewijzigd.
+input voldoet aan het volledige contract.
+
+De onafhankelijke 24-track frozen holdout is vóór tuning geselecteerd, heeft nul
+overlap met de calibration-set en de packet-hash bleef exact gelijk. Na unblinding
+is post-v2 9/24 exact bij 20 Produced (45,0%), 11 role mismatches en 4 heldere
+human-role abstentions; pre→post is 7→9 exact en 7→4 abstentions. Intro
+function-over-material is ondersteund (HOLDOUT-04), Verse generaliseert slechts
+partieel, Bridge-overbreadth is weg maar true-positive Bridge is 0/4, Chorus is
+partieel en PreChorus is 0/2 met ontbrekende relationele input-evidence. Overfit
+risk is MODERATE. Architecture acceptance is PASS; semantic-classifier en
+production-authority acceptance zijn HOLD. Candidate blijft sidecar/no-authority;
+legacy blijft production authority; persistence, versions en BeatBeam/VirtualDJ-
+handoff zijn ongewijzigd.
+
+Exacte volgende milestone: `M24 CANONICAL ROLE REFINEMENT — Bounded
+Holdout-Grounded Semantic Corrections`. Dit is één bounded refinement op de nu
+zichtbare algemene failure patterns, gevolgd door een kleinere tweede
+onafhankelijke validation set vóór enige authority-overweging.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
