@@ -1162,7 +1162,7 @@ production authority blijft `NONE`; legacy blijft production authority.
 
 ### M24 BOUNDED CANONICAL AUTHORITY RUNTIME ACCEPTANCE — Gate-Off Shadow Observation
 
-`STATUS = BEZIG — gate-off technische runtime-PASS; geblindeerde human review van eligible selectie wacht`.
+`STATUS = GEREED — HOLD: M24_BOUNDED_CANONICAL_AUTHORITY_RUNTIME_ACCEPTANCE_HOLD — AUTHORITY_SELECTION_NOT_HUMAN_SAFE`.
 
 De echte fresh `PhraseAnalysisService`-run is lokaal en niet-persistent uitgevoerd op
 173 unieke corpus-tracks, met harde `LegacyOnly` productie-authority. Alle 173 tracks
@@ -1173,13 +1173,23 @@ legacy (`canonicalCandidateSelectedCount = 0`); de production-identitycontrole i
 eligible maken (Intro 7, Verse 2, Chorus 30, Outro 5) en 32 tracks legacy fallback
 laten houden. Zes cache-hits en 173 deterministische herhalingen zijn PASS.
 
-De bestaande menselijke A/B/C-evidence bevat 64 bruikbare labels, maar geen veilige
-exacte mapping naar een actuele fresh runtime-sectie. Er is daarom geen directe
-authority-PASS of enablement. Een geblindeerd packet met acht onafhankelijke
-eligible/selectiegevallen is lokaal voorbereid; de sleutel blijft lokaal en wordt
-niet gepubliceerd. Volgende toestand:
-`M24_BOUNDED_CANONICAL_AUTHORITY_RUNTIME_ACCEPTANCE_READY —
-BEGIN_BLINDED_AUTHORITY_SELECTION_REVIEW`.
+De bestaande menselijke A/B/C-evidence bevatte geen veilige exacte mapping naar een
+actuele fresh runtime-sectie. Het gefixeerde acht-case blinde authoritypacket
+(`40272549938fc97c4b516b324c8e3f84967363953d74bf4ddf2d07cb07d16d3e`) is
+integraal en pas na alle verdicts unblinded. De human verdicts waren Chorus,
+Verse, Chorus, Unclear, PreChorus, Verse, Intro en Bridge. Candidate was exact
+in één clear case, mismatch in zes; legacy was exact in drie clear cases. Van de
+zeven candidate/legacy-differ-cases was candidate éénmaal beter, legacy driemaal
+beter, tweemaal waren beide fout en één case was human-unclear.
+
+Elke observed candidate role heeft daardoor een concrete human-clear mismatch:
+Intro, Verse, Chorus en Outro zijn alle `HOLD_KNOWN_HUMAN_MISMATCH` en
+`DISABLED_PENDING_FURTHER_EVIDENCE`. Bridge blijft disabled en PreChorus deferred.
+Technische runtimeacceptatie blijft PASS, maar human safety en production authority
+acceptance zijn HOLD. Production blijft legacy, candidate production authority
+blijft `NONE`; er is geen enable-design, tuning of deployment gestart.
+Er is daarom geen volgende authority-enable-design milestone: vervolg vereist een
+nieuw expliciet en begrensd human-safetybesluit.
 
 De runtimeacceptance observeert uitsluitend de gecommitteerde service-sidecar
 op het lokale 173-track corpus, fresh en via cache-hit. Production blijft voor
