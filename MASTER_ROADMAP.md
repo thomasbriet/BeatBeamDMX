@@ -1197,6 +1197,57 @@ iedere invocation hard `LegacyOnly`; geen deployment, enablepad,
 authoritypromotion of sourcewijziging. `BoundedCandidate` blijft pure
 test-/hypothetische semantiek.
 
+### M24 CANONICAL AUTHORITY CLOSEOUT — Legacy-Only Production, Candidate Shadow Retained
+
+`GEREED — M24_CANONICAL_AUTHORITY_CLOSEOUT_PASS — LEGACY_ONLY_PRODUCTION_CANDIDATE_SHADOW_RETAINED`.
+
+De volledige M24 bounded-canonical-authority-lijn is administratief afgesloten:
+de 173-track runtime-technische acceptance was PASS, maar de acht-case blind
+authority review leverde slechts 1/7 human-clear candidate-exact op en 6/7
+human-clear candidate-mismatches. Candidate was éénmaal beter, legacy driemaal
+beter en beide waren tweemaal fout. Intro, Verse, Chorus en Outro blijven alle
+`HOLD_KNOWN_HUMAN_MISMATCH`; Bridge is `DISABLED_BY_POLICY` en PreChorus
+`DEFERRED_BY_POLICY`. `ROLES_ALLOWED_FOR_ENABLE_DESIGN = NONE`.
+
+De definitieve productgrens is:
+
+- `CANONICAL_CANDIDATE_PRODUCTION_AUTHORITY = DISABLED_UNDER_CURRENT_EVIDENCE_CONTRACT`;
+- `LEGACY_SEMANTIC_PRODUCTION_AUTHORITY = ACTIVE`;
+- `CANONICAL_CANDIDATE_SHADOW = RETAINED`;
+- `AUTHORITY_OBSERVABILITY = RETAINED`;
+- `BOUNDED_CANDIDATE_MODE = TEST_ONLY / NON-RUNTIME-ENABLEABLE`;
+- `RUNTIME_ENABLE_MECHANISM = ABSENT`.
+
+Geen huidige candidate role mag de legacy `SectionRole` overrulen. De authority-
+lijn wordt niet heropend door strengere guards, nieuwe thresholds, exclusions,
+match-proxies, role-whitelists of kleine nieuwe samples. Heropening is alleen
+toegestaan bij wezenlijk nieuwe, onafhankelijke, generaliseerbare evidence die
+niet uit legacy semantics, runtime-human labels, track-specific patronen of
+numeric thresholdpatches komt en de bestaande false-positive classes werkelijk
+discrimineert. Tot dan is de authority-roadmap `CLOSED / DEFERRED`.
+
+`CanonicalCandidateProjection`, `PreChorus` fail-closed, alignment/eligibility-
+evaluators, selector, `LegacyOnly`, shadow/hypothetical comparison, per-section
+source/fallback-observability, deterministische trackaggregaten en de frozen
+calibration/validation-artifacts blijven behouden als diagnostic/research-
+infrastructuur; niets wordt verwijderd. `ARCHITECTURE_ACCEPTANCE = PASS` en
+`FIVE_ROLE_SEMANTIC_BASELINE = PASS` blijven research-baselineclaims, geen
+production-authorityclaim. `PRODUCTION_AUTHORITY_ACCEPTANCE = CLOSED_UNDER_CURRENT_EVIDENCE`.
+PreChorus vocabulary blijft aanwezig maar production authority blijft deferred;
+Bridge blijft semantically supported but weakly validated en authority-disabled.
+
+De volgende grote bestaande productrichting is `M23A — Rich Musical Events voor
+BeatBeam` (bestaande roadmapnaam, vervolg in deze closeout nog niet gestart):
+structurele en muzikale evidence zoals boundaries, recurrence/families,
+section-character, energy/build/release, arrivals/departures, drops, breaks,
+transitions en Rich Musical Events direct bruikbaar maken voor de lighting engine
+en live-integratielaag. Dit is nu passend omdat de low-level analyse-infrastructuur
+en shadow-calibratie bestaan, terwijl canonical authority onder het huidige
+evidencecontract gesloten is. De authority-afhankelijkheid is `NO`.
+
+`NEXT_MAJOR_MILESTONE = M23A — Rich Musical Events voor BeatBeam`.
+`NEXT_MAJOR_MILESTONE_STATUS = NOG NIET GESTART`.
+
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
 De volledige relevante VirtualDJ-playlist moet worden geanalyseerd en current
