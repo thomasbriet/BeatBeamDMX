@@ -39,6 +39,16 @@ De eerdere Python 3.14 `site-packages`-reproduceerbaarheidskwestie in `build_nat
 
 # M23A — Rich Musical Events voor BeatBeam
 
+`BEZIG` — bounded architecture + first implementation: bestaande software-
+onafhankelijke SongAnalyzer-evidence wordt geprojecteerd naar een expliciet Rich
+Musical Events-contract voor read-only/shadow-consumptie door BeatBeam. De
+projectie gebruikt structurele boundaries, recurrence/families, section-character,
+energy/build/release en arrival/departure-evidence zonder canonical- of legacy-
+`SectionRole` als semantische input. BeatBeam-productiegedrag, Auto Show, DMX,
+VirtualDJ en runtime deployment blijven ongewijzigd. M24 canonical authority is
+afgesloten en blijft `LEGACY_ONLY_PRODUCTION_CANDIDATE_SHADOW_RETAINED`;
+`AUTHORITY_DEPENDENCY = NO`.
+
 `BEZIG` — backward-compatible uitbreiding van het canonical rich-analysiscontract met een conservatieve eerste eventset: BUILD, DROP, CHORUS, BREAKDOWN en TRANSITION. Native phrase-semantiek is de primaire eventbron; eventconfidence is type-specifiek en los van boundaryconfidence. De bestaande cache is breed gekarakteriseerd; menselijke muzikale runtimevalidatie blijft nodig. Scope: bar-alignment waar beschikbaar, current/next-eventprojectie en read-only BeatBeam Debug-zichtbaarheid. Smart Hot Cues en een uitgebreide event-driven Auto Show blijven toekomstig.
 
 De phrase-quality-pass vond een systematische early-Outro-zwakte. SongAnalyzer heeft nu een conservatieve rescue voor aantoonbaar ondergesegmenteerde lange segmenten en positionele/sequentiële Outro-validatie. De eerste officiële heranalyse van de runtime-testtrack is technisch groen; menselijke muzikale runtimeacceptatie blijft open.
