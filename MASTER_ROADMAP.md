@@ -1091,17 +1091,41 @@ gestart; geen runtime deployment.
 
 ### M24 BOUNDED CANONICAL AUTHORITY DESIGN
 
-`STATUS = BEZIG — role-specific eligibility, fail-closed selector,
-observability, version/persistence and rollback design`.
+`STATUS = GEREED — M24_BOUNDED_CANONICAL_AUTHORITY_DESIGN_PASS —
+READY_FOR_GATE_OFF_SHADOW_SELECTOR_IMPLEMENTATION`.
 
-Deze read-only architecture/design-milestone bepaalt de kleinst mogelijke
-authority-surface tussen de provenance-clean canonical candidate-sidecar en de
-bestaande legacy canonical/phrase-result-path. De huidige five-role semantic
-baseline blijft staan, PreChorus blijft positief deferred en nooit authority-
-eligible onder het huidige evidencecontract. Production authority blijft
-legacy; candidate authority blijft `NONE`. Er wordt geen authority geactiveerd,
-geen runtimegedrag gewijzigd en geen persistence-, schema-, cache- of
-versionwijziging uitgevoerd.
+Authoritygranulariteit is `HYBRID`: één same-request trackgate vereist een
+volledig exact aligned candidate/legacy-boundarypartition; daarna kan alleen de
+semantic role per exact gekoppelde section worden geselecteerd. Er is geen
+boundary mutation, merge, split of overlapmatching. Mixed-source tracks zijn
+alleen conditioneel toegestaan binnen zo'n identieke legacyordering en
+boundaryset, met source/fallback per section observeerbaar. In de read-only
+frozen audit waren 9/173 tracks (63 sections) volledig exact aligned; deze
+coverage is geen accuracyclaim.
+
+Eligibility is role- en evidence-specifiek: Intro vereist bewezen opening
+framing, Verse alleen expliciete leading/trailing established-body matching,
+Chorus een confirmed recurrent focal return en Outro zowel post-cycle framing
+als closing position. Bridge blijft `DISABLED_FIRST_ROLLOUT`, omdat de huidige
+candidate-diagnostics de human-zwakke Bridge-populatie niet authority-grade
+kunnen vernauwen. PreChorus blijft vocabulary-only, positive production
+deferred en `AUTHORITY_ELIGIBLE = NEVER`.
+
+De pure selector ondersteunt `LEGACY_ONLY`, `SHADOW_COMPARE` en
+`BOUNDED_CANDIDATE`, maar default en eerste wiring zijn hard `LEGACY_ONLY`.
+Iedere missingness, conflict, invalid/cache-unavailable state, alignmentfout of
+exception valt terug naar legacy; ontbrekende legacy wordt nooit door candidate
+opgevuld. Eerste persistence is `IN_MEMORY_SHADOW_ONLY`: geen cache-invalidation
+of reanalysis, geen AnalysisVersion/PhraseAnalysisVersion/schema bump en geen
+BeatBeam/VirtualDJ-behaviorwijziging. Observability bevat sectionrecords en
+trackaggregates zonder score/accuracyclaim; gate-off production identity moet
+exact legacy blijven. Rollback is `TRIVIAL` via één mode. Er is geen human
+productdecision nodig. Candidate authority blijft `NONE`; legacy blijft
+production authority.
+
+Exacte volgende milestone: `M24 BOUNDED CANONICAL AUTHORITY IMPLEMENTATION —
+Shadow Selector + Gate-Off Parity`. Gate enable en runtime deployment zijn daar
+beide `NO`.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
