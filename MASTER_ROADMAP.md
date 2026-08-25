@@ -1127,6 +1127,17 @@ Exacte volgende milestone: `M24 BOUNDED CANONICAL AUTHORITY IMPLEMENTATION —
 Shadow Selector + Gate-Off Parity`. Gate enable en runtime deployment zijn daar
 beide `NO`.
 
+### M24 BOUNDED CANONICAL AUTHORITY IMPLEMENTATION — Shadow Selector + Gate-Off Parity
+
+`STATUS = BEZIG — implementing pure eligibility/selector + gate-off shadow
+observability`.
+
+Deze bounded implementation voegt uitsluitend pure full-track alignment,
+role-specifieke eligibility, fail-closed selectie en in-memory observability
+toe. De servicewiring blijft hard `LEGACY_ONLY`: production authority blijft
+legacy, candidate authority blijft `NONE`, en er komt geen runtime-enablepad,
+persistence-, cache-, version-, public-schema-, VirtualDJ- of BeatBeamwijziging.
+
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
 De volledige relevante VirtualDJ-playlist moet worden geanalyseerd en current
