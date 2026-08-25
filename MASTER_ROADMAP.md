@@ -49,6 +49,41 @@ VirtualDJ en runtime deployment blijven ongewijzigd. M24 canonical authority is
 afgesloten en blijft `LEGACY_ONLY_PRODUCTION_CANDIDATE_SHADOW_RETAINED`;
 `AUTHORITY_DEPENDENCY = NO`.
 
+`GEREED — M23A_RICH_MUSICAL_EVENTS_PASS — READY_FOR_RUNTIME_SHADOW_ACCEPTANCE`.
+SongAnalyzer commit `2d3f9ead1ddccda2f892d011f465b1e44bbb5260` voegt een
+pure Core-projector en deterministische schema-1 handoff toe voor `SECTION_START`,
+`SECTION_END`, `BUILD`, `RELEASE`, `DROP`, `BREAK`, `ARRIVAL`, `DEPARTURE`,
+`RETURN` en `TRANSITION`. BUILD/BREAK zijn intervallen; de overige wijzigingen
+zijn points of boundary-transitions. Provenance bevat uitsluitend expliciete
+software-onafhankelijke inputnamen en propositions, zonder numeric confidence.
+Missingness faalt per event gesloten. Canonical/legacy role, H/M/L, Rekordbox,
+tracktitel, artiest en genre zijn geen derivatie-input.
+
+BeatBeam commit `fe814faff1149bcf449f0bbb93c5a467256cd856` voegt de
+strikte pure schema-parser en read-only observer toe in
+`BEATBEAM_RICH_EVENT_MODE = SHADOW_ONLY`; er is geen backend-, Auto Show-,
+fixture-, render- of DMX-wiring. De echte C#→Python handofftest is PASS. De nieuwe
+tests zijn SongAnalyzer 10/10 en BeatBeam 7/7; relevante SongAnalyzer-regressies
+59/59, volledige huidige suites 1056/1056 en 215/215, en clean committed snapshots
+10/10 plus build en 200/200 plus beta-package. SongAnalyzer Release build heeft
+0 warnings/0 errors. BeatBeam packaging/sign/import is PASS met alleen de bestaande
+Swift CFString-pointerwarning.
+
+De frozen/read-only corpusobservatie matchte alle 173 tracks zonder fresh
+audioanalyse. Ephemeral shadow-input was beschikbaar voor 13 tracks, 142 sections
+en 84 boundaries; 160 tracks produceerden correct fail-closed niets. Op beschikbare
+input ontstonden 468 events: SECTION_START 142, SECTION_END 142, BUILD 15,
+RELEASE 6, DROP 4, BREAK 15, ARRIVAL 76, DEPARTURE 4, RETURN 60 en TRANSITION 4.
+Duplicaten zijn 0 en herhaalde projectie is byte-deterministisch. Human review is
+voor deze bounded shadowfoundation niet vereist. M24 authority blijft afgesloten
+als `LEGACY_ONLY_PRODUCTION_CANDIDATE_SHADOW_RETAINED`; production lighting en
+VirtualDJ zijn identiek en deployment is niet uitgevoerd.
+
+`NEXT_MAJOR_MILESTONE = M23A runtime-shadowacceptatie + evidencebeschikbaarheid op het volledige 173-track corpus`.
+Doel: de bestaande ephemeral software-onafhankelijke input voor het corpus
+beschikbaar maken en de read-only BeatBeam-observatie uitvoeren, zonder semantic
+tuning, authorityheropening, live-showwiring of deployment.
+
 `BEZIG` — backward-compatible uitbreiding van het canonical rich-analysiscontract met een conservatieve eerste eventset: BUILD, DROP, CHORUS, BREAKDOWN en TRANSITION. Native phrase-semantiek is de primaire eventbron; eventconfidence is type-specifiek en los van boundaryconfidence. De bestaande cache is breed gekarakteriseerd; menselijke muzikale runtimevalidatie blijft nodig. Scope: bar-alignment waar beschikbaar, current/next-eventprojectie en read-only BeatBeam Debug-zichtbaarheid. Smart Hot Cues en een uitgebreide event-driven Auto Show blijven toekomstig.
 
 De phrase-quality-pass vond een systematische early-Outro-zwakte. SongAnalyzer heeft nu een conservatieve rescue voor aantoonbaar ondergesegmenteerde lange segmenten en positionele/sequentiële Outro-validatie. De eerste officiële heranalyse van de runtime-testtrack is technisch groen; menselijke muzikale runtimeacceptatie blijft open.
