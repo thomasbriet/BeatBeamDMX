@@ -962,7 +962,8 @@ onafhankelijke validation set vóór enige authority-overweging.
 
 ### M24 CANONICAL ROLE REFINEMENT — Bounded Holdout-Grounded Semantic Corrections
 
-`STATUS = BEZIG — bounded semantic corrections + independent validation freeze`.
+`STATUS = BEZIG — v3 refinement implemented; awaiting independent blinded
+validation`.
 
 De eerdere role-calibration blijft `GEREED — PARTIAL`: projector v2
 generaliseert aantoonbaar, maar één bounded, holdout-grounded semantic
@@ -971,6 +972,23 @@ blinde validation-set bevroren. De 48 bekende menselijke cases worden daarna
 uitsluitend als calibration-evidence gebruikt. Candidate authority blijft NONE;
 legacy authority, persistence, versions en downstream handoffs blijven
 ongewijzigd.
+
+SongAnalyzer-commit `85daf3ea89cf8f4389ee8d2c4427c6e8722572cb`
+implementeert v3-correcties voor return-gated one-off Bridge, functionele
+PreChorus-routes, directionele focal destinations en retrospectieve early body.
+Alle 48 bekende human cases zijn uitsluitend calibration-evidence (47 valide):
+exact 21→25, mismatches 18→15 en abstention 8→7. Human Bridge is 0→1 true
+positive met 0 v3-false positives; de vijf resterende cases hebben een concrete
+return/cycle/inputblocker. Beide human PreChorus-cases zijn exact; runtime is
+41 sections op 25 tracks en blijft blind te valideren.
+
+De derde validation-set is vóór coding bevroren: 18 unieke tracks/sections,
+één per track en nul overlap met beide eerdere human sets; het packet bleef
+byte-identiek. Op 173 frozen tracks gaat Produced 1193→1230, PreChorus 0→41 en
+Bridge 6→15, met determinism/relabel PASS 173/173. Candidate authority blijft
+NONE; legacy authority, persistence, versions en BeatBeam/VirtualDJ-handoff zijn
+ongewijzigd. Stop vóór unblinding: alle 18 validationverdicts moeten eerst
+definitief worden vastgelegd.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
