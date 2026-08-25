@@ -1006,6 +1006,19 @@ DECISION`. Die ene bounded beslissing bepaalt of bestaande evidence een
 generaliseerbare canonical PreChorus kan dragen of fail-closed buiten de
 candidate baseline moet blijven; nog niet gestart.
 
+### M24 CANONICAL PRECHORUS EVIDENCE BOUNDARY DECISION
+
+`STATUS = BEZIG — determining whether current provenance-clean evidence can
+support functional PreChorus semantics`.
+
+De voorafgaande canonical-role-refinement is `GEREED — PARTIAL`. Independent
+Set C valideerde Intro, Chorus en Outro grotendeels en Verse gedeeltelijk, maar
+PreChorus generaliseerde niet: 0/4 onafhankelijke menselijke PreChorus-cases
+was exact en twee menselijke Verse-controls werden false-positive PreChorus.
+Deze begrenzingsmijlpaal bepaalt read-only of huidige provenance-clean evidence
+een functionele preparation-role kan onderscheiden van normale body/Verse. Er
+volgt hier geen nieuwe semantic tuning, audiofeature of projectorimplementatie.
+
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
 De volledige relevante VirtualDJ-playlist moet worden geanalyseerd en current
