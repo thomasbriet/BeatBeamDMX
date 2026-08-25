@@ -1048,8 +1048,8 @@ deployment.
 
 ### M24 CANONICAL BASELINE ACCEPTANCE — PreChorus Deferred, Five-Role Authority Boundary
 
-`STATUS = BEZIG — implementing fail-closed PreChorus deferral and validating
-five-role supported baseline`.
+`STATUS = GEREED — M24_CANONICAL_BASELINE_ACCEPTANCE_PASS —
+PRECHORUS_DEFERRED_FIVE_ROLE_BASELINE_READY_FOR_AUTHORITY_DESIGN`.
 
 Evidence Boundary C is `GEREED`: huidige evidence is onvoldoende voor
 betrouwbare PreChorus en `SAFE_TO_DEFER`. Deze bounded implementation behoudt
@@ -1058,6 +1058,36 @@ expliciete fail-closed abstention. Intro, Verse, Chorus, Bridge en Outro moeten
 section-voor-section identiek blijven. Daarna wordt uitsluitend de five-role
 semantic baseline gevalideerd en wordt een toekomstige authority-eligibility
 boundary ontworpen; authority zelf blijft uit.
+
+SongAnalyzer-commit `fb45497ccebc5541c98827fc0a13f837e12d76e2` behoudt de
+zesrole vocabulary, maar converteert iedere anders Produced PreChorus-candidate
+centraal naar `InsufficientEvidence`, role null en
+`PreChorusEvidenceDeferred`. Er is geen stille Verse/Chorus-herclassificatie.
+Op de 173-track frozen corpus gaat Produced 1230→1189 en
+InsufficientEvidence 472→513: alle 41 positive PreChoruses verdwijnen, terwijl
+Intro 93, Verse 346, Chorus 668, Bridge 15 en Outro 67 exact gelijk blijven.
+Non-PreChorus candidate identity is PASS 1661/1661; determinism en recurrence-
+relabel invariant zijn PASS 173/173. De twee bekende onafhankelijke
+Verse→PreChorus false positives zijn beide fail-closed abstentions.
+
+Onder 58 valide menselijke supported-role cases zijn 33 exact, 14 mismatch en
+11 abstention; dit is geen nieuwe accuracyclaim maar behoud van alle bewezen
+niet-PreChorus semantics zonder regression. Bridge blijft beperkt (7 human
+cases: 1 exact, 4 mismatch, 2 abstention) en krijgt later een strengere
+eligibilitygrens. Architecture en five-role semantic baseline acceptance zijn
+PASS; production authority is HOLD. Candidate authority blijft NONE en legacy
+blijft production authority. Persistence, versions en BeatBeam/VirtualDJ-
+handoffs zijn ongewijzigd; geen nieuwe audiofeature, score, tracklookup of
+authority-selector is toegevoegd.
+
+De toekomstige authority-boundary is uitsluitend ontworpen: alleen provenance-
+clean, conflictvrije Produced Intro/Verse/Chorus/Bridge/Outro met vereiste
+structurele propositions en zonder essentiële missingness kunnen later in
+aanmerking komen. PreChorus, abstentions, Conflict, Invalid en
+UnavailableCacheHit zijn niet eligible.
+
+Exacte volgende milestone: `M24 BOUNDED CANONICAL AUTHORITY DESIGN`. Nog niet
+gestart; geen runtime deployment.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
