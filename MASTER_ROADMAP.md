@@ -1162,7 +1162,24 @@ production authority blijft `NONE`; legacy blijft production authority.
 
 ### M24 BOUNDED CANONICAL AUTHORITY RUNTIME ACCEPTANCE — Gate-Off Shadow Observation
 
-`STATUS = BEZIG — fresh service runtime observation with hard LegacyOnly authority`.
+`STATUS = BEZIG — gate-off technische runtime-PASS; geblindeerde human review van eligible selectie wacht`.
+
+De echte fresh `PhraseAnalysisService`-run is lokaal en niet-persistent uitgevoerd op
+173 unieke corpus-tracks, met harde `LegacyOnly` productie-authority. Alle 173 tracks
+zijn geanalyseerd zonder analyse-, worker- of servicefout. Productie bleef volledig
+legacy (`canonicalCandidateSelectedCount = 0`); de production-identitycontrole is
+173/173 PASS. De actuele alignmentverdeling is 10 `Exact` (76 secties), 142
+`CountMismatch` en 21 `BarRangeMismatch`; de hypothetische selector zou 44 tracks
+eligible maken (Intro 7, Verse 2, Chorus 30, Outro 5) en 32 tracks legacy fallback
+laten houden. Zes cache-hits en 173 deterministische herhalingen zijn PASS.
+
+De bestaande menselijke A/B/C-evidence bevat 64 bruikbare labels, maar geen veilige
+exacte mapping naar een actuele fresh runtime-sectie. Er is daarom geen directe
+authority-PASS of enablement. Een geblindeerd packet met acht onafhankelijke
+eligible/selectiegevallen is lokaal voorbereid; de sleutel blijft lokaal en wordt
+niet gepubliceerd. Volgende toestand:
+`M24_BOUNDED_CANONICAL_AUTHORITY_RUNTIME_ACCEPTANCE_READY —
+BEGIN_BLINDED_AUTHORITY_SELECTION_REVIEW`.
 
 De runtimeacceptance observeert uitsluitend de gecommitteerde service-sidecar
 op het lokale 173-track corpus, fresh en via cache-hit. Production blijft voor
