@@ -1046,6 +1046,19 @@ Exacte volgende milestone: `M24 CANONICAL BASELINE ACCEPTANCE — PreChorus
 Deferred, Five-Role Authority Boundary`. Nog niet gestart; geen runtime
 deployment.
 
+### M24 CANONICAL BASELINE ACCEPTANCE — PreChorus Deferred, Five-Role Authority Boundary
+
+`STATUS = BEZIG — implementing fail-closed PreChorus deferral and validating
+five-role supported baseline`.
+
+Evidence Boundary C is `GEREED`: huidige evidence is onvoldoende voor
+betrouwbare PreChorus en `SAFE_TO_DEFER`. Deze bounded implementation behoudt
+de zesrole vocabulary, maar converteert positieve PreChorus-candidates naar
+expliciete fail-closed abstention. Intro, Verse, Chorus, Bridge en Outro moeten
+section-voor-section identiek blijven. Daarna wordt uitsluitend de five-role
+semantic baseline gevalideerd en wordt een toekomstige authority-eligibility
+boundary ontworpen; authority zelf blijft uit.
+
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
 De volledige relevante VirtualDJ-playlist moet worden geanalyseerd en current
