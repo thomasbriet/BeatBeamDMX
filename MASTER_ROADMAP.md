@@ -960,6 +960,18 @@ Holdout-Grounded Semantic Corrections`. Dit is één bounded refinement op de nu
 zichtbare algemene failure patterns, gevolgd door een kleinere tweede
 onafhankelijke validation set vóór enige authority-overweging.
 
+### M24 CANONICAL ROLE REFINEMENT — Bounded Holdout-Grounded Semantic Corrections
+
+`STATUS = BEZIG — bounded semantic corrections + independent validation freeze`.
+
+De eerdere role-calibration blijft `GEREED — PARTIAL`: projector v2
+generaliseert aantoonbaar, maar één bounded, holdout-grounded semantic
+refinement is nodig. Voor iedere v3-codewijziging wordt een derde onafhankelijke
+blinde validation-set bevroren. De 48 bekende menselijke cases worden daarna
+uitsluitend als calibration-evidence gebruikt. Candidate authority blijft NONE;
+legacy authority, persistence, versions en downstream handoffs blijven
+ongewijzigd.
+
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
 De volledige relevante VirtualDJ-playlist moet worden geanalyseerd en current
