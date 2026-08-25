@@ -1129,14 +1129,45 @@ beide `NO`.
 
 ### M24 BOUNDED CANONICAL AUTHORITY IMPLEMENTATION — Shadow Selector + Gate-Off Parity
 
-`STATUS = BEZIG — implementing pure eligibility/selector + gate-off shadow
-observability`.
+`STATUS = GEREED — M24_BOUNDED_CANONICAL_AUTHORITY_IMPLEMENTATION_PASS —
+READY_FOR_GATE_OFF_RUNTIME_ACCEPTANCE`.
 
-Deze bounded implementation voegt uitsluitend pure full-track alignment,
-role-specifieke eligibility, fail-closed selectie en in-memory observability
-toe. De servicewiring blijft hard `LEGACY_ONLY`: production authority blijft
-legacy, candidate authority blijft `NONE`, en er komt geen runtime-enablepad,
-persistence-, cache-, version-, public-schema-, VirtualDJ- of BeatBeamwijziging.
+SongAnalyzer-commit
+`84cca3c0abcc67bc0b75de428e03a340d022bf02` implementeert de pure full-track
+alignmentgate, role-specifieke eligibility, fail-closed selector en optionele
+in-memory authorityobservatie. De service is hard `LegacyOnly`; er is geen
+runtime-enablemechanisme. Production retourneert exact dezelfde legacy
+`PhraseAnalysisResult`-referentie en onveranderde canonical sections.
+`GATE_OFF_PRODUCTION_IDENTITY = PASS`; candidate productionselecties en
+production source Candidate zijn beide 0.
+
+Het alignmentcontract accepteert alleen een volledige count/index/bar/timing-
+bijectie met `1e-6 s` tolerantie en zonder boundarymutation. Intro, expliciete
+leading/trailing Verse, recurrent-focal Chorus en closing-frame Outro kunnen
+alleen hypothetisch eligible zijn. Bridge blijft disabled en PreChorus nooit
+eligible. De frozen read-only audit reproduceert 173 tracks / 1702 sections:
+9 tracks / 63 sections exact aligned, 141 count mismatches en 23 bar
+mismatches. Daarvan zijn 30 sections hypothetisch candidate-eligible (Intro 4,
+Verse 2, Chorus 20, Outro 4), met 33 legacyfallbacks; production blijft 63/63
+legacy. Dit is coverage/paritydiagnostiek, geen accuracyclaim.
+
+De 104 nieuwe authority-cases overschrijden het minimum van 54; candidate-
+regressies waren 85/85 en de volledige hoofdworktree-suite 1046/1046 groen.
+Release-build: 0 warnings/0 errors. De clean committed snapshot bouwt schoon en
+heeft authority 104/104 en candidate 85/85 groen; alleen de bekende externe
+worker-venv-test ontbreekt daar (1037 groen, 1 environmentfailure). Geen
+persistence-, cache-, AnalysisVersion-, PhraseAnalysisVersion-, downstream-
+schema-, VirtualDJ- of BeatBeambehaviorwijziging en geen deployment. Candidate
+production authority blijft `NONE`; legacy blijft production authority.
+
+### M24 BOUNDED CANONICAL AUTHORITY RUNTIME ACCEPTANCE — Gate-Off Shadow Observation
+
+`STATUS = NOG NIET GESTART`.
+
+Eerst wordt bepaald of runtime deployment/observation meerwaarde heeft gezien
+de huidige in-memory integration surface. Nog geen `BoundedCandidate` enable of
+authoritypromotion. Geschatte Codex-doorlooptijd: 35–50 minuten; geschatte
+menselijke reviewtijd: 10–20 minuten; runtime deployment: `NO`.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
