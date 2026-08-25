@@ -1162,12 +1162,13 @@ production authority blijft `NONE`; legacy blijft production authority.
 
 ### M24 BOUNDED CANONICAL AUTHORITY RUNTIME ACCEPTANCE — Gate-Off Shadow Observation
 
-`STATUS = NOG NIET GESTART`.
+`STATUS = BEZIG — fresh service runtime observation with hard LegacyOnly authority`.
 
-Eerst wordt bepaald of runtime deployment/observation meerwaarde heeft gezien
-de huidige in-memory integration surface. Nog geen `BoundedCandidate` enable of
-authoritypromotion. Geschatte Codex-doorlooptijd: 35–50 minuten; geschatte
-menselijke reviewtijd: 10–20 minuten; runtime deployment: `NO`.
+De runtimeacceptance observeert uitsluitend de gecommitteerde service-sidecar
+op het lokale 173-track corpus, fresh en via cache-hit. Production blijft voor
+iedere invocation hard `LegacyOnly`; geen deployment, enablepad,
+authoritypromotion of sourcewijziging. `BoundedCandidate` blijft pure
+test-/hypothetische semantiek.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
