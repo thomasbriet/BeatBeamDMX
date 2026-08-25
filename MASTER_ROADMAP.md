@@ -907,12 +907,27 @@ nieuwe audiofeatures en gebruikt geen numeric role score/weight/threshold.
 
 ### M24 CALIBRATION + ACCEPTANCE MILESTONE — Canonical Candidate Semantic Quality
 
-`STATUS = BEZIG — automated calibration / blinded human-review preparation`.
+`GEREED — M24_CANONICAL_ARCHITECTURE_PASS_SEMANTIC_TUNING_REQUIRED —
+CANONICAL_PATH_VALIDATED_BUT_ROLE_PROJECTOR_NOT_READY_FOR_AUTHORITY`.
 
-Pas in deze volgende mijlpaal volgen corpuscandidate-run, distributionele en
-deterministische controles, candidate-versus-legacydiagnostiek en geblindeerde
-menselijke semantic-role review. Geen candidatepromotion, persistence of
-runtime-authority zonder afzonderlijk acceptatiebesluit.
+De frozen candidate is op het volledige provenance-clean corpus van 173 tracks
+en 1702 sections gekalibreerd: 1102 Produced (64,75%), 593
+InsufficientEvidence (34,84%), 7 Conflict en 0 NotProduced. Alle freeze-hashes,
+determinisme (173/173), recurrence-relabel invariance, structural-first,
+software-onafhankelijke provenance en role-contract sanity zijn PASS. De
+24-case blinde menselijke review gaf 7/18 exacte Produced-matches (38,89%);
+Bridge was vooral systematisch te breed (1/8 exact; dikwijls Verse/Chorus),
+Verse was ondergedetecteerd, Chorus mogelijk te breed en de 5 valide
+abstention-controls gaven ieder een duidelijke menselijke role. REVIEW-01 is
+als section-boundary/alignment-quality finding buiten de pure accuracy-noemer
+gehouden. Architecture acceptance is PASS; semantic-classifier acceptance en
+production-authority acceptance zijn FAIL voor de huidige projector. Candidate
+blijft sidecar/no-authority; legacy blijft production authority; persistence,
+versions en BeatBeam/VirtualDJ-handoff blijven ongewijzigd.
+
+Volgende milestone: `M24 CANONICAL ROLE CALIBRATION — Human-Grounded Role
+Semantics`; dit wordt één grotere human-grounded calibration milestone zonder
+terugkeer naar mood/native, literal family-ID, neighbour- of family-exitregels.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
