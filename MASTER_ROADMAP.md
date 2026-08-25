@@ -1089,6 +1089,20 @@ UnavailableCacheHit zijn niet eligible.
 Exacte volgende milestone: `M24 BOUNDED CANONICAL AUTHORITY DESIGN`. Nog niet
 gestart; geen runtime deployment.
 
+### M24 BOUNDED CANONICAL AUTHORITY DESIGN
+
+`STATUS = BEZIG — role-specific eligibility, fail-closed selector,
+observability, version/persistence and rollback design`.
+
+Deze read-only architecture/design-milestone bepaalt de kleinst mogelijke
+authority-surface tussen de provenance-clean canonical candidate-sidecar en de
+bestaande legacy canonical/phrase-result-path. De huidige five-role semantic
+baseline blijft staan, PreChorus blijft positief deferred en nooit authority-
+eligible onder het huidige evidencecontract. Production authority blijft
+legacy; candidate authority blijft `NONE`. Er wordt geen authority geactiveerd,
+geen runtimegedrag gewijzigd en geen persistence-, schema-, cache- of
+versionwijziging uitgevoerd.
+
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
 De volledige relevante VirtualDJ-playlist moet worden geanalyseerd en current
