@@ -1008,8 +1008,8 @@ candidate baseline moet blijven; nog niet gestart.
 
 ### M24 CANONICAL PRECHORUS EVIDENCE BOUNDARY DECISION
 
-`STATUS = BEZIG — determining whether current provenance-clean evidence can
-support functional PreChorus semantics`.
+`STATUS = GEREED — M24_PRECHORUS_EVIDENCE_BOUNDARY_PASS —
+CURRENT_EVIDENCE_INSUFFICIENT_FOR_RELIABLE_PRECHORUS`.
 
 De voorafgaande canonical-role-refinement is `GEREED — PARTIAL`. Independent
 Set C valideerde Intro, Chorus en Outro grotendeels en Verse gedeeltelijk, maar
@@ -1018,6 +1018,33 @@ was exact en twee menselijke Verse-controls werden false-positive PreChorus.
 Deze begrenzingsmijlpaal bepaalt read-only of huidige provenance-clean evidence
 een functionele preparation-role kan onderscheiden van normale body/Verse. Er
 volgt hier geen nieuwe semantic tuning, audiofeature of projectorimplementatie.
+
+De read-only audit gebruikt zes menselijke PreChorus-cases: twee Set-B-cases
+die v3 na calibration exact maakte en vier onafhankelijke Set-C-cases waarvan
+v3 er 0 exact had. De enige corpusbereikbare v3-route produceert 41 sections op
+25 tracks, allemaal als niet-evalueerbare predecessor vóór twee compound focal
+visits. Diezelfde topology verklaart zowel de twee Set-B-treffers als de twee
+onafhankelijke menselijke Verse→PreChorus false positives. Directe adjacency,
+herhaalde slotpositie, bodycontext, barlengte, focal return en bestaande
+character/energy-evidence verwerpen die controls niet betrouwbaar. Andere true
+cases vallen binnen focal material identity, missen een established cycle of
+liggen in één samengevoegde recurrence-run.
+
+Evidence-boundary C is daarom technisch beslist: huidige precanonical evidence
+is onvoldoende voor betrouwbare PreChorus. Extra upstream diagnostiek bestaat,
+maar geen exact bestaand, provenance-clean signaal draagt aantoonbaar de
+functionele human route-equivalence; exposure zonder zo'n contract zou opnieuw
+een arbitrary heuristic/scorezoektocht zijn. `PRECHORUS_DEFERABILITY =
+SAFE_TO_DEFER`: vocabulary/schema kan stabiel blijven terwijl positieve
+PreChorus-productie voorlopig fail-closed/abstain-only is. Geen nieuwe
+audiofeature, menselijke luisterreview, SongAnalyzer-code of tests zijn
+gewijzigd. Architecture blijft PASS; semantic-classifier en production
+authority blijven HOLD. Candidate authority blijft NONE; legacy, persistence,
+versions en BeatBeam/VirtualDJ-handoffs blijven ongewijzigd.
+
+Exacte volgende milestone: `M24 CANONICAL BASELINE ACCEPTANCE — PreChorus
+Deferred, Five-Role Authority Boundary`. Nog niet gestart; geen runtime
+deployment.
 
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
