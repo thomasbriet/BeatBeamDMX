@@ -929,6 +929,17 @@ Volgende milestone: `M24 CANONICAL ROLE CALIBRATION — Human-Grounded Role
 Semantics`; dit wordt één grotere human-grounded calibration milestone zonder
 terugkeer naar mood/native, literal family-ID, neighbour- of family-exitregels.
 
+### M24 CANONICAL ROLE CALIBRATION — Human-Grounded Role Semantics
+
+`STATUS = BEZIG — projector calibration + frozen blind holdout`.
+
+De bestaande 24-case menselijke review is uitsluitend calibration-evidence:
+7/18 Produced exact, met Bridge-overbreadth, Verse-underdetectie, mogelijke
+Chorus-overbreadth, een waarschijnlijk praktisch onbereikbaar
+PreChorus-contract en mogelijke over-abstention. Een nieuwe onafhankelijke
+24-track holdout wordt vóór projectorwijzigingen bevroren. Candidate blijft
+sidecar/no-authority en legacy blijft production authority.
+
 ## M24A — Show-readiness als eerstvolgende hoofdprioriteit
 
 De volledige relevante VirtualDJ-playlist moet worden geanalyseerd en current
