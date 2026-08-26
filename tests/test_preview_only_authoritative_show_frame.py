@@ -47,6 +47,74 @@ class PreviewBridge:
         }
 
 
+class RmeHandoff:
+    def project(self, state, include_shadow=False, include_rich_events=False):
+        if not include_rich_events and not include_shadow:
+            return {}
+        projection = {
+            "track_match": "exact",
+            "availability": "available_current",
+            "projection_status": "in_segment",
+            "rich_musical_events": {
+                "mode": "SHADOW_ONLY", "availability": "available", "events": [{
+                    "type": "BUILD", "temporal_kind": "INTERVAL",
+                    "start_seconds": 10.0, "end_seconds": 20.0,
+                    "origin_observation_id": "build-1",
+                }],
+            },
+        }
+        if include_shadow:
+            projection["shadow_analysis"] = {
+                "model": "SectionCharacterProfileShadow",
+                "section_characters": [{
+                    "observation_id": "section-1", "start_seconds": 0.0,
+                    "end_seconds": 30.0, "relative_energy": .62,
+                    "energy_rise": .4, "recurrence_strength": .84,
+                    "family_salience": .75,
+                }],
+            }
+        return projection
+
+
+class RmePreviewBridge(PreviewBridge):
+    def __init__(self):
+        self.handoff = RmeHandoff()
+
+
+class ProductionAuthorityHandoff(RmeHandoff):
+    def project(self, state, include_shadow=False, include_rich_events=False):
+        result = super().project(state, include_shadow, include_rich_events)
+        if result:
+            result["canonical_track_path"] = "/Music/Preview/Track.flac"
+            result["active_track"] = {
+                "canonical_path": "/Music/Preview/Track.flac",
+                "status": "ready",
+                "generation": 1,
+            }
+        return result
+
+
+class ProductionAuthorityBridge(PreviewBridge):
+    def __init__(self):
+        self.handoff = ProductionAuthorityHandoff()
+
+
+class ArrivalEnvelopeHandoff(RmeHandoff):
+    def project(self, state, include_shadow=False, include_rich_events=False):
+        result = super().project(state, include_shadow, include_rich_events)
+        if result:
+            result["rich_musical_events"]["events"] = [{
+                "type": "ARRIVAL", "temporal_kind": "POINT", "start_seconds": 10.0,
+                "start_bar": 5, "origin_observation_id": "arrival-1",
+            }]
+        return result
+
+
+class ArrivalEnvelopeBridge(PreviewBridge):
+    def __init__(self):
+        self.handoff = ArrivalEnvelopeHandoff()
+
+
 class FakeDmx:
     def __init__(self):
         self.sent = []
@@ -216,6 +284,74 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
 
         self.assertEqual(expected_values, controller.current_values)
 
+    def test_production_selector_runtime_default_is_baseline_and_physically_identical(self):
+        transport = PreviewTransport()
+        controller = DmxController(transport, ProductionAuthorityBridge())
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.render_active = True
+        with patch("beatbeam_app.time.time", return_value=300.0):
+            baseline = controller._auto_show_state(transport.snapshot_for_render(), controller.config["auto_show"])
+            expected = controller._render_values(
+                300.0, config=controller.config, osc=transport.snapshot_for_render(), auto_show=baseline
+            )
+            self.tick(controller)
+
+        decision = controller.state()["production_show_selector"]
+        self.assertEqual("BASELINE_ONLY", decision["production_show_mode"])
+        self.assertEqual("existing_autoshow", decision["production_show_source"])
+        self.assertEqual("mode_baseline", decision["fallback_reason"])
+        self.assertEqual(expected, controller.current_values)
+
+    def test_new_controller_restart_cannot_persist_or_configure_enabled_mode(self):
+        first, _ = self.controller()
+        second, _ = self.controller()
+        self.tick(first)
+        self.tick(second)
+
+        self.assertNotIn("production_show_mode", first.default_config())
+        self.assertEqual("BASELINE_ONLY", first.state()["production_show_selector"]["production_mode"])
+        self.assertEqual("BASELINE_ONLY", second.state()["production_show_selector"]["production_mode"])
+
+    def test_shadow_mode_observes_eligible_candidate_but_keeps_baseline_frame(self):
+        transport = PreviewTransport()
+        controller = DmxController(transport, ProductionAuthorityBridge())
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.render_active = True
+        with patch("beatbeam_app.PRODUCTION_DYNAMIC_COMPOSER_RUNTIME_MODE", "DYNAMIC_COMPOSER_SHADOW"), \
+                patch("beatbeam_app.time.time", return_value=300.0):
+            baseline = controller._auto_show_state(transport.snapshot_for_render(), controller.config["auto_show"])
+            expected = controller._render_values(
+                300.0, config=controller.config, osc=transport.snapshot_for_render(), auto_show=baseline
+            )
+            self.tick(controller)
+
+        decision = controller.state()["production_show_selector"]
+        self.assertTrue(decision["dynamic_composer_eligible"])
+        self.assertFalse(decision["dynamic_composer_active"])
+        self.assertEqual("mode_shadow", decision["fallback_reason"])
+        self.assertEqual(expected, controller.current_values)
+        observation = controller.state()["production_show_shadow_observation"]
+        self.assertEqual(1, observation["frames"])
+        self.assertEqual(1, observation["candidate_available_frames"])
+        self.assertEqual(1, observation["eligible_frames"])
+        self.assertEqual(1, observation["different_signature_frames"])
+
+    def test_composer_exception_is_observed_and_fails_back_to_same_frame_baseline(self):
+        transport = PreviewTransport()
+        controller = DmxController(transport, ProductionAuthorityBridge())
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.render_active = True
+        with patch("beatbeam_app.PRODUCTION_DYNAMIC_COMPOSER_RUNTIME_MODE", "DYNAMIC_COMPOSER_SHADOW"), \
+                patch("beatbeam_app.compose_dynamic_preview", side_effect=RuntimeError("synthetic")):
+            self.tick(controller)
+
+        decision = controller.state()["production_show_selector"]
+        self.assertEqual("composer_exception", decision["fallback_reason"])
+        self.assertEqual("existing_autoshow", decision["production_source"])
+
     def test_preview_state_is_json_safe_without_dmx(self):
         controller, _ = self.controller()
         self.tick(controller)
@@ -227,6 +363,193 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertTrue(state["render_active"])
         self.assertEqual(1, state["render_frame_sequence"])
         json.dumps(state)
+
+    def test_preview_projection_does_not_mutate_physical_rhythm_state(self):
+        controller, transport = self.controller()
+        controller.slot_rhythm_states = {"head": {"mode": "soft_pulse", "lock_until_beat": 30.0}}
+        controller.last_slot_rhythm_signatures = {"head": ("soft_pulse", "soft_pulse", False, "build")}
+        before_states = dict(controller.slot_rhythm_states)
+        before_signatures = dict(controller.last_slot_rhythm_signatures)
+        with patch("beatbeam_app.time.time", return_value=300.0):
+            auto_show = controller._auto_show_state(
+                transport.snapshot_for_render(), controller.config["auto_show"]
+            )
+            controller._build_slot_previews(
+                controller.config, transport.snapshot_for_render(), 300.0, auto_show=auto_show
+            )
+
+        self.assertEqual(before_states, controller.slot_rhythm_states)
+        self.assertEqual(before_signatures, controller.last_slot_rhythm_signatures)
+
+    def test_rme_enhanced_changes_only_preview_and_keeps_physical_frame_identical(self):
+        transport = PreviewTransport()
+        controller = DmxController(transport, RmePreviewBridge())
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "RME_ENHANCED"})
+        controller.render_active = True
+        dmx = FakeDmx()
+        controller.dmx = dmx
+        controller.connected = True
+        controller.running = True
+
+        with patch("beatbeam_app.time.time", return_value=300.0):
+            baseline, _ = controller._auto_show_evaluation(
+                transport.snapshot_for_render(), controller.config["auto_show"]
+            )
+            baseline_previews = controller._build_slot_previews(
+                controller.config,
+                transport.snapshot_for_render(),
+                300.0,
+                auto_show=baseline,
+            )
+            expected_values = controller._render_values(
+                300.0, config=controller.config, osc=transport.snapshot_for_render(), auto_show=baseline
+            )
+            self.tick(controller)
+
+        state = controller.state()
+        differential = state["rme_preview_differential"]
+        self.assertEqual(expected_values, controller.current_values)
+        self.assertEqual(expected_values, dmx.sent[0])
+        self.assertEqual(expected_values, state["values"])
+        self.assertEqual("RME_ENHANCED", state["auto_show"]["preview_rme_mode"])
+        self.assertEqual("BUILD", state["preview_auto_show"]["rme_preview"]["current_rme"]["type"])
+        self.assertGreater(state["preview_auto_show"]["energy"], state["auto_show"]["energy"])
+        self.assertNotEqual(baseline_previews, state["slot_previews"])
+        self.assertTrue(differential["show_state_changed"])
+        self.assertTrue(differential["fixture_values_changed"])
+        self.assertEqual("preview_auto_show -> slot_previews", differential["selected_preview_source"])
+
+    def test_dynamic_composer_replaces_scene_primitives_only_in_preview(self):
+        transport = PreviewTransport()
+        controller = DmxController(transport, RmePreviewBridge())
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.config["slots"]["wall_wash"] = controller._clean_slot_config(
+            "wall_wash",
+            controller.default_slot_config("wall_wash", fixture_id="uking_zq06016", address=50),
+        )
+        controller.config["slot_order"].append("wall_wash")
+        controller.render_active = True
+        dmx = FakeDmx()
+        controller.dmx = dmx
+        controller.connected = True
+        controller.running = True
+
+        with patch("beatbeam_app.time.time", return_value=300.0):
+            baseline, _ = controller._auto_show_evaluation(
+                transport.snapshot_for_render(), controller.config["auto_show"]
+            )
+            baseline_previews = controller._build_slot_previews(
+                controller.config, transport.snapshot_for_render(), 300.0, auto_show=baseline
+            )
+            expected_values = controller._render_values(
+                300.0, config=controller.config, osc=transport.snapshot_for_render(), auto_show=baseline
+            )
+            self.tick(controller)
+
+        state = controller.state()
+        differential = state["rme_preview_differential"]
+        self.assertEqual(expected_values, controller.current_values)
+        self.assertEqual(expected_values, dmx.sent[0])
+        self.assertEqual("DYNAMIC_COMPOSER", differential["mode"])
+        self.assertEqual("build", differential["interpretation"])
+        self.assertEqual("dynamic_composer", differential["preview_source"])
+        self.assertTrue(differential["dynamic_composer_active"])
+        self.assertFalse(differential["fallback_to_baseline"])
+        self.assertTrue(differential["dynamic_composition_applied"])
+        self.assertFalse(differential["baseline_scene_reused"])
+        self.assertIn("movement", differential["changed_dimensions"])
+        self.assertIn("intensity", differential["changed_dimensions"])
+        self.assertEqual("build_fastening_circle", differential["selected_primitives"]["moving"]["movement_pattern"])
+        self.assertEqual("amber_teal", differential["selected_primitives"]["par"]["palette"])
+        self.assertEqual("center_out_build", differential["selected_primitives"]["wash"]["wash_cue"])
+        self.assertIn("Dynamic Composer • RME Build", differential["preview_cue"])
+        self.assertNotEqual(baseline_previews["head"]["target_pan"], state["slot_previews"]["head"]["target_pan"])
+        self.assertNotEqual(baseline_previews["par"]["blue"], state["slot_previews"]["par"]["blue"])
+        self.assertNotEqual(baseline_previews["wall_wash"]["blue"], state["slot_previews"]["wall_wash"]["blue"])
+        self.assertEqual(
+            state["slot_previews"]["head"]["target_pan"],
+            differential["rendered_preview_slots"]["head"]["target_pan"],
+        )
+        self.assertTrue(differential["fixture_values_changed"])
+
+    def test_dynamic_composer_without_current_rme_remains_preview_only_and_active(self):
+        transport = PreviewTransport()
+        handoff = RmeHandoff()
+        original_project = handoff.project
+
+        def without_event(state, include_shadow=False, include_rich_events=False):
+            result = original_project(state, include_shadow, include_rich_events)
+            if result:
+                result["rich_musical_events"]["events"] = []
+            return result
+
+        handoff.project = without_event
+        bridge = PreviewBridge()
+        bridge.handoff = handoff
+        controller = DmxController(transport, bridge)
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.render_active = True
+        dmx = FakeDmx()
+        controller.dmx = dmx
+        controller.connected = True
+        controller.running = True
+
+        with patch("beatbeam_app.time.time", return_value=300.0):
+            baseline, _ = controller._auto_show_evaluation(
+                transport.snapshot_for_render(), controller.config["auto_show"]
+            )
+            expected_values = controller._render_values(
+                300.0, config=controller.config, osc=transport.snapshot_for_render(), auto_show=baseline
+            )
+            self.tick(controller)
+
+        differential = controller.state()["rme_preview_differential"]
+        self.assertEqual(expected_values, controller.current_values)
+        self.assertEqual(expected_values, dmx.sent[0])
+        self.assertIsNone(differential["event"])
+        self.assertEqual("none", differential["interpretation"])
+        self.assertTrue(differential["dynamic_composer_active"])
+        self.assertFalse(differential["fallback_to_baseline"])
+        self.assertFalse(differential["baseline_scene_reused"])
+        self.assertIn("relative_energy", differential["continuous_musical_state"])
+        self.assertIn("motion_parameters", differential["composition_signature"])
+        self.assertIn("selection", differential["variation"])
+        self.assertTrue(differential["fixture_values_changed"])
+
+    def test_arrival_envelope_outlives_point_context_and_keeps_physical_frame_identical(self):
+        transport = PreviewTransport()
+        controller = DmxController(transport, ArrivalEnvelopeBridge())
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.render_active = True
+        dmx = FakeDmx()
+        controller.dmx = dmx
+        controller.connected = True
+        controller.running = True
+
+        with patch("beatbeam_app.time.time", return_value=300.0):
+            baseline, _ = controller._auto_show_evaluation(
+                transport.snapshot_for_render(), controller.config["auto_show"]
+            )
+            expected_values = controller._render_values(
+                300.0, config=controller.config, osc=transport.snapshot_for_render(), auto_show=baseline
+            )
+            self.tick(controller)
+
+        differential = controller.state()["rme_preview_differential"]
+        self.assertEqual(expected_values, controller.current_values)
+        self.assertEqual(expected_values, dmx.sent[0])
+        self.assertEqual("ARRIVAL", differential["event"]["type"])
+        self.assertIsNone(differential["source_event"])
+        self.assertTrue(differential["event_envelope"]["active"])
+        self.assertEqual("SETTLE", differential["event_envelope"]["phase"])
+        self.assertEqual("bpm", differential["event_envelope"]["timing_source"])
+        self.assertTrue(differential["dynamic_composer_active"])
+        self.assertFalse(differential["fallback_to_baseline"])
+        self.assertTrue(differential["fixture_values_changed"])
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
   "auto_show": {
     "enabled": true,
     "style": "adaptive",
+    "preview_rme_mode": "BASELINE",
     "audience_pan_focus_enabled": true,
     "audience_pan_min": 135,
     "audience_pan_max": 205,

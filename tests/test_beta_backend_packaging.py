@@ -18,6 +18,9 @@ class BetaBackendPackagingTests(unittest.TestCase):
             "show_intent_candidate_mapper.py",
             "show_interpreter_input_adapter.py",
             "rich_musical_events.py",
+            "rme_preview.py",
+            "dynamic_composer.py",
+            "musical_event_envelope.py",
         ):
             with self.subTest(filename=filename):
                 self.assertIn(filename, script)

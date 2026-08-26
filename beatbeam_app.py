@@ -38,6 +38,23 @@ from show_interpreter_input_adapter import (
     project_show_interpreter_input,
 )
 from rich_musical_events import observe_rich_musical_events, parse_rich_musical_event_handoff
+from rme_preview import (
+    apply_dynamic_composer_preview,
+    apply_rme_preview_modifier,
+    normalize_rme_preview_mode,
+    preview_rme_context,
+)
+from dynamic_composer import (
+    CompositionHistory,
+    compose_dynamic_preview,
+    project_continuous_musical_state,
+)
+from musical_event_envelope import project_musical_event_envelope
+from live_intensity import LiveIntensityFeedback
+from production_show_selector import (
+    BASELINE_ONLY,
+    select_production_show_source,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -65,6 +82,9 @@ SHOW_INTENT_SEMANTIC_HISTORY_MAX_FRAMES = 120000
 # Fase 1 van de bounded promotion: uitsluitend parity-diagnostiek. Deze private
 # gate heeft geen UI, persistence of runtime-endpoint en blijft default uit.
 SHOWINTENT_BOUNDED_PARITY_SOURCE_ENABLED = False
+# Internal-only production source gate. There is deliberately no config, UI,
+# environment, endpoint, or automatic promotion path for this value.
+PRODUCTION_DYNAMIC_COMPOSER_RUNTIME_MODE = BASELINE_ONLY
 API_SCHEMA_VERSION = 4
 DEFAULT_MANUAL_BPM = 124.0
 DEFAULT_MANUAL_PHRASE = "verse"
@@ -165,6 +185,136 @@ class SongAnalyzerSemanticSection:
 
 
 @dataclass(frozen=True)
+class SongAnalyzerShadowBoundaryEvidence:
+    recurrence_change: Optional[float] = None
+    structural_context_change: Optional[float] = None
+    membership_exit_strength: Optional[float] = None
+    repeated_section_end: Optional[float] = None
+    structural_route: Optional[str] = None
+    structural_evidence: Optional[float] = None
+    structural_target_bar: Optional[int] = None
+    energy_change: Optional[float] = None
+    onset_change: Optional[float] = None
+    silence_change: Optional[float] = None
+    energy_delta: Optional[float] = None
+    onset_delta: Optional[float] = None
+    silence_delta: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class SongAnalyzerPreparationProfile:
+    energy_trajectory: Optional[float] = None
+    exit_energy_direction: Optional[float] = None
+    exit_onset_direction: Optional[float] = None
+    exit_silence_direction: Optional[float] = None
+    exit_structural_context: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class SongAnalyzerArrivalProfile:
+    entry_contrast: Optional[float] = None
+    boundary_novelty: Optional[float] = None
+    energy_direction: Optional[float] = None
+    onset_direction: Optional[float] = None
+    silence_direction: Optional[float] = None
+    origin_relative_energy: Optional[float] = None
+    destination_relative_energy: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class SongAnalyzerStructuralDepartureProfile:
+    structural_context_change: Optional[float] = None
+    membership_exit_strength: Optional[float] = None
+    repeated_section_end: Optional[float] = None
+    recurrence_change: Optional[float] = None
+    structural_route: Optional[str] = None
+    structural_evidence: Optional[float] = None
+    structural_target_bar: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class SongAnalyzerShadowStructuralDepartureAspect:
+    origin_exit: Optional[SongAnalyzerStructuralDepartureProfile] = None
+    destination_entry: Optional[SongAnalyzerStructuralDepartureProfile] = None
+
+
+@dataclass(frozen=True)
+class SongAnalyzerShadowArrangementIdentityAspect:
+    recurrence_strength: Optional[float] = None
+    family_salience: Optional[float] = None
+    family_id: Optional[str] = None
+    has_earlier_family_occurrence: Optional[bool] = None
+
+
+@dataclass(frozen=True)
+class SongAnalyzerBoundaryTemporalContext:
+    pre_boundary_normalized_rms: Optional[float] = None
+    post_boundary_normalized_rms: Optional[float] = None
+    late_origin_relative_energy: Optional[float] = None
+    early_destination_relative_energy: Optional[float] = None
+    window: Optional[tuple] = None
+
+
+@dataclass(frozen=True)
+class SongAnalyzerBoundaryTemporalBar:
+    relative_bar_offset: int
+    normalized_rms: float
+    relative_energy: float
+
+
+@dataclass(frozen=True)
+class SongAnalyzerShadowEventEvidence:
+    origin_observation_id: str
+    destination_observation_id: str
+    boundary_seconds: float
+    boundary_bar: Optional[int] = None
+    preparation_aspect: Optional[SongAnalyzerPreparationProfile] = None
+    arrival_aspect: Optional[SongAnalyzerArrivalProfile] = None
+    structural_departure_aspect: Optional[SongAnalyzerShadowStructuralDepartureAspect] = None
+    arrangement_identity_aspect: Optional[SongAnalyzerShadowArrangementIdentityAspect] = None
+    destination_is_terminal: Optional[bool] = None
+    hypotheses: tuple = ()
+    temporal_context: Optional[SongAnalyzerBoundaryTemporalContext] = None
+
+
+@dataclass(frozen=True)
+class SongAnalyzerShadowEventHypothesis:
+    kind: str
+    anchor_kind: str
+    origin_observation_id: str
+    destination_observation_id: str
+    start_seconds: float
+    target_seconds: float
+    end_seconds: Optional[float]
+    supporting_evidence: tuple
+    conflicting_evidence: tuple
+
+
+@dataclass(frozen=True)
+class SongAnalyzerShadowSectionCharacter:
+    observation_id: str
+    start_seconds: float
+    end_seconds: float
+    start_bar: int
+    end_bar: int
+    bar_count: Optional[int] = None
+    relative_energy: Optional[float] = None
+    energy_rise: Optional[float] = None
+    recurrence_strength: Optional[float] = None
+    family_salience: Optional[float] = None
+    entry_contrast: Optional[float] = None
+    exit_contrast: Optional[float] = None
+    build_momentum: Optional[float] = None
+    boundary_novelty: Optional[float] = None
+    entry_boundary: Optional[SongAnalyzerShadowBoundaryEvidence] = None
+    exit_boundary: Optional[SongAnalyzerShadowBoundaryEvidence] = None
+    preparation_profile: Optional[SongAnalyzerPreparationProfile] = None
+    arrival_profile: Optional[SongAnalyzerArrivalProfile] = None
+    entry_structural_departure: Optional[SongAnalyzerStructuralDepartureProfile] = None
+    exit_structural_departure: Optional[SongAnalyzerStructuralDepartureProfile] = None
+
+
+@dataclass(frozen=True)
 class SongAnalyzerStructureTrack:
     canonical_path: str
     content_sha256: Optional[str]
@@ -179,6 +329,8 @@ class SongAnalyzerStructureTrack:
     rich_segments: tuple = ()
     rich_events: tuple = ()
     semantic_sections: tuple = ()
+    shadow_sections: tuple = ()
+    shadow_event_evidence: tuple = ()
     rich_musical_events: object = None
 
 
@@ -236,6 +388,172 @@ class SongAnalyzerStructureHandoff:
             raise ValueError(f"{name} is invalid")
         value = value.strip()
         return value or None
+
+    @classmethod
+    def _optional_unit(cls, value, name):
+        if value is None:
+            return None
+        number = cls._number(value, name, 0.0)
+        if number > 1.0:
+            raise ValueError(f"{name} is invalid")
+        return number
+
+    @classmethod
+    def _optional_number(cls, value, name):
+        return None if value is None else cls._number(value, name)
+
+    @classmethod
+    def _shadow_boundary_evidence(cls, raw, name):
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError(f"{name} is invalid")
+        target_bar = raw.get("structural_target_bar")
+        if target_bar is not None and (isinstance(target_bar, bool) or not isinstance(target_bar, int) or target_bar < 1):
+            raise ValueError(f"{name}.structural_target_bar is invalid")
+        return SongAnalyzerShadowBoundaryEvidence(
+            cls._optional_unit(raw.get("recurrence_change"), f"{name}.recurrence_change"),
+            cls._optional_unit(raw.get("structural_context_change"), f"{name}.structural_context_change"),
+            cls._optional_unit(raw.get("membership_exit_strength"), f"{name}.membership_exit_strength"),
+            cls._optional_unit(raw.get("repeated_section_end"), f"{name}.repeated_section_end"),
+            cls._optional_text(raw.get("structural_route"), f"{name}.structural_route"),
+            cls._optional_unit(raw.get("structural_evidence"), f"{name}.structural_evidence"),
+            target_bar,
+            cls._optional_unit(raw.get("energy_change"), f"{name}.energy_change"),
+            cls._optional_unit(raw.get("onset_change"), f"{name}.onset_change"),
+            cls._optional_unit(raw.get("silence_change"), f"{name}.silence_change"),
+            cls._optional_number(raw.get("energy_delta"), f"{name}.energy_delta"),
+            cls._optional_number(raw.get("onset_delta"), f"{name}.onset_delta"),
+            cls._optional_number(raw.get("silence_delta"), f"{name}.silence_delta"),
+        )
+
+    @classmethod
+    def _preparation_profile(cls, raw, name):
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError(f"{name} is invalid")
+        return SongAnalyzerPreparationProfile(
+            cls._optional_number(raw.get("energy_trajectory"), f"{name}.energy_trajectory"),
+            cls._optional_number(raw.get("exit_energy_direction"), f"{name}.exit_energy_direction"),
+            cls._optional_number(raw.get("exit_onset_direction"), f"{name}.exit_onset_direction"),
+            cls._optional_number(raw.get("exit_silence_direction"), f"{name}.exit_silence_direction"),
+            cls._optional_unit(raw.get("exit_structural_context"), f"{name}.exit_structural_context"),
+        )
+
+    @classmethod
+    def _arrival_profile(cls, raw, name):
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError(f"{name} is invalid")
+        return SongAnalyzerArrivalProfile(
+            cls._optional_unit(raw.get("entry_contrast"), f"{name}.entry_contrast"),
+            cls._optional_unit(raw.get("boundary_novelty"), f"{name}.boundary_novelty"),
+            cls._optional_number(raw.get("energy_direction"), f"{name}.energy_direction"),
+            cls._optional_number(raw.get("onset_direction"), f"{name}.onset_direction"),
+            cls._optional_number(raw.get("silence_direction"), f"{name}.silence_direction"),
+            cls._optional_unit(raw.get("origin_relative_energy"), f"{name}.origin_relative_energy"),
+            cls._optional_unit(raw.get("destination_relative_energy"), f"{name}.destination_relative_energy"),
+        )
+
+    @classmethod
+    def _structural_departure_profile(cls, raw, name):
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError(f"{name} is invalid")
+        target_bar = raw.get("structural_target_bar")
+        if target_bar is not None and (isinstance(target_bar, bool) or not isinstance(target_bar, int) or target_bar < 1):
+            raise ValueError(f"{name}.structural_target_bar is invalid")
+        return SongAnalyzerStructuralDepartureProfile(
+            cls._optional_unit(raw.get("structural_context_change"), f"{name}.structural_context_change"),
+            cls._optional_unit(raw.get("membership_exit_strength"), f"{name}.membership_exit_strength"),
+            cls._optional_unit(raw.get("repeated_section_end"), f"{name}.repeated_section_end"),
+            cls._optional_unit(raw.get("recurrence_change"), f"{name}.recurrence_change"),
+            cls._optional_text(raw.get("structural_route"), f"{name}.structural_route"),
+            cls._optional_unit(raw.get("structural_evidence"), f"{name}.structural_evidence"), target_bar,
+        )
+
+    @classmethod
+    def _shadow_structural_departure_aspect(cls, raw, name):
+        if not isinstance(raw, dict):
+            raise ValueError(f"{name} is invalid")
+        return SongAnalyzerShadowStructuralDepartureAspect(
+            cls._structural_departure_profile(raw.get("origin_exit"), f"{name}.origin_exit"),
+            cls._structural_departure_profile(raw.get("destination_entry"), f"{name}.destination_entry"),
+        )
+
+    @classmethod
+    def _shadow_arrangement_identity_aspect(cls, raw, name):
+        if not isinstance(raw, dict):
+            raise ValueError(f"{name} is invalid")
+        family_id = cls._optional_text(raw.get("family_id"), f"{name}.family_id")
+        earlier = raw.get("has_earlier_family_occurrence")
+        if earlier is not None and not isinstance(earlier, bool):
+            raise ValueError(f"{name}.has_earlier_family_occurrence is invalid")
+        if earlier is not None and family_id is None:
+            raise ValueError(f"{name}.has_earlier_family_occurrence requires family_id")
+        return SongAnalyzerShadowArrangementIdentityAspect(
+            cls._optional_unit(raw.get("recurrence_strength"), f"{name}.recurrence_strength"),
+            cls._optional_unit(raw.get("family_salience"), f"{name}.family_salience"),
+            family_id, earlier,
+        )
+
+    @classmethod
+    def _boundary_temporal_context(cls, raw, name):
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError(f"{name} is invalid")
+        context = SongAnalyzerBoundaryTemporalContext(
+            cls._optional_number(raw.get("pre_boundary_normalized_rms"), f"{name}.pre_boundary_normalized_rms"),
+            cls._optional_number(raw.get("post_boundary_normalized_rms"), f"{name}.post_boundary_normalized_rms"),
+            cls._optional_unit(raw.get("late_origin_relative_energy"), f"{name}.late_origin_relative_energy"),
+            cls._optional_unit(raw.get("early_destination_relative_energy"), f"{name}.early_destination_relative_energy"),
+            cls._temporal_window(raw.get("window"), f"{name}.window"),
+        )
+        values = (context.pre_boundary_normalized_rms, context.post_boundary_normalized_rms,
+                  context.late_origin_relative_energy, context.early_destination_relative_energy)
+        if any(value is not None for value in values) and any(value is None for value in values):
+            raise ValueError(f"{name} is incomplete")
+        if context.window and (not all(value is not None for value in values) or not cls._temporal_window_matches_e1(context.window, context)):
+            context = SongAnalyzerBoundaryTemporalContext(*values, None)
+        return context
+
+    @classmethod
+    def _temporal_window(cls, raw, name):
+        """Malformed optional debug shape is ignored; it never invalidates production state."""
+        if raw is None or not isinstance(raw, dict) or not isinstance(raw.get("bars"), list):
+            return None
+        try:
+            bars = tuple(SongAnalyzerBoundaryTemporalBar(
+                item["relative_bar_offset"], cls._number(item["normalized_rms"], f"{name}.normalized_rms"),
+                cls._optional_unit(item["relative_energy"], f"{name}.relative_energy"))
+                for item in raw["bars"] if isinstance(item, dict))
+            if len(bars) != len(raw["bars"]) or not 1 <= len(bars) <= 8:
+                return None
+            offsets = [item.relative_bar_offset for item in bars]
+            if any(isinstance(offset, bool) or not isinstance(offset, int) or offset == 0 or abs(offset) > 4 for offset in offsets):
+                return None
+            negatives = [offset for offset in offsets if offset < 0]
+            positives = [offset for offset in offsets if offset > 0]
+            if offsets != sorted(offsets) or len(set(offsets)) != len(offsets) \
+                    or negatives != list(range(-len(negatives), 0)) or positives != list(range(1, len(positives) + 1)) \
+                    or any(item.relative_energy is None for item in bars):
+                return None
+            return bars
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _temporal_window_matches_e1(window, context):
+        by_offset = {item.relative_bar_offset: item for item in window}
+        return -1 in by_offset and 1 in by_offset \
+            and by_offset[-1].normalized_rms == context.pre_boundary_normalized_rms \
+            and by_offset[1].normalized_rms == context.post_boundary_normalized_rms \
+            and by_offset[-1].relative_energy == context.late_origin_relative_energy \
+            and by_offset[1].relative_energy == context.early_destination_relative_energy
 
     @classmethod
     def _parse_document(cls, raw):
@@ -300,6 +618,8 @@ class SongAnalyzerStructureHandoff:
             rich_segments = ()
             rich_events = ()
             semantic_sections = ()
+            shadow_sections = ()
+            shadow_event_evidence = ()
             rich_musical_events = None
             rich = track_raw.get("rich_analysis")
             if rich is not None:
@@ -390,6 +710,107 @@ class SongAnalyzerStructureHandoff:
                         section_values.append(SongAnalyzerSemanticSection(expected_index, start, end, role, occurrence, family_id, energy, confidence, start_bar, end_bar, source_count))
                         previous_section_end = end
                     semantic_sections = tuple(section_values)
+            shadow = track_raw.get("shadow_analysis")
+            if shadow is not None:
+                if not isinstance(shadow, dict) or cls._optional_text(shadow.get("model"), "shadow_analysis.model") != "SectionCharacterProfileShadow":
+                    raise ValueError("shadow_analysis is invalid")
+                raw_characters = shadow.get("section_characters")
+                if not isinstance(raw_characters, list):
+                    raise ValueError("shadow_analysis.section_characters is invalid")
+                characters = []
+                for character_raw in raw_characters:
+                    if not isinstance(character_raw, dict):
+                        raise ValueError("shadow section character is invalid")
+                    observation_id = cls._optional_text(character_raw.get("observation_id"), "shadow.observation_id")
+                    start = cls._number(character_raw.get("start_seconds"), "shadow.start_seconds", 0.0)
+                    end = cls._number(character_raw.get("end_seconds"), "shadow.end_seconds", 0.0)
+                    start_bar, end_bar = character_raw.get("start_bar"), character_raw.get("end_bar")
+                    if not observation_id or end <= start or isinstance(start_bar, bool) or not isinstance(start_bar, int) or start_bar < 1 \
+                            or isinstance(end_bar, bool) or not isinstance(end_bar, int) or end_bar < start_bar:
+                        raise ValueError("shadow section character is invalid")
+                    bar_count = character_raw.get("bar_count")
+                    if bar_count is not None and (isinstance(bar_count, bool) or not isinstance(bar_count, int) or bar_count <= 0):
+                        raise ValueError("shadow.bar_count is invalid")
+                    boundary_novelty = character_raw.get("boundary_novelty")
+                    if boundary_novelty is None and "boundary_novelty" not in character_raw:
+                        boundary_novelty = character_raw.get("structural_novelty")
+                    characters.append(SongAnalyzerShadowSectionCharacter(
+                        observation_id, start, end, start_bar, end_bar, bar_count,
+                        cls._optional_unit(character_raw.get("relative_energy"), "shadow.relative_energy"),
+                        cls._optional_number(character_raw.get("energy_rise"), "shadow.energy_rise"),
+                        cls._optional_unit(character_raw.get("recurrence_strength"), "shadow.recurrence_strength"),
+                        cls._optional_unit(character_raw.get("family_salience"), "shadow.family_salience"),
+                        cls._optional_unit(character_raw.get("entry_contrast"), "shadow.entry_contrast"),
+                        cls._optional_unit(character_raw.get("exit_contrast"), "shadow.exit_contrast"),
+                        cls._optional_unit(character_raw.get("build_momentum"), "shadow.build_momentum"),
+                        cls._optional_unit(boundary_novelty, "shadow.boundary_novelty"),
+                        cls._shadow_boundary_evidence(character_raw.get("entry_boundary"), "shadow.entry_boundary"),
+                        cls._shadow_boundary_evidence(character_raw.get("exit_boundary"), "shadow.exit_boundary"),
+                        cls._preparation_profile(character_raw.get("preparation_profile"), "shadow.preparation_profile"),
+                        cls._arrival_profile(character_raw.get("arrival_profile"), "shadow.arrival_profile"),
+                        cls._structural_departure_profile(character_raw.get("entry_structural_departure"), "shadow.entry_structural_departure"),
+                        cls._structural_departure_profile(character_raw.get("exit_structural_departure"), "shadow.exit_structural_departure"),
+                    ))
+                shadow_sections = tuple(characters)
+                evidence_raw = shadow.get("event_evidence")
+                event_evidence = []
+                if evidence_raw is not None:
+                    if not isinstance(evidence_raw, list):
+                        raise ValueError("shadow.event_evidence is invalid")
+                    by_id = {item.observation_id: item for item in shadow_sections}
+                    seen_boundaries = set()
+                    for evidence_item in evidence_raw:
+                        if not isinstance(evidence_item, dict):
+                            raise ValueError("shadow event evidence is invalid")
+                        origin_id = cls._optional_text(evidence_item.get("origin_observation_id"), "shadow.event_evidence.origin_observation_id")
+                        destination_id = cls._optional_text(evidence_item.get("destination_observation_id"), "shadow.event_evidence.destination_observation_id")
+                        boundary_seconds = cls._number(evidence_item.get("boundary_seconds"), "shadow.event_evidence.boundary_seconds", 0.0)
+                        boundary_bar = evidence_item.get("boundary_bar")
+                        destination_is_terminal = evidence_item.get("destination_is_terminal")
+                        hypotheses_raw = evidence_item.get("hypotheses", [])
+                        if not origin_id or not destination_id or (origin_id, destination_id) in seen_boundaries \
+                                or boundary_bar is not None and (isinstance(boundary_bar, bool) or not isinstance(boundary_bar, int) or boundary_bar < 1) \
+                                or destination_is_terminal is not None and not isinstance(destination_is_terminal, bool):
+                            raise ValueError("shadow event evidence is invalid")
+                        if not isinstance(hypotheses_raw, list):
+                            raise ValueError("shadow event hypotheses are invalid")
+                        origin, destination = by_id.get(origin_id), by_id.get(destination_id)
+                        if origin is None or destination is None or abs(origin.end_seconds - destination.start_seconds) > 1e-6 \
+                                or boundary_seconds != destination.start_seconds or boundary_bar is not None and boundary_bar != destination.start_bar:
+                            raise ValueError("shadow event evidence boundary is invalid")
+                        seen_boundaries.add((origin_id, destination_id))
+                        hypotheses = []
+                        for hypothesis_raw in hypotheses_raw:
+                            if not isinstance(hypothesis_raw, dict):
+                                raise ValueError("shadow event hypothesis is invalid")
+                            kind = hypothesis_raw.get("kind")
+                            anchor_kind = hypothesis_raw.get("anchor_kind")
+                            support = hypothesis_raw.get("supporting_evidence")
+                            conflicts = hypothesis_raw.get("conflicting_evidence")
+                            if kind != "STRUCTURAL_TRANSITION_CANDIDATE" or anchor_kind != "Boundary" \
+                                    or hypothesis_raw.get("origin_observation_id") != origin_id \
+                                    or hypothesis_raw.get("destination_observation_id") != destination_id \
+                                    or hypothesis_raw.get("start_seconds") != boundary_seconds \
+                                    or hypothesis_raw.get("target_seconds") != boundary_seconds \
+                                    or hypothesis_raw.get("end_seconds") is not None \
+                                    or not isinstance(support, list) or not isinstance(conflicts, list) \
+                                    or not all(isinstance(value, str) for value in [*support, *conflicts]):
+                                raise ValueError("shadow event hypothesis is invalid")
+                            hypotheses.append(SongAnalyzerShadowEventHypothesis(kind, anchor_kind, origin_id, destination_id,
+                                boundary_seconds, boundary_seconds, None, tuple(support), tuple(conflicts)))
+                        if len(hypotheses) > 1:
+                            raise ValueError("shadow event hypotheses are invalid")
+                        event_evidence.append(SongAnalyzerShadowEventEvidence(
+                            origin_id, destination_id, boundary_seconds, boundary_bar,
+                            cls._preparation_profile(evidence_item.get("preparation_aspect"), "shadow.event_evidence.preparation_aspect"),
+                            cls._arrival_profile(evidence_item.get("arrival_aspect"), "shadow.event_evidence.arrival_aspect"),
+                            cls._shadow_structural_departure_aspect(evidence_item.get("structural_departure_aspect"), "shadow.event_evidence.structural_departure_aspect"),
+                            cls._shadow_arrangement_identity_aspect(evidence_item.get("arrangement_identity_aspect"), "shadow.event_evidence.arrangement_identity_aspect"),
+                            destination_is_terminal,
+                            tuple(hypotheses),
+                            cls._boundary_temporal_context(evidence_item.get("temporal_context"), "shadow.event_evidence.temporal_context"),
+                        ))
+                shadow_event_evidence = tuple(event_evidence)
             rich_musical_events_raw = track_raw.get("rich_musical_events")
             if rich_musical_events_raw is not None:
                 if schema != SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION:
@@ -406,7 +827,8 @@ class SongAnalyzerStructureHandoff:
                 cls._optional_text(track_raw.get("phrase_analysis_version"), "phrase_analysis_version"),
                 availability,
                 model,
-                tuple(segments), rich_model, rich_energy_scale, rich_segments, rich_events, semantic_sections, rich_musical_events,
+                tuple(segments), rich_model, rich_energy_scale, rich_segments, rich_events, semantic_sections, shadow_sections,
+                shadow_event_evidence, rich_musical_events,
             )
         active_raw = raw.get("active_track")
         active = None
@@ -521,7 +943,7 @@ class SongAnalyzerStructureHandoff:
             "bars_to_next": None,
         }
 
-    def project(self, playback, include_rich_events=False):
+    def project(self, playback, include_shadow=False, include_rich_events=False):
         # The renderer and developer endpoint use this same cache concurrently.
         # Serialize refresh/projection so a reload cannot expose a half-updated
         # in-memory index to a DMX frame.
@@ -636,7 +1058,47 @@ class SongAnalyzerStructureHandoff:
                         for event in track.rich_events
                     ],
                 }
-            if include_rich_events and track.rich_musical_events is not None:
+            if include_shadow:
+                result["shadow_analysis"] = {
+                    "model": "SectionCharacterProfileShadow",
+                    "section_characters": [
+                        {"observation_id": section.observation_id, "start_seconds": section.start_seconds,
+                         "end_seconds": section.end_seconds, "start_bar": section.start_bar, "end_bar": section.end_bar,
+                         "bar_count": section.bar_count, "relative_energy": section.relative_energy,
+                         "energy_rise": section.energy_rise,
+                         "recurrence_strength": section.recurrence_strength, "family_salience": section.family_salience,
+                         "entry_contrast": section.entry_contrast, "exit_contrast": section.exit_contrast,
+                         "build_momentum": section.build_momentum, "boundary_novelty": section.boundary_novelty,
+                         "entry_boundary": shadow_boundary_payload(section.entry_boundary),
+                         "exit_boundary": shadow_boundary_payload(section.exit_boundary),
+                         "preparation_profile": shadow_preparation_payload(section.preparation_profile),
+                         "arrival_profile": shadow_arrival_payload(section.arrival_profile),
+                         "entry_structural_departure": shadow_structural_departure_payload(section.entry_structural_departure),
+                         "exit_structural_departure": shadow_structural_departure_payload(section.exit_structural_departure)}
+                        for section in track.shadow_sections
+                    ],
+                    "event_evidence": [
+                        {"origin_observation_id": item.origin_observation_id,
+                         "destination_observation_id": item.destination_observation_id,
+                         "boundary_seconds": item.boundary_seconds, "boundary_bar": item.boundary_bar,
+                         "preparation_aspect": shadow_preparation_payload(item.preparation_aspect),
+                         "arrival_aspect": shadow_arrival_payload(item.arrival_aspect),
+                         "structural_departure_aspect": shadow_structural_departure_aspect_payload(item.structural_departure_aspect),
+                         "arrangement_identity_aspect": shadow_arrangement_identity_aspect_payload(item.arrangement_identity_aspect),
+                         "destination_is_terminal": item.destination_is_terminal,
+                         "temporal_context": shadow_temporal_context_payload(item.temporal_context),
+                         "hypotheses": [{"kind": hypothesis.kind, "anchor_kind": hypothesis.anchor_kind,
+                                           "origin_observation_id": hypothesis.origin_observation_id,
+                                           "destination_observation_id": hypothesis.destination_observation_id,
+                                           "start_seconds": hypothesis.start_seconds, "target_seconds": hypothesis.target_seconds,
+                                           "end_seconds": hypothesis.end_seconds,
+                                           "supporting_evidence": list(hypothesis.supporting_evidence),
+                                           "conflicting_evidence": list(hypothesis.conflicting_evidence)}
+                                        for hypothesis in item.hypotheses]}
+                        for item in track.shadow_event_evidence
+                    ],
+                } if track.shadow_sections else None
+            if track.rich_musical_events is not None and (include_shadow or include_rich_events):
                 result["rich_musical_events"] = {
                     "mode": "SHADOW_ONLY",
                     "availability": track.rich_musical_events.availability,
@@ -644,6 +1106,16 @@ class SongAnalyzerStructureHandoff:
                     "event_types": [event.event_type for event in track.rich_musical_events.events],
                     "observation": None,
                 }
+                if include_rich_events:
+                    result["rich_musical_events"]["events"] = [{
+                        "type": event.event_type,
+                        "temporal_kind": event.temporal_kind,
+                        "start_seconds": event.start_seconds,
+                        "end_seconds": event.end_seconds,
+                        "start_bar": event.start_bar,
+                        "end_bar": event.end_bar,
+                        "origin_observation_id": event.origin_observation_id,
+                    } for event in track.rich_musical_events.events]
             if track.availability == "missing":
                 return result
             position = state.get("time_seconds")
@@ -651,7 +1123,7 @@ class SongAnalyzerStructureHandoff:
                 result["projection_status"] = "position_unavailable"
                 return result
             position = float(position)
-            if include_rich_events and track.rich_musical_events is not None:
+            if (include_shadow or include_rich_events) and track.rich_musical_events is not None:
                 result["rich_musical_events"]["observation"] = observe_rich_musical_events(
                     track.rich_musical_events, position)
             for section in track.semantic_sections:
@@ -743,6 +1215,30 @@ class SongAnalyzerBridgeDiagnostics:
             except Exception as exc:
                 self._snapshot = {"status": "unavailable", "error": type(exc).__name__, "diagnostics": None}
             return dict(self._snapshot)
+
+
+def force_reanalyze_active_song_analyzer_track():
+    """Debug-only request; production playback never calls this path."""
+    projection = SONG_ANALYZER_STRUCTURE.project(TRANSPORT.state())
+    active = projection.get("active_track") or {}
+    path, deck = active.get("canonical_path"), active.get("deck")
+    if active.get("status") != "ready" or not isinstance(path, str) or not path or isinstance(deck, bool) or not isinstance(deck, int) or deck < 1:
+        raise ValueError("Geen betrouwbare actieve ready VirtualDJ-track voor heranalyse.")
+    request = {
+        "protocolVersion": 1,
+        "requestId": "beatbeam-force-" + secrets.token_hex(8),
+        "type": "forceReanalyze",
+        "filePath": path,
+        "deck": deck,
+    }
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(1.0)
+        client.connect(str(DEFAULT_SONG_ANALYZER_BRIDGE_SOCKET_PATH))
+        client.sendall((json.dumps(request) + "\n").encode("utf-8"))
+        response = json.loads(client.recv(65536).decode("utf-8"))
+    if not response.get("success") or not response.get("accepted"):
+        raise ValueError(str(response.get("errorMessage") or response.get("errorCode") or "Heranalyse geweigerd."))
+    return {"status": "queued", "job_id": response.get("jobId"), "file_path": response.get("filePath")}
 
 
 def playback_system_monotonic_time():
@@ -3560,6 +4056,10 @@ class BridgePlaybackStateSource(PlaybackStateSource):
         position = JsonPlaybackStateSource._optional_non_negative_int(raw.get("positionMilliseconds"), "transport positionMilliseconds")
         bpm = JsonPlaybackStateSource._optional_positive_float(raw.get("bpm"), "transport bpm")
         beat_position = JsonPlaybackStateSource._optional_non_negative_float(raw.get("beatPosition"), "transport beatPosition")
+        signal_level = JsonPlaybackStateSource._optional_non_negative_float(raw.get("signalLevel"), "transport signalLevel")
+        if signal_level is not None and signal_level > 1.0:
+            raise ValueError("transport signalLevel buiten bereik.")
+        active_generation = JsonPlaybackStateSource._optional_positive_int(raw.get("activeGeneration"), "transport activeGeneration")
         beat_number = JsonPlaybackStateSource._optional_range_int(raw.get("beatNumber"), "transport beatNumber", 1, 4)
         bar_number = JsonPlaybackStateSource._optional_positive_int(raw.get("barNumber"), "transport barNumber")
         available = playing and position is not None and bpm is not None
@@ -3569,6 +4069,7 @@ class BridgePlaybackStateSource(PlaybackStateSource):
             "bpm": bpm, "position_milliseconds": position, "beat_position": beat_position,
             "beat_number": beat_number, "bar_number": bar_number,
             "captured_at_unix_milliseconds": observed, "is_playing": playing,
+            "signal_level": signal_level, "active_generation": active_generation,
         }
         return PlaybackStateSnapshot(
             PLAYBACK_STATE_SCHEMA_VERSION, sequence, observed, True,
@@ -6980,6 +7481,25 @@ def _apply_audience_pan_focus_to_motion(motion, slot_context, config=None):
     return focused
 
 
+def _apply_dynamic_motion_parameters(motion, config):
+    """Realiseer begrensde composer-parameters binnen de bestaande motionmap."""
+    if not motion or not isinstance(config, dict):
+        return motion
+    parameters = config.get("_dynamic_motion_parameters")
+    if not isinstance(parameters, dict):
+        return motion
+    try:
+        range_scale = max(.72, min(1.0, float(parameters.get("range_scale", 1.0))))
+        pan_offset = max(-12.0, min(12.0, float(parameters.get("horizontal_center_offset", 0.0))))
+        tilt_offset = max(-9.0, min(9.0, float(parameters.get("vertical_center_offset", 0.0))))
+    except (TypeError, ValueError):
+        return motion
+    parametrized = dict(motion)
+    parametrized["pan"] = clamp_dmx(round(127 + pan_offset + (float(motion["pan"]) - 127) * range_scale))
+    parametrized["tilt"] = clamp_dmx(round(170 + tilt_offset + (float(motion["tilt"]) - 170) * range_scale))
+    return parametrized
+
+
 def styled_phrase_motion(phrase, beat_value, family, slot_context, movement_scale, config=None):
     profile = auto_show_motion_profile(family)
     slot_context = slot_context or {}
@@ -8587,6 +9107,10 @@ class OscListener:
             "mood": mood,
             "color_bank": color_bank,
             "waveform_energy": deck_state.get("waveform_energy"),
+            "waveform_energy_age_seconds": (
+                None if deck_state.get("waveform_energy_updated_at") is None
+                else max(0.0, now - float(deck_state["waveform_energy_updated_at"]))
+            ),
             "waveform_bands": dict(deck_state.get("waveform_bands") or {}),
             "waveform_lookahead": {
                 "2": dict(((deck_state.get("waveform_lookahead") or {}).get("2")) or {}),
@@ -9104,6 +9628,7 @@ class TransportController:
         exact path.
         """
         snapshot = dict(legacy_snapshot or {})
+        live_intensity_input = self._virtualdj_live_intensity_input(snapshot, playback_state)
         legacy_structure_available = not bool(snapshot.get("stale"))
         beatbeam = dict((playback_state or {}).get("beatbeam") or {})
         available = (
@@ -9198,9 +9723,71 @@ class TransportController:
                 "transport": transport,
                 "playback_state": playback_state,
                 "decks": (playback_state or {}).get("decks"),
+                "live_intensity_input": live_intensity_input,
             }
         )
         return snapshot
+
+    @staticmethod
+    def _virtualdj_live_intensity_input(legacy_snapshot, playback_state):
+        beatbeam = dict((playback_state or {}).get("beatbeam") or {})
+        deck_number = beatbeam.get("deck_number")
+        track_path = str(beatbeam.get("track_path") or "").strip()
+        playback_decks = (playback_state or {}).get("decks") or ()
+        bridge_deck = next((deck for deck in playback_decks
+                            if isinstance(deck, dict) and deck.get("deck_number") == deck_number
+                            and str(deck.get("track_path") or "").strip() == track_path), None)
+        if isinstance(bridge_deck, dict) and "signal_level" in bridge_deck:
+            observed = bridge_deck.get("captured_at_unix_milliseconds")
+            signal_level = bridge_deck.get("signal_level")
+            generation = bridge_deck.get("active_generation")
+            age_seconds = ((time.time() * 1000.0) - observed) / 1000.0 if isinstance(observed, int) else None
+            source = {
+                "value": signal_level,
+                "age_milliseconds": age_seconds * 1000.0 if isinstance(age_seconds, (int, float)) else None,
+                "deck_number": deck_number,
+                "generation": generation,
+                "source_kind": "virtualdj_get_level",
+            }
+            if (playback_state or {}).get("availability") != "available" or (playback_state or {}).get("transport_state") != "advancing":
+                return {**source, "valid": False, "reason": "master_deck_signal_not_advancing"}
+            if not isinstance(age_seconds, (int, float)) or age_seconds < 0 or age_seconds > 0.75:
+                return {**source, "valid": False, "reason": "master_deck_signal_stale"}
+            if isinstance(signal_level, bool) or not isinstance(signal_level, (int, float)) or not math.isfinite(float(signal_level)):
+                return {**source, "valid": False, "reason": "master_deck_signal_invalid"}
+            if not isinstance(generation, int) or generation <= 0:
+                return {**source, "valid": False, "reason": "master_deck_signal_unbound"}
+            return {
+                **source,
+                "valid": True,
+                "reason": "master_deck_pre_master_level_current",
+                "value": clamp_unit(float(signal_level)),
+                "lifecycle": ("virtualdj", deck_number, track_path, generation),
+            }
+        decks = (legacy_snapshot or {}).get("decks") or {}
+        deck = decks.get(str(deck_number)) if isinstance(decks, dict) and isinstance(deck_number, int) else None
+        if not isinstance(deck, dict):
+            return {"valid": False, "reason": "master_deck_energy_missing"}
+        age = deck.get("waveform_energy_age_seconds")
+        value = deck.get("waveform_energy")
+        source = {
+            "value": value,
+            "age_milliseconds": age * 1000.0 if isinstance(age, (int, float)) else None,
+            "deck_number": deck_number,
+            "generation": (legacy_snapshot or {}).get("_playback_generation"),
+            "source_kind": "legacy_waveform_energy",
+        }
+        if not isinstance(age, (int, float)) or age < 0 or age > 0.75:
+            return {**source, "valid": False, "reason": "master_deck_energy_stale"}
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            return {**source, "valid": False, "reason": "master_deck_energy_invalid"}
+        return {
+            **source,
+            "valid": True,
+            "reason": "master_deck_energy_current",
+            "value": clamp_unit(float(value)),
+            "lifecycle": ("virtualdj", deck_number, track_path, (legacy_snapshot or {}).get("_playback_generation")),
+        }
 
     def _annotate_active_playback(self, snapshot, active_source):
         playback_state = snapshot.get("playback_state") or {}
@@ -9372,6 +9959,22 @@ class DmxController:
         self.current_values = {}
         self.current_slot_previews = {}
         self.current_auto_show = None
+        self.current_preview_auto_show = None
+        self.preview_pulse_test_mode = "OFF"
+        self.rme_preview_differential = {}
+        self.production_show_decision = {}
+        self.production_show_shadow_observation = {
+            "frames": 0,
+            "candidate_available_frames": 0,
+            "eligible_frames": 0,
+            "ineligible_reasons": {},
+            "equal_signature_frames": 0,
+            "different_signature_frames": 0,
+        }
+        # Alleen de Preview Map kent deze kleine, track-lokale keuzehistorie.
+        # De production auto-show en fysieke DMX-route lezen hem nooit.
+        self.dynamic_composition_history = CompositionHistory()
+        self.live_intensity_feedback = LiveIntensityFeedback()
         self.conflicts = []
         self.motion_states = {}
         self.slot_rhythm_states = {}
@@ -9481,6 +10084,7 @@ class DmxController:
         return {
             "enabled": False,
             "style": "adaptive",
+            "preview_rme_mode": "BASELINE",
             "audience_pan_focus_enabled": True,
             "audience_pan_min": 135,
             "audience_pan_max": 205,
@@ -10616,8 +11220,19 @@ class DmxController:
             now = time.time()
             config = self._clean_full_config(dict(self.config))
             osc = self.osc.snapshot_for_render()
-            auto_show = self._auto_show_state(osc, config["auto_show"])
+            baseline_auto_show = self._auto_show_state(osc, config["auto_show"])
+            auto_show, candidate_auto_show, production_decision = self._select_production_auto_show(
+                config, osc, baseline_auto_show
+            )
+            preview_auto_show, slot_previews, differential = self._preview_auto_show_frame(
+                config, osc, now, baseline_auto_show,
+                preview_auto_show=candidate_auto_show,
+                production_decision=production_decision,
+            )
             self.current_auto_show = auto_show
+            self.current_preview_auto_show = preview_auto_show
+            self.rme_preview_differential = differential
+            self.production_show_decision = production_decision
             values = self._render_values(
                 now,
                 config=config,
@@ -10625,12 +11240,7 @@ class DmxController:
                 auto_show=auto_show,
             )
             self.current_values = values
-            self.current_slot_previews = self._build_slot_previews(
-                config,
-                osc,
-                now,
-                auto_show=auto_show,
-            )
+            self.current_slot_previews = slot_previews
             self._schedule_save_locked()
             stop_beat_pulse_test = bool(config["blackout_active"])
             self.debug_log.log(
@@ -10669,20 +11279,26 @@ class DmxController:
             }
             self.config["blackout_active"] = False
             config = self._clean_full_config(dict(self.config))
-            auto_show = self._auto_show_state(osc, config["auto_show"])
+            baseline_auto_show = self._auto_show_state(osc, config["auto_show"])
+            auto_show, candidate_auto_show, production_decision = self._select_production_auto_show(
+                config, osc, baseline_auto_show
+            )
+            preview_auto_show, slot_previews, differential = self._preview_auto_show_frame(
+                config, osc, now, baseline_auto_show,
+                preview_auto_show=candidate_auto_show,
+                production_decision=production_decision,
+            )
             self.current_auto_show = auto_show
+            self.current_preview_auto_show = preview_auto_show
+            self.rme_preview_differential = differential
+            self.production_show_decision = production_decision
             self.current_values = self._render_values(
                 now,
                 config=config,
                 osc=osc,
                 auto_show=auto_show,
             )
-            self.current_slot_previews = self._build_slot_previews(
-                config,
-                osc,
-                now,
-                auto_show=auto_show,
-            )
+            self.current_slot_previews = slot_previews
             self.debug_log.log("ONE_SHOT_TRIGGER", cue=cue_name)
             return dict(self.current_values)
 
@@ -10692,6 +11308,7 @@ class DmxController:
             self.active_one_shot_cue = None
             self.current_values = {}
             self.current_slot_previews = {}
+            self.rme_preview_differential = {}
             self.debug_log.log("BLACKOUT", active=True)
         self.virtualdj_beat_pulse_scheduler.stop("blackout")
         self.virtualdj_beat_pulse_preview_scheduler.stop("blackout")
@@ -10745,6 +11362,7 @@ class DmxController:
             config = self._clean_full_config(dict(self.config))
             osc = self.osc.snapshot_for_render()
             auto_show = dict(self.current_auto_show or {})
+            preview_auto_show = dict(self.current_preview_auto_show or {})
             live_values = dict(self.current_values)
             slot_previews = dict(self.current_slot_previews)
             slot_previews = self._apply_virtualdj_beat_pulse_preview_overlay_locked(slot_previews)
@@ -10761,6 +11379,16 @@ class DmxController:
                 "active_slot": config["active_slot"],
                 "blackout_active": config["blackout_active"],
                 "auto_show": auto_show,
+                "preview_auto_show": preview_auto_show,
+                "production_show_selector": dict(self.production_show_decision),
+                "production_show_shadow_observation": {
+                    **self.production_show_shadow_observation,
+                    "ineligible_reasons": dict(
+                        self.production_show_shadow_observation.get("ineligible_reasons") or {}
+                    ),
+                },
+                "preview_pulse_test": preview_pulse_test_state(self.preview_pulse_test_mode, osc.get("beat_value")),
+                "rme_preview_differential": dict(self.rme_preview_differential),
                 "show_intent_shadow": dict(self._show_intent_shadow_diagnostics),
                 "show_intent_bounded_parity": dict(
                     self._show_intent_bounded_parity_diagnostics
@@ -10790,6 +11418,13 @@ class DmxController:
                 },
             }
 
+    def set_preview_pulse_test(self, mode):
+        mode = str(mode or "OFF").upper()
+        if mode not in PREVIEW_PULSE_TESTS:
+            raise ValueError("preview pulse test must be OFF, EVERY_BEAT, HALF_TIME or BAR_ACCENT")
+        with self.lock:
+            self.preview_pulse_test_mode = mode
+
     def add_slot(self, fixture_id, mode=None):
         fixture = find_fixture(FIXTURE_LIBRARY, fixture_id)
         selected_mode = mode or fixture_preset(fixture_id)["mode"]
@@ -10814,19 +11449,26 @@ class DmxController:
             now = time.time()
             full_config = self._clean_full_config(dict(self.config))
             osc = self.osc.snapshot_for_render()
-            auto_show = self._auto_show_state(osc, full_config["auto_show"])
+            baseline_auto_show = self._auto_show_state(osc, full_config["auto_show"])
+            auto_show, candidate_auto_show, production_decision = self._select_production_auto_show(
+                full_config, osc, baseline_auto_show
+            )
+            preview_auto_show, slot_previews, differential = self._preview_auto_show_frame(
+                full_config, osc, now, baseline_auto_show,
+                preview_auto_show=candidate_auto_show,
+                production_decision=production_decision,
+            )
+            self.current_auto_show = auto_show
+            self.current_preview_auto_show = preview_auto_show
+            self.rme_preview_differential = differential
+            self.production_show_decision = production_decision
             self.current_values = self._render_values(
                 now,
                 config=full_config,
                 osc=osc,
                 auto_show=auto_show,
             )
-            self.current_slot_previews = self._build_slot_previews(
-                full_config,
-                osc,
-                now,
-                auto_show=auto_show,
-            )
+            self.current_slot_previews = slot_previews
             self._schedule_save_locked()
             self.debug_log.log(
                 "SLOT_ADD",
@@ -10861,19 +11503,26 @@ class DmxController:
             now = time.time()
             full_config = self._clean_full_config(dict(self.config))
             osc = self.osc.snapshot_for_render()
-            auto_show = self._auto_show_state(osc, full_config["auto_show"])
+            baseline_auto_show = self._auto_show_state(osc, full_config["auto_show"])
+            auto_show, candidate_auto_show, production_decision = self._select_production_auto_show(
+                full_config, osc, baseline_auto_show
+            )
+            preview_auto_show, slot_previews, differential = self._preview_auto_show_frame(
+                full_config, osc, now, baseline_auto_show,
+                preview_auto_show=candidate_auto_show,
+                production_decision=production_decision,
+            )
+            self.current_auto_show = auto_show
+            self.current_preview_auto_show = preview_auto_show
+            self.rme_preview_differential = differential
+            self.production_show_decision = production_decision
             self.current_values = self._render_values(
                 now,
                 config=full_config,
                 osc=osc,
                 auto_show=auto_show,
             )
-            self.current_slot_previews = self._build_slot_previews(
-                full_config,
-                osc,
-                now,
-                auto_show=auto_show,
-            )
+            self.current_slot_previews = slot_previews
             self._schedule_save_locked()
             self.debug_log.log(
                 "SLOT_REMOVE",
@@ -11084,6 +11733,9 @@ class DmxController:
         if style not in AUTO_SHOW_STYLES:
             style = defaults["style"]
         cleaned["style"] = style
+        cleaned["preview_rme_mode"] = normalize_rme_preview_mode(
+            cleaned.get("preview_rme_mode", defaults["preview_rme_mode"])
+        )
         cleaned["audience_pan_focus_enabled"] = bool(
             cleaned.get("audience_pan_focus_enabled", defaults["audience_pan_focus_enabled"])
         )
@@ -11582,6 +12234,9 @@ class DmxController:
 
     def _auto_show_rgbw_for_slot(self, base_rgbw, slot_context, auto_show):
         role = slot_context["role"]
+        dynamic_rgbw = self._dynamic_preview_palette_rgbw(slot_context, auto_show)
+        if dynamic_rgbw is not None:
+            return dynamic_rgbw
         section = auto_show.get("behavior_bucket", auto_show["phrase_bucket"])
         beat_step = int(auto_show.get("beat_step", 1) or 1)
         energy = auto_show["energy"]
@@ -12009,13 +12664,69 @@ class DmxController:
         )
         return normalize_rgbw_peak(rgbw, peak_target=255, white_cap=0, minimum_peak=110)
 
+    def _dynamic_preview_palette_rgbw(self, slot_context, auto_show):
+        """Render een benoemde composer-paletprimitive zonder basescène-look."""
+        if not auto_show.get("dynamic_composition_applied"):
+            return None
+        role = slot_context.get("role", "static")
+        primitive = (auto_show.get("selected_primitives") or {}).get(role) or {}
+        palette_name = primitive.get("palette") if isinstance(primitive, dict) else None
+        if not isinstance(palette_name, str) or palette_name not in AUTO_SHOW_COLOR_PROFILES:
+            return None
+        profile = auto_show_color_profile(palette_name)
+        intent = (auto_show.get("fixture_group_intents") or {}).get(role) or {}
+        rate = clamp_unit(intent.get("color_change_rate", 0.0))
+        group_index = int(slot_context.get("group_index", 0))
+        member_index = int(slot_context.get("member_index", 0))
+        palette = (profile["primary"], profile["secondary"], profile["accent"])
+        parameters = primitive.get("palette_parameters") if isinstance(primitive, dict) else None
+        parameters = parameters if isinstance(parameters, dict) else {}
+        relationship = str(parameters.get("relationship", "complementary"))
+        if relationship == "analogous":
+            palette = (profile["primary"], profile["accent"], profile["primary"])
+        elif relationship == "split_complementary":
+            palette = (profile["primary"], profile["accent"], profile["secondary"])
+        elif relationship == "monochromatic":
+            palette = (profile["primary"], profile["primary"], profile["accent"])
+        try:
+            palette_phase_offset = max(0, min(2, int(parameters.get("phase_offset", 0))))
+            balance = max(.32, min(.68, float(parameters.get("balance", .50))))
+        except (TypeError, ValueError):
+            palette_phase_offset, balance = 0, .50
+        # Een bounded beat-index maakt de expliciet geselecteerde paletprimitive
+        # zichtbaar zonder een oude look/theme/scene te raadplegen.
+        beat_step = int(auto_show.get("beat_step", 1) or 1)
+        phase = int(math.floor(beat_step * (1.0 + rate * 2.0))) + palette_phase_offset
+        if role == "moving":
+            color = palette[(phase + group_index + member_index) % len(palette)]
+        elif role == "par":
+            color = palette[(phase + member_index // 2) % len(palette)]
+        elif role == "wash":
+            color = palette[(phase + group_index) % len(palette)]
+        else:
+            color = profile["primary"]
+        # Meng uitsluitend benoemde profielkleuren; er is geen RGB-randomizer.
+        if role == "moving":
+            color = mix_rgbw(color, profile["primary"], 1.0 - balance)
+        elif role == "wash":
+            color = mix_rgbw(color, profile["secondary"], 1.0 - balance)
+        return normalize_rgbw_peak(color, peak_target=255, white_cap=0, minimum_peak=96)
+
     def _wall_wash_zone_rgb_for_slot(self, slot_context, auto_show, osc):
-        cue_name = str(auto_show.get("wash_cue_name", "soft_blue_wash"))
+        dynamic_wash = (auto_show.get("selected_primitives") or {}).get("wash") or {}
+        selected_wash_cue = dynamic_wash.get("wash_cue") if auto_show.get("dynamic_composition_applied") else None
+        cue_name = str(selected_wash_cue or auto_show.get("wash_cue_name", "soft_blue_wash"))
         cue = auto_show_wall_wash_cue(cue_name)
         frames = cue.get("frames") or [[[0, 0, 0]] * 8]
         beats_per_frame = max(0.125, float(cue.get("beats_per_frame", 1.0) or 1.0))
         beat_value = float(osc.get("beat_value") or 0.0)
         frame_index = int(math.floor(beat_value / beats_per_frame)) % max(1, len(frames))
+        parameters = dynamic_wash.get("wash_parameters") if isinstance(dynamic_wash, dict) else None
+        if isinstance(parameters, dict):
+            try:
+                frame_index = (frame_index + max(0, min(2, int(parameters.get("phase_offset", 0))))) % max(1, len(frames))
+            except (TypeError, ValueError):
+                pass
         segments = list(frames[frame_index])
 
         if cue.get("mirror_on_odd") and int(slot_context.get("member_index", 0)) % 2 == 1:
@@ -12586,19 +13297,26 @@ class DmxController:
         )
 
     def _build_slot_previews(self, config, osc, now, auto_show=None):
+        """Projecteer de kaart zonder render-state van de fysieke show te wijzigen."""
         auto_show = auto_show or self._auto_show_state(osc, config.get("auto_show", {}))
         osc = self._behavior_osc(osc, auto_show)
-        return {
-            slot_id: self._preview_for_slot(
-                slot_id,
-                slot_config,
-                osc,
-                now,
-                full_config=config,
-                auto_show=auto_show,
-            )
-            for slot_id, slot_config in config["slots"].items()
-        }
+        rhythm_states = dict(self.slot_rhythm_states)
+        rhythm_signatures = dict(self.last_slot_rhythm_signatures)
+        try:
+            return {
+                slot_id: self._preview_for_slot(
+                    slot_id,
+                    slot_config,
+                    osc,
+                    now,
+                    full_config=config,
+                    auto_show=auto_show,
+                )
+                for slot_id, slot_config in config["slots"].items()
+            }
+        finally:
+            self.slot_rhythm_states = rhythm_states
+            self.last_slot_rhythm_signatures = rhythm_signatures
 
     def _render_values_with_context(self, now, config, osc, auto_show, advance_motion=True):
         if config["blackout_active"]:
@@ -12808,12 +13526,20 @@ class DmxController:
     def _effective_brightness_with_motion(self, config, motion, osc, now):
         rhythm_brightness = self._brightness_for_config(config, osc, now)
         if not motion or motion.get("dimmer") is None:
-            return rhythm_brightness
-
-        motion_dimmer = clamp_dmx(motion.get("dimmer"))
-        configured_dimmer = max(1, int(config.get("dimmer", 0) or 0))
-        rhythm_ratio = max(0.0, float(rhythm_brightness) / float(configured_dimmer))
-        return clamp_dmx(round(motion_dimmer * rhythm_ratio))
+            brightness = rhythm_brightness
+        else:
+            motion_dimmer = clamp_dmx(motion.get("dimmer"))
+            configured_dimmer = max(1, int(config.get("dimmer", 0) or 0))
+            rhythm_ratio = max(0.0, float(rhythm_brightness) / float(configured_dimmer))
+            brightness = clamp_dmx(round(motion_dimmer * rhythm_ratio))
+        # Alleen de afgeleide Preview Show-state kan deze marker bevatten;
+        # production Auto Show en fysieke DMX blijven dus byte-identiek.
+        multiplier = config.get("_preview_intensity_multiplier", 1.0)
+        try:
+            multiplier = max(0.78, min(1.18, float(multiplier)))
+        except (TypeError, ValueError):
+            multiplier = 1.0
+        return clamp_dmx(round(brightness * multiplier))
 
     def _render_slot_values(self, slot_id, config, osc, now, advance_motion=True):
         fixture = find_fixture(FIXTURE_LIBRARY, config["fixture"])
@@ -13207,6 +13933,11 @@ class DmxController:
         # Rich SongAnalyzer energy is additive and bounded: phrase buckets and
         # all existing fixture safety controls remain authoritative.
         base_energy = clamp_unit(base_energy + song_analyzer_energy_modifier)
+        live_intensity = self.live_intensity_feedback.observe(
+            base_energy,
+            osc_effective.get("live_intensity_input"),
+            time.monotonic(),
+        )
         base_energy = apply_live_energy_override(
             override_energy,
             base_energy,
@@ -13350,6 +14081,7 @@ class DmxController:
             "available": override_active or not bool(osc.get("stale")),
             "style": style_name,
             "style_label": style["label"],
+            "preview_rme_mode": config["preview_rme_mode"],
             "audience_pan_focus_enabled": audience_pan_focus_enabled,
             "audience_pan_min": audience_pan_min,
             "audience_pan_max": audience_pan_max,
@@ -13369,6 +14101,7 @@ class DmxController:
             "energy": energy,
             "song_analyzer_energy": song_analyzer_energy,
             "song_analyzer_energy_modifier": song_analyzer_energy_modifier,
+            "live_intensity": live_intensity,
             "waveform_energy": waveform_factor,
             "waveform_bands": {
                 "low": waveform_bands["low"],
@@ -13457,6 +14190,203 @@ class DmxController:
         """Behoud de bestaande productionresultaat-API zonder shadow-state."""
         production_auto_show, _ = self._auto_show_evaluation(osc, auto_show_config)
         return production_auto_show
+
+    def _preview_auto_show_evaluation(self, osc, auto_show_config, production_auto_show):
+        """Build one candidate and return its exact handoff projection."""
+        mode = normalize_rme_preview_mode((auto_show_config or {}).get("preview_rme_mode"))
+        handoff = getattr(self.structure_behavior_bridge, "handoff", None)
+        project = getattr(handoff, "project", None)
+        projection = {}
+        if callable(project):
+            try:
+                if mode == "DYNAMIC_COMPOSER":
+                    projection = project(osc, include_shadow=True, include_rich_events=True)
+                else:
+                    projection = project(osc, include_rich_events=True)
+            except Exception:
+                projection = {}
+        context = preview_rme_context(projection, (osc or {}).get("time_seconds"), mode)
+        if mode == "DYNAMIC_COMPOSER":
+            continuous_state, state_reason = project_continuous_musical_state(
+                projection, (osc or {}).get("time_seconds")
+            )
+            event_envelope, envelope_reason = project_musical_event_envelope(
+                projection, osc or {}
+            )
+            context = dict(context)
+            context["continuous_state_reason"] = state_reason
+            context["event_envelope_reason"] = envelope_reason
+            track_path = (osc or {}).get("track_path")
+            track_identity = canonical_song_analyzer_track_path(track_path) if track_path else None
+            lifecycle_context = (
+                (osc or {}).get("_active_playback_source"),
+                track_identity or str(track_path or ""),
+                (osc or {}).get("_playback_generation"),
+            )
+            try:
+                composition = compose_dynamic_preview(
+                    production_auto_show,
+                    continuous_state,
+                    context,
+                    event_envelope,
+                    composition_history=self.dynamic_composition_history,
+                    lifecycle_context=lifecycle_context,
+                    live_intensity=production_auto_show.get("live_intensity"),
+                )
+            except Exception:
+                composition = None
+                context["continuous_state_reason"] = "composer_exception"
+            if composition is None:
+                context["reason"] = "manual_override" if production_auto_show.get("override_active") \
+                    else context.get("continuous_state_reason") or "composer_invalid"
+            return apply_dynamic_composer_preview(production_auto_show, context, composition), projection
+        return apply_rme_preview_modifier(production_auto_show, context), projection
+
+    def _preview_auto_show_state(self, osc, auto_show_config, production_auto_show):
+        """Compatibility wrapper for the existing Preview Map contract."""
+        return self._preview_auto_show_evaluation(
+            osc, auto_show_config, production_auto_show
+        )[0]
+
+    def _select_production_auto_show(self, config, osc, baseline_auto_show):
+        candidate, projection = self._preview_auto_show_evaluation(
+            osc, config.get("auto_show", {}), baseline_auto_show
+        )
+        selected, decision = select_production_show_source(
+            PRODUCTION_DYNAMIC_COMPOSER_RUNTIME_MODE,
+            baseline_auto_show,
+            candidate,
+            projection,
+            osc,
+            (osc or {}).get("_playback_generation"),
+            renderer_healthy=bool(self.render_active and self.error is None),
+            safety_context={"blackout_active": config.get("blackout_active") is True},
+        )
+        if decision.get("production_mode") == "DYNAMIC_COMPOSER_SHADOW":
+            observation = self.production_show_shadow_observation
+            observation["frames"] += 1
+            observation["candidate_available_frames"] += int(
+                bool(decision.get("composer_candidate_available"))
+            )
+            observation["eligible_frames"] += int(bool(decision.get("composer_eligible")))
+            observation[
+                "equal_signature_frames" if decision.get("baseline_candidate_signature_equal")
+                else "different_signature_frames"
+            ] += 1
+            if not decision.get("composer_eligible"):
+                reason = decision.get("fallback_reason") or "unknown"
+                reasons = observation["ineligible_reasons"]
+                reasons[reason] = reasons.get(reason, 0) + 1
+        return selected, candidate, decision
+
+    @staticmethod
+    def _preview_changed_values(baseline, enhanced):
+        keys = (
+            "red", "green", "blue", "white", "brightness", "strobe",
+            "pan", "tilt", "target_pan", "target_tilt",
+            "logical_pan_degrees", "logical_tilt_degrees",
+        )
+        return {
+            key: {"baseline": baseline.get(key), "enhanced": enhanced.get(key)}
+            for key in keys
+            if baseline.get(key) != enhanced.get(key)
+        }
+
+    @staticmethod
+    def _preview_slot_trace(previews):
+        """Compacte, daadwerkelijk aan de Native Map geleverde previewwaarden."""
+        fields = ("brightness", "red", "green", "blue", "white", "strobe",
+                  "target_pan", "target_tilt", "pan_tilt_speed", "motion_active")
+        return {
+            slot_id: {field: preview.get(field) for field in fields}
+            for slot_id, preview in sorted((previews or {}).items())
+            if isinstance(preview, dict)
+        }
+
+    def _preview_auto_show_frame(self, config, osc, now, production_auto_show,
+                                 preview_auto_show=None, production_decision=None):
+        """Bouw baseline/enhanced Map-frames en expliciete RME-differential."""
+        if preview_auto_show is None:
+            preview_auto_show = self._preview_auto_show_state(
+                osc, config.get("auto_show", {}), production_auto_show
+            )
+        pulse_test = preview_pulse_test_state(self.preview_pulse_test_mode, osc.get("beat_value"))
+        if pulse_test["active"]:
+            preview_auto_show = {**preview_auto_show, "preview_pulse_test": pulse_test}
+        baseline_previews = self._build_slot_previews(
+            config, osc, now, auto_show=production_auto_show
+        )
+        enhanced_previews = self._build_slot_previews(
+            config, osc, now, auto_show=preview_auto_show
+        )
+        changed_slots = {
+            slot_id: changed
+            for slot_id in sorted(set(baseline_previews) | set(enhanced_previews))
+            if (changed := self._preview_changed_values(
+                baseline_previews.get(slot_id, {}), enhanced_previews.get(slot_id, {})
+            ))
+        }
+        context = dict(preview_auto_show.get("rme_preview") or {})
+        baseline_intent = {
+            key: value for key, value in production_auto_show.items()
+            if key != "rme_preview"
+        }
+        enhanced_intent = {
+            key: value for key, value in preview_auto_show.items()
+            if key != "rme_preview"
+        }
+        dynamic_composition = dict(preview_auto_show.get("dynamic_composer") or {})
+        modifier_event_type = dynamic_composition.get("event_type")
+        modifier_event = {"type": modifier_event_type} if isinstance(modifier_event_type, str) else context.get("current_rme")
+        differential = {
+            "mode": context.get("mode", "BASELINE"),
+            "production_source": (production_decision or {}).get(
+                "production_show_source", "baseline"
+            ),
+            "production_selector": dict(production_decision or {}),
+            "preview_source": preview_auto_show.get("preview_source") or (
+                "rme_enhanced" if context.get("mode") == "RME_ENHANCED" and context.get("valid") else "baseline"
+            ),
+            "dynamic_composition_applied": bool(preview_auto_show.get("dynamic_composition_applied")),
+            "dynamic_composer_active": bool(preview_auto_show.get("dynamic_composer_active")),
+            "fallback_to_baseline": bool(preview_auto_show.get("fallback_to_baseline", True)),
+            "baseline_scene_reused": bool(preview_auto_show.get("baseline_scene_reused", True)),
+            "baseline_scene_components_reused": list(preview_auto_show.get("baseline_scene_components_reused") or ()),
+            "context_reason": context.get("reason"),
+            "event": modifier_event,
+            "source_event": context.get("current_rme"),
+            "next_event": context.get("next_rme"),
+            "progress": context.get("rme_progress"),
+            "interpretation": context.get("rme_modifier", "baseline"),
+            "continuous_state_reason": context.get("continuous_state_reason"),
+            "event_envelope_reason": context.get("event_envelope_reason"),
+            "continuous_musical_state": dict(preview_auto_show.get("continuous_musical_state") or {}),
+            "event_envelope": dict(preview_auto_show.get("event_envelope") or {}),
+            "base_show": baseline_intent,
+            "dynamic_show_intent": dynamic_composition,
+            "fixture_group_intents": dict(preview_auto_show.get("fixture_group_intents") or {}),
+            "selected_primitives": dict(preview_auto_show.get("selected_primitives") or {}),
+            "composition_signature": dict(preview_auto_show.get("composition_signature") or {}),
+            "variation": dict(preview_auto_show.get("variation") or {}),
+            "changed_dimensions": list(preview_auto_show.get("changed_dimensions") or ()),
+            "preview_cue": preview_auto_show.get("preview_cue"),
+            "rendered_preview_slots": self._preview_slot_trace(enhanced_previews),
+            "preview_intensity_multiplier": preview_auto_show.get(
+                "preview_intensity_multiplier", 1.0
+            ),
+            "show_state_changed": baseline_intent != enhanced_intent,
+            "fixture_values_changed": bool(changed_slots),
+            "changed_slots": changed_slots,
+            "selected_preview_source": "preview_auto_show -> slot_previews",
+            "physical_output_source": (
+                "auto_show -> current_values"
+                if (production_decision or {}).get("production_show_source", "existing_autoshow")
+                    == "existing_autoshow"
+                else "dynamic_composer -> auto_show -> current_values"
+            ),
+            "preview_pulse_test": pulse_test,
+        }
+        return preview_auto_show, enhanced_previews, differential
 
     def _show_intent_lifecycle_decision(self, osc):
         """Bepaal een shadow-boundary uit bestaande transportprovenance."""
@@ -14036,6 +14966,19 @@ class DmxController:
         pulse_name = auto_show.get("pulse_name", "medium")
         rhythm_mode = auto_show.get("rhythm_mode", "full_on")
         override_energy = live_override_energy_name(auto_show.get("override_energy"))
+        dynamic_group_intents = auto_show.get("fixture_group_intents") or {}
+        dynamic_group_intent = dynamic_group_intents.get(role)
+        dynamic_primitives = (auto_show.get("selected_primitives") or {}).get(role) or {}
+        dynamic_preview_active = bool(auto_show.get("dynamic_composition_applied"))
+        if isinstance(dynamic_group_intent, dict):
+            # Groepintentie blijft een preview-afgeleide; onbekende of
+            # incomplete primitives worden neutraal genegeerd.
+            energy = clamp_unit(dynamic_group_intent.get("intensity", energy))
+            if role == "moving":
+                movement = clamp_unit(dynamic_group_intent.get("movement_amount", movement))
+                primitive_motion = dynamic_primitives.get("movement_pattern")
+                if isinstance(primitive_motion, str) and primitive_motion in AUTO_SHOW_MOTION_PROFILES:
+                    motion_name = primitive_motion
         role_profiles = {
             "moving": {"base": 96, "span": 128, "energy_bias": 0.08, "pulse": 26, "decay": -40},
             "par": {"base": 84, "span": 142, "energy_bias": -0.04, "pulse": -6, "decay": 32},
@@ -14054,6 +14997,14 @@ class DmxController:
         effective["program"] = 0
         effective["_slot_context"] = slot_context
         effective["_auto_show_movement"] = movement
+        if dynamic_preview_active and isinstance(dynamic_primitives, dict):
+            # De parameters zijn composer-intent, geen directe kanaalwaarden.
+            # Ze worden verderop uitsluitend binnen de bestaande profielen en
+            # fixtureclamps gerealiseerd.
+            if role == "moving" and isinstance(dynamic_primitives.get("motion_parameters"), dict):
+                effective["_dynamic_motion_parameters"] = dict(dynamic_primitives["motion_parameters"])
+            if isinstance(dynamic_primitives.get("pulse_parameters"), dict):
+                effective["_dynamic_pulse_parameters"] = dict(dynamic_primitives["pulse_parameters"])
         effective["_auto_show_motion_name"] = motion_name
         motion_profile = auto_show_motion_profile(motion_name)
         effective["_auto_show_member_mirror"] = bool(
@@ -14070,6 +15021,22 @@ class DmxController:
         effective["_auto_show_pulse_name"] = pulse_name
         effective["_auto_show_energy"] = energy
         effective["_auto_show_rhythm_mode"] = rhythm_mode
+        try:
+            preview_intensity_multiplier = float(
+                auto_show.get("preview_intensity_multiplier", 1.0)
+            )
+        except (TypeError, ValueError):
+            preview_intensity_multiplier = 1.0
+        effective["_preview_intensity_multiplier"] = max(
+            0.78, min(1.18, preview_intensity_multiplier)
+        )
+        if isinstance(dynamic_group_intent, dict):
+            # Alleen bestaand, begrensd dimmergedrag wordt geschaald. De
+            # downstream-fixture- en strobe-safety blijven authoritair.
+            group_intensity = clamp_unit(dynamic_group_intent.get("intensity", energy))
+            effective["_preview_intensity_multiplier"] = max(
+                0.78, min(1.18, effective["_preview_intensity_multiplier"] * (0.86 + group_intensity * 0.22))
+            )
         effective["_auto_show_audience_pan_focus_enabled"] = bool(
             auto_show.get("audience_pan_focus_enabled", True)
         )
@@ -14144,6 +15111,18 @@ class DmxController:
             effective["_auto_show_rhythm_mode"],
             osc,
         )
+        dynamic_pulse = dynamic_primitives.get("pulse") if isinstance(dynamic_primitives, dict) else None
+        if auto_show.get("dynamic_composition_applied") and dynamic_pulse in {
+            "none", "breathe", "lift", "hit", "soft_pulse", "strong_pulse",
+        }:
+            # De composer kiest een bestaande ritmeprimitive ná de legacy
+            # role-refinement; de basescène kan deze keuze dus niet terugzetten.
+            effective["_auto_show_rhythm_mode"] = dynamic_pulse
+
+        preview_test = auto_show.get("preview_pulse_test")
+        if isinstance(preview_test, dict) and preview_test.get("active"):
+            effective["_auto_show_rhythm_mode"] = preview_test["pattern"]
+            effective["beat_pulse_enabled"] = True
 
         base_rgbw = self._resolved_sync_rgbw(effective, osc)
         effective["_auto_show_rgbw"] = self._auto_show_rgbw_for_slot(
@@ -14272,6 +15251,16 @@ class DmxController:
             pulse_depth += 18 if role == "par" else 8
         elif rhythm_mode == "bloom":
             pulse_depth = round(pulse_depth * 0.22)
+        dynamic_pulse_parameters = effective.get("_dynamic_pulse_parameters")
+        if isinstance(dynamic_pulse_parameters, dict) and effective["beat_pulse_enabled"]:
+            try:
+                amount = max(.42, min(.88, float(dynamic_pulse_parameters.get("amount", .50))))
+                pulse_depth *= .76 + .48 * amount
+                if dynamic_pulse_parameters.get("participation") == "alternating" and \
+                        slot_context.get("group_alternate", slot_context["alternate"]) < 0:
+                    pulse_depth *= .84
+            except (TypeError, ValueError):
+                pass
         effective["beat_depth"] = clamp_dmx(pulse_depth)
         effective["beat_decay_ms"] = max(
             60,
@@ -14316,6 +15305,12 @@ class DmxController:
                     slot_context.get("group_centered", slot_context["centered"])
                 ) * 4
                 speed_base = speed_base + speed_adjust
+            dynamic_motion_parameters = effective.get("_dynamic_motion_parameters")
+            if isinstance(dynamic_motion_parameters, dict):
+                try:
+                    speed_base *= max(.82, min(1.16, float(dynamic_motion_parameters.get("speed_scale", 1.0))))
+                except (TypeError, ValueError):
+                    pass
             effective["pan_tilt_speed"] = clamp_dmx(round(speed_base))
             speed_cap = _full_tilt_motion_speed_cap(motion_profile, section)
             if speed_cap is not None:
@@ -14896,14 +15891,24 @@ class DmxController:
                 return _apply_audience_pan_focus_to_motion(motion, slot_context, config=config)
         motion_name = config.get("_auto_show_motion_name")
         if motion_name:
+            dynamic_parameters = config.get("_dynamic_motion_parameters")
+            phase_offset = 0.0
+            if isinstance(dynamic_parameters, dict):
+                try:
+                    phase_offset = max(-.34, min(.34, float(dynamic_parameters.get("phase_offset", 0.0))))
+                    phase_spread = max(.12, min(.54, float(dynamic_parameters.get("phase_spread", .12))))
+                    phase_offset += float((slot_context or {}).get("group_centered", 0.0)) * phase_spread
+                except (TypeError, ValueError):
+                    phase_offset = 0.0
             motion = styled_phrase_motion(
                 phrase,
-                beat_value,
+                (beat_value or 0.0) + phase_offset,
                 motion_name,
                 slot_context,
                 movement_scale,
                 config,
             )
+            motion = _apply_dynamic_motion_parameters(motion, config)
             motion = maybe_apply_member_mirror(
                 motion,
                 slot_context,
@@ -14965,7 +15970,7 @@ class DmxController:
                 config = self._clean_full_config(dict(self.config))
                 osc = self.osc.snapshot_for_render()
                 self._observe_active_playback_generation(osc)
-                auto_show, shadow_context = self._auto_show_evaluation(
+                baseline_auto_show, shadow_context = self._auto_show_evaluation(
                     osc, config["auto_show"]
                 )
                 if isinstance(self._show_intent_bounded_parity_pending, dict):
@@ -14977,6 +15982,14 @@ class DmxController:
                 self._observe_show_intent_shadow_frame(
                     osc, previous_shadow_track_identity
                 )
+                auto_show, candidate_auto_show, production_decision = self._select_production_auto_show(
+                    config, osc, baseline_auto_show
+                )
+                preview_auto_show, slot_previews, differential = self._preview_auto_show_frame(
+                    config, osc, render_now, baseline_auto_show,
+                    preview_auto_show=candidate_auto_show,
+                    production_decision=production_decision,
+                )
                 values = self._render_values(
                     render_now,
                     config=config,
@@ -14984,13 +15997,11 @@ class DmxController:
                     auto_show=auto_show,
                 )
                 self.current_auto_show = auto_show
+                self.current_preview_auto_show = preview_auto_show
+                self.rme_preview_differential = differential
+                self.production_show_decision = production_decision
                 self.current_values = values
-                self.current_slot_previews = self._build_slot_previews(
-                    config,
-                    osc,
-                    render_now,
-                    auto_show=auto_show,
-                )
+                self.current_slot_previews = slot_previews
                 self.render_frame_sequence += 1
                 self.last_rendered = render_now
                 developer_playback_state = self.osc.developer_playback_state()
@@ -15429,10 +16440,14 @@ def _live_ui_deck(raw, active_deck_number, active_transport=None):
         "bars_to_next": None if structure is None else structure["bars_to_next"],
         "structure_status": None if structure is None else structure["structure_status"],
         "structure_reason": None if structure is None else structure["structure_reason"],
+        "analysis_status": raw.get("analysis_status"),
+        "prewarm_status": raw.get("prewarm_status"),
+        "generation": raw.get("generation"),
+        "is_master": bool(raw.get("is_master")),
     }
 
 
-def live_ui_state(transport_state=None):
+def live_ui_state(transport_state=None, bridge_diagnostics=None):
     """Build the typed, read-only projection consumed by the native UI."""
     state = dict(transport_state or {})
     playback = dict(state.get("playback_state") or {})
@@ -15449,6 +16464,42 @@ def live_ui_state(transport_state=None):
     raw_decks = playback.get("decks")
     if not isinstance(raw_decks, list):
         raw_decks = []
+    # Read-only enrichment only: the active transport remains authoritative;
+    # bridge candidates merely make loaded non-master decks visible in the UI.
+    details = (bridge_diagnostics or {}).get("diagnostics") if isinstance(bridge_diagnostics, dict) else {}
+    details = details if isinstance(details, dict) else {}
+    prewarms = details.get("prewarmTracks") if isinstance(details.get("prewarmTracks"), list) else []
+    prewarm_by_identity = {
+        (item.get("deck"), item.get("filePath")): item
+        for item in prewarms if isinstance(item, dict)
+        and isinstance(item.get("deck"), int) and isinstance(item.get("filePath"), str)
+    }
+    by_deck = {item.get("deck_number"): dict(item) for item in raw_decks
+               if isinstance(item, dict) and isinstance(item.get("deck_number"), int)}
+    native = details.get("nativePlugin") if isinstance(details.get("nativePlugin"), dict) else {}
+    candidates = native.get("candidates") if isinstance(native.get("candidates"), list) else []
+    master_deck = (native.get("selectors") or {}).get("masterDeck") if isinstance(native.get("selectors"), dict) else None
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not isinstance(candidate.get("deck"), int):
+            continue
+        deck, path = candidate["deck"], candidate.get("filePath")
+        if not isinstance(path, str) or not path:
+            continue
+        prewarm = prewarm_by_identity.get((deck, path), {})
+        merged = dict(by_deck.get(deck) or {})
+        # Candidate path wins on replacement; only its matching prewarm record
+        # may decorate it, so an old ready track cannot remain displayed.
+        merged.update({
+            "deck_number": deck, "is_loaded": True, "track_path": path,
+            "file_name": Path(path).name, "title": Path(path).stem,
+            "is_playing": bool(candidate.get("playing")),
+            "prewarm_status": prewarm.get("status"),
+            "analysis_status": prewarm.get("status") or "loaded",
+            "generation": prewarm.get("generation"),
+            "is_master": deck == master_deck,
+        })
+        by_deck[deck] = merged
+    raw_decks = list(by_deck.values())
     rendered_decks = [
         deck for deck in (_live_ui_deck(raw, active_deck_number, active_transport) for raw in raw_decks)
         if deck is not None
@@ -15496,6 +16547,7 @@ def live_ui_state(transport_state=None):
 
 def full_state():
     osc_state = TRANSPORT.state()
+    bridge_diagnostics = SONG_ANALYZER_BRIDGE_DIAGNOSTICS.snapshot()
     return {
         "app": {"name": APP_NAME, "api_schema_version": API_SCHEMA_VERSION},
         "dmx": DMX.state(),
@@ -15505,9 +16557,144 @@ def full_state():
         "transport": TRANSPORT.transport_state(),
         "developer_playback": TRANSPORT.developer_playback_state(osc_state),
         "developer_structure_behavior": structure_behavior_state(osc_state),
-        "live_ui": live_ui_state(osc_state),
+        "live_ui": live_ui_state(osc_state, bridge_diagnostics),
         "debug": beatbeam_debug_state(osc_state),
     }
+
+
+def shadow_boundary_payload(boundary):
+    if boundary is None:
+        return None
+    return {
+        "recurrence_change": boundary.recurrence_change,
+        "structural_context_change": boundary.structural_context_change,
+        "membership_exit_strength": boundary.membership_exit_strength,
+        "repeated_section_end": boundary.repeated_section_end,
+        "structural_route": boundary.structural_route,
+        "structural_evidence": boundary.structural_evidence,
+        "structural_target_bar": boundary.structural_target_bar,
+        "energy_change": boundary.energy_change,
+        "onset_change": boundary.onset_change,
+        "silence_change": boundary.silence_change,
+        "energy_delta": boundary.energy_delta,
+        "onset_delta": boundary.onset_delta,
+        "silence_delta": boundary.silence_delta,
+    }
+
+
+def shadow_preparation_payload(profile):
+    if profile is None:
+        return None
+    return {"energy_trajectory": profile.energy_trajectory,
+            "exit_energy_direction": profile.exit_energy_direction,
+            "exit_onset_direction": profile.exit_onset_direction,
+            "exit_silence_direction": profile.exit_silence_direction,
+            "exit_structural_context": profile.exit_structural_context}
+
+
+def shadow_arrival_payload(profile):
+    if profile is None:
+        return None
+    return {"entry_contrast": profile.entry_contrast, "boundary_novelty": profile.boundary_novelty,
+            "energy_direction": profile.energy_direction, "onset_direction": profile.onset_direction,
+            "silence_direction": profile.silence_direction, "origin_relative_energy": profile.origin_relative_energy,
+            "destination_relative_energy": profile.destination_relative_energy}
+
+
+def shadow_structural_departure_payload(profile):
+    if profile is None:
+        return None
+    return {"structural_context_change": profile.structural_context_change,
+            "membership_exit_strength": profile.membership_exit_strength,
+            "repeated_section_end": profile.repeated_section_end, "recurrence_change": profile.recurrence_change,
+            "structural_route": profile.structural_route, "structural_evidence": profile.structural_evidence,
+            "structural_target_bar": profile.structural_target_bar}
+
+
+def shadow_structural_departure_aspect_payload(aspect):
+    if aspect is None:
+        return None
+    return {"origin_exit": shadow_structural_departure_payload(aspect.origin_exit),
+            "destination_entry": shadow_structural_departure_payload(aspect.destination_entry)}
+
+
+def shadow_arrangement_identity_aspect_payload(aspect):
+    if aspect is None:
+        return None
+    return {"recurrence_strength": aspect.recurrence_strength, "family_salience": aspect.family_salience,
+            "family_id": aspect.family_id, "has_earlier_family_occurrence": aspect.has_earlier_family_occurrence}
+
+
+def shadow_temporal_context_payload(context):
+    if context is None:
+        return None
+    return {"pre_boundary_normalized_rms": context.pre_boundary_normalized_rms,
+            "post_boundary_normalized_rms": context.post_boundary_normalized_rms,
+            "late_origin_relative_energy": context.late_origin_relative_energy,
+            "early_destination_relative_energy": context.early_destination_relative_energy,
+            "window": None if context.window is None else {"bars": [
+                {"relative_bar_offset": item.relative_bar_offset, "normalized_rms": item.normalized_rms,
+                 "relative_energy": item.relative_energy} for item in context.window]}}
+
+
+def shadow_section_character_at(shadow_analysis, position_seconds):
+    """Debug-only range lookup; this never participates in show decisions."""
+    if not isinstance(shadow_analysis, dict) or not isinstance(position_seconds, (int, float)) \
+            or isinstance(position_seconds, bool) or not math.isfinite(float(position_seconds)):
+        return None
+    sections = shadow_analysis.get("section_characters")
+    if not isinstance(sections, list):
+        return None
+    position = float(position_seconds)
+    for index, section in enumerate(sections):
+        if not isinstance(section, dict):
+            continue
+        start, end = section.get("start_seconds"), section.get("end_seconds")
+        if not isinstance(start, (int, float)) or isinstance(start, bool) or not isinstance(end, (int, float)) or isinstance(end, bool):
+            continue
+        if float(start) <= position < float(end) or (index == len(sections) - 1 and position == float(end)):
+            return dict(section)
+    return None
+
+
+def shadow_event_evidence_for_destination(shadow_analysis, destination_observation_id):
+    """Debug-only inbound lookup; this never participates in show decisions."""
+    if not isinstance(shadow_analysis, dict) or not isinstance(destination_observation_id, str):
+        return None
+    evidence = shadow_analysis.get("event_evidence")
+    if not isinstance(evidence, list):
+        return None
+    return next((item for item in evidence if isinstance(item, dict)
+                 and item.get("destination_observation_id") == destination_observation_id), None)
+
+
+def beat_pattern_classification(mode):
+    """Human-readable intentional rhythm class; never a scheduling decision."""
+    mode = str(mode or "").strip().lower()
+    if mode in {"strong_pulse", "beat_flash", "pulse", "gate", "lift"}:
+        return "EVERY_BEAT"
+    if mode in {"alternate_whole", "pair_hold"}:
+        return "HALF_TIME"
+    if mode in {"drop_blinder", "blackout_hit"}:
+        return "BAR_ACCENT"
+    if mode in {"offbeat_flash", "double_hit", "gallop", "tremolo", "chase", "chase_whole", "snake", "snake_whole", "stagger", "split", "ladder", "ripple", "pair_swap", "pair_bounce", "par_snake"}:
+        return "SUBDIVISION"
+    if mode in {"hit", "cut", "pivot", "breathe", "breathing", "soft_pulse", "low_glow", "medium", "fade_in", "fade_out", "ramp_up", "ramp_down", "full_on", "none"}:
+        return "INTENTIONALLY_SPARSE"
+    return "UNKNOWN"
+
+
+PREVIEW_PULSE_TESTS = {"OFF": None, "EVERY_BEAT": "strong_pulse", "HALF_TIME": "alternate_whole", "BAR_ACCENT": "drop_blinder"}
+
+
+def preview_pulse_test_state(mode, beat_value=None):
+    mode = str(mode or "OFF").upper()
+    pattern = PREVIEW_PULSE_TESTS.get(mode)
+    if pattern is None:
+        return {"mode": "OFF", "active": False, "pattern": None, "preview_only": True, "expected_pulse_this_beat": None}
+    index = int(math.floor(float(beat_value))) if isinstance(beat_value, (int, float)) else None
+    expected = True if mode == "EVERY_BEAT" else (index % 2 == 0 if mode == "HALF_TIME" and index is not None else index % 4 == 0 if index is not None else None)
+    return {"mode": mode, "active": True, "pattern": pattern, "preview_only": True, "expected_pulse_this_beat": expected}
 
 
 def beatbeam_debug_state(osc_state=None):
@@ -15518,7 +16705,7 @@ def beatbeam_debug_state(osc_state=None):
     position_age = None
     if isinstance(observed_at, int) and observed_at >= 0:
         position_age = max(0, int(time.time() * 1000) - observed_at)
-    projection = SONG_ANALYZER_STRUCTURE.project(state, include_rich_events=True)
+    projection = SONG_ANALYZER_STRUCTURE.project(state, include_shadow=True)
     behavior = structure_behavior_state(state)
     auto_show = (DMX.state().get("auto_show") or {})
     bridge = SONG_ANALYZER_BRIDGE_DIAGNOSTICS.snapshot()
@@ -15527,7 +16714,14 @@ def beatbeam_debug_state(osc_state=None):
     current_event = projection.get("current_event") or {}
     next_event = projection.get("next_event") or {}
     active = projection.get("active_track") or {}
+    shadow_analysis = projection.get("shadow_analysis")
+    shadow_current = shadow_section_character_at(shadow_analysis, state.get("time_seconds"))
+    shadow_event_evidence = shadow_event_evidence_for_destination(
+        shadow_analysis, shadow_current.get("observation_id") if isinstance(shadow_current, dict) else None)
     fallback = behavior.get("fallback_reason")
+    beat_position = live_transport.get("beat_position")
+    beat_phase = live_transport.get("beat_phase")
+    rhythm_mode = str(auto_show.get("rhythm_mode") or "full_on")
     return {
         "virtualdj": {
             "transport_source": state.get("_active_playback_source"),
@@ -15538,6 +16732,19 @@ def beatbeam_debug_state(osc_state=None):
             "position_age_milliseconds": position_age,
             "transport_state": playback.get("transport_state"),
             "bridge_status": bridge.get("status"),
+        },
+        "beat": {
+            "source": "virtualdj_get_beatpos_extrapolated" if state.get("_active_playback_source") == "virtualdj" else "legacy",
+            "bpm": live_transport.get("bpm"),
+            "beat_position": beat_position,
+            "beat_phase": beat_phase,
+            "beat_number": live_transport.get("beat_number"),
+            "bar_number": live_transport.get("bar_number"),
+            "source_age_milliseconds": position_age,
+            "transport_state": playback.get("transport_state"),
+            "render_phase_locked": isinstance(beat_phase, (int, float)) and playback.get("availability") == "available",
+            "pattern": rhythm_mode,
+            "pattern_classification": beat_pattern_classification(rhythm_mode),
         },
         "active_track": active or None,
         "analysis": {
@@ -15551,15 +16758,18 @@ def beatbeam_debug_state(osc_state=None):
             "current_event": current_event or None,
             "next_event": next_event or None,
             "energy_modifier": auto_show.get("song_analyzer_energy_modifier"),
+            "shadow_section_character": shadow_current,
+            "shadow_event_evidence": shadow_event_evidence,
         },
         "handoff": {
             "track_match": projection.get("track_match"),
             "availability": projection.get("availability"),
             "rich_analysis": projection.get("rich_analysis"),
-            "rich_musical_events": projection.get("rich_musical_events"),
             "fallback_reason": fallback,
             "effective_source": behavior.get("effective_source"),
             "selected_source": behavior.get("selected_source"),
+            "shadow_analysis": shadow_analysis,
+            "rich_musical_events": projection.get("rich_musical_events"),
         },
         "bridge_diagnostics": bridge,
     }
@@ -15754,6 +16964,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 TRANSPORT.update_config({"structure_behavior_source": source})
                 self.send_json(structure_behavior_state())
                 return
+            if path == "/api/developer/force-reanalyze-active-track":
+                self.send_json(force_reanalyze_active_song_analyzer_track())
+                return
             if path == "/api/developer/virtualdj-beat-pulse/start":
                 self.send_json(DMX.start_virtualdj_beat_pulse_test(payload))
                 return
@@ -15765,6 +16978,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/developer/virtualdj-beat-pulse-preview/stop":
                 self.send_json(DMX.stop_virtualdj_beat_pulse_preview_test())
+                return
+            if path == "/api/developer/preview-pulse-test":
+                DMX.set_preview_pulse_test(payload.get("mode"))
+                self.send_json(full_state())
                 return
             if path == "/api/show-intent-observation/start":
                 DMX.start_show_intent_observation()

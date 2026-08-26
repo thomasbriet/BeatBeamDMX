@@ -182,6 +182,38 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
         self.assertFalse(live["decks"][0]["is_loaded"])
         self.assertTrue(live["decks"][1]["is_active"])
 
+    def test_live_ui_enriches_nonactive_prewarm_without_changing_authority(self):
+        state = {
+            "_active_playback_source": "virtualdj",
+            "playback_state": {"source": "virtualdj", "availability": "available", "transport_state": "advancing",
+                "beatbeam": {"track_path": "/Music/A.flac", "estimated_position_milliseconds": 1000,
+                             "bpm": 120.0, "beat_position": 2.0, "beat_number": 2, "bar_number": 1, "deck_number": 1},
+                "decks": [{"deck_number": 1, "is_loaded": True, "track_path": "/Music/A.flac", "title": "A",
+                           "artist": None, "bpm": 120.0, "position_milliseconds": 1000, "beat_number": 2,
+                           "bar_number": 1, "is_playing": True}], "metrics": {}},
+        }
+        bridge = {"diagnostics": {"nativePlugin": {"selectors": {"masterDeck": 1}, "candidates": [
+            {"deck": 2, "filePath": "/Music/X.flac", "playing": False},
+        ]}, "prewarmTracks": [{"deck": 2, "filePath": "/Music/X.flac", "status": "ready", "generation": 22}]}}
+        live = live_ui_state(state, bridge)
+        deck_two = next(deck for deck in live["decks"] if deck["deck_number"] == 2)
+        self.assertEqual((1, "/Music/A.flac"), (live["active_deck_number"], live["track_path"]))
+        self.assertEqual((True, "X", "ready", 22, False),
+                         (deck_two["is_loaded"], deck_two["track_title"], deck_two["prewarm_status"], deck_two["generation"], deck_two["is_active"]))
+
+    def test_live_ui_candidate_replacement_does_not_retain_old_prewarm(self):
+        state = {"_active_playback_source": "virtualdj", "playback_state": {"source": "virtualdj", "availability": "available",
+                 "transport_state": "advancing", "beatbeam": {"track_path": "/Music/A.flac", "deck_number": 1}, "decks": [], "metrics": {}}}
+        bridge = {"diagnostics": {"nativePlugin": {"selectors": {"masterDeck": 1}, "candidates": [
+            {"deck": 2, "filePath": "/Music/Y.flac", "playing": False},
+        ]}, "prewarmTracks": [
+            {"deck": 2, "filePath": "/Music/X.flac", "status": "ready", "generation": 22},
+            {"deck": 2, "filePath": "/Music/Y.flac", "status": "pending", "generation": 23},
+        ]}}
+        deck_two = next(deck for deck in live_ui_state(state, bridge)["decks"] if deck["deck_number"] == 2)
+        self.assertEqual(("/Music/Y.flac", "pending", 23),
+                         (deck_two["track_path"], deck_two["prewarm_status"], deck_two["generation"]))
+
     def test_bridge_transport_snapshot_projects_existing_playback_contract(self):
         parsed = BridgePlaybackStateSource._parse_transport({
             "sequence": 4,
@@ -405,6 +437,29 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
         self.assertEqual(1, state["beatbeam"]["beat_number"])
         self.assertEqual(10, state["beatbeam"]["bar_number"])
         self.assertEqual(0.0, state["beatbeam"]["beat_phase"])
+
+    def test_phase_clock_represents_each_current_beat_after_skipped_source_update(self):
+        self.source.snapshot = snapshot(1, beat_position=8.05, beat_number=1, bar_number=3, bpm=128.0)
+        self.clock.state(now=0.0)
+        # The next source sample has skipped N+1. The extrapolated phase is
+        # still evaluated from current phase, never from a lost edge event.
+        self.source.snapshot = snapshot(2, beat_position=10.35, beat_number=3, bar_number=3, bpm=128.0)
+        state = self.clock.state(now=.01)
+        self.assertEqual(3, state["beatbeam"]["beat_number"])
+        self.assertAlmostEqual(.35, state["beatbeam"]["beat_phase"], places=2)
+
+    def test_phase_clock_preserves_current_phase_at_supported_tempos_after_n_to_n_plus_2(self):
+        for bpm in (90.0, 128.0, 130.0, 175.0):
+            source = SequenceSource()
+            clock = PlaybackClock(source, grace_seconds=1.0)
+            source.snapshot = snapshot(1, bpm=bpm, beat_position=8.05, beat_number=1, bar_number=3)
+            clock.state(now=0.0)
+            # The receiver may not observe N+1; rendering remains a function
+            # of the current authoritative phase, not a consumed edge.
+            source.snapshot = snapshot(2, bpm=bpm, beat_position=10.35, beat_number=3, bar_number=3)
+            state = clock.state(now=.01)
+            self.assertEqual(3, state["beatbeam"]["beat_number"], bpm)
+            self.assertAlmostEqual(.35, state["beatbeam"]["beat_phase"], places=2, msg=str(bpm))
 
     def test_small_timing_error_is_not_a_discontinuity(self):
         self.publish(snapshot(1, position=1000, timing=timing(0)), 0.050)

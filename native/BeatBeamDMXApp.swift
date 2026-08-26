@@ -418,6 +418,7 @@ struct DebugActiveTrack: Decodable {
     let generation: Int
     let activatedAtUnixMilliseconds: Int?
     let lastFailure: DebugFailure?
+    let forceStatus: String?
 
     private enum CodingKeys: String, CodingKey {
         case canonicalPath
@@ -427,6 +428,7 @@ struct DebugActiveTrack: Decodable {
         case generation
         case activatedAtUnixMilliseconds
         case lastFailure
+        case forceStatus
     }
 
     init(from decoder: Decoder) throws {
@@ -438,6 +440,7 @@ struct DebugActiveTrack: Decodable {
         generation = try container.decode(Int.self, forKey: .generation)
         activatedAtUnixMilliseconds = try container.decodeIfPresent(Int.self, forKey: .activatedAtUnixMilliseconds)
         lastFailure = try container.decodeIfPresent(DebugFailure.self, forKey: .lastFailure)
+        forceStatus = try container.decodeIfPresent(String.self, forKey: .forceStatus)
     }
 }
 struct DebugFailure: Decodable {
@@ -455,11 +458,71 @@ struct DebugAnalysisState: Decodable {
     let currentEvent: DebugRichEvent?
     let nextEvent: DebugRichEvent?
     let energyModifier: Double?
+    let shadowSectionCharacter: DebugShadowSectionCharacter?
+    let shadowEventEvidence: DebugShadowEventEvidence?
 }
 struct DebugSegment: Decodable { let index: Int?; let label: String?; let startSeconds: Double?; let endSeconds: Double?; let confidence: Double? }
 struct DebugRichSegment: Decodable { let index: Int?; let label: String?; let level: String?; let energy: Double?; let confidence: Double? }
 struct DebugRichEvent: Decodable { let type: String?; let confidence: Double?; let startSeconds: Double?; let targetSeconds: Double?; let startBar: Int?; let targetBar: Int?; let barsToNext: Int? }
-struct DebugHandoffState: Decodable { let trackMatch: String?; let availability: String?; let richAnalysis: DebugRichAnalysis?; let fallbackReason: String?; let effectiveSource: String?; let selectedSource: String? }
+struct DebugShadowSectionCharacter: Decodable {
+    let observationId: String?; let startSeconds: Double?; let endSeconds: Double?; let startBar: Int?; let endBar: Int?
+    let barCount: Int?
+    let relativeEnergy: Double?; let energyRise: Double?
+    let recurrenceStrength: Double?; let familySalience: Double?; let entryContrast: Double?; let exitContrast: Double?
+    let buildMomentum: Double?; let boundaryNovelty: Double?
+    let entryBoundary: DebugShadowBoundaryEvidence?; let exitBoundary: DebugShadowBoundaryEvidence?
+    let preparationProfile: DebugPreparationProfile?; let arrivalProfile: DebugArrivalProfile?
+    let entryStructuralDeparture: DebugStructuralDepartureProfile?; let exitStructuralDeparture: DebugStructuralDepartureProfile?
+}
+struct DebugPreparationProfile: Decodable {
+    let energyTrajectory: Double?; let exitEnergyDirection: Double?; let exitOnsetDirection: Double?
+    let exitSilenceDirection: Double?; let exitStructuralContext: Double?
+}
+struct DebugArrivalProfile: Decodable {
+    let entryContrast: Double?; let boundaryNovelty: Double?; let energyDirection: Double?
+    let onsetDirection: Double?; let silenceDirection: Double?; let originRelativeEnergy: Double?
+    let destinationRelativeEnergy: Double?
+}
+struct DebugStructuralDepartureProfile: Decodable {
+    let structuralContextChange: Double?; let membershipExitStrength: Double?; let repeatedSectionEnd: Double?
+    let recurrenceChange: Double?; let structuralRoute: String?; let structuralEvidence: Double?; let structuralTargetBar: Int?
+}
+struct DebugShadowStructuralDepartureAspect: Decodable {
+    let originExit: DebugStructuralDepartureProfile?; let destinationEntry: DebugStructuralDepartureProfile?
+}
+struct DebugShadowArrangementIdentityAspect: Decodable {
+    let recurrenceStrength: Double?; let familySalience: Double?; let familyId: String?; let hasEarlierFamilyOccurrence: Bool?
+}
+struct DebugBoundaryTemporalContext: Decodable {
+    let preBoundaryNormalizedRms: Double?; let postBoundaryNormalizedRms: Double?
+    let lateOriginRelativeEnergy: Double?; let earlyDestinationRelativeEnergy: Double?
+    let window: DebugBoundaryTemporalWindow?
+}
+struct DebugBoundaryTemporalWindow: Decodable { let bars: [DebugBoundaryTemporalBar]? }
+struct DebugBoundaryTemporalBar: Decodable { let relativeBarOffset: Int?; let normalizedRms: Double?; let relativeEnergy: Double? }
+struct DebugShadowEventEvidence: Decodable {
+    let originObservationId: String?; let destinationObservationId: String?
+    let boundarySeconds: Double?; let boundaryBar: Int?
+    let preparationAspect: DebugPreparationProfile?; let arrivalAspect: DebugArrivalProfile?
+    let structuralDepartureAspect: DebugShadowStructuralDepartureAspect?
+    let arrangementIdentityAspect: DebugShadowArrangementIdentityAspect?
+    let destinationIsTerminal: Bool?
+    let hypotheses: [DebugShadowEventHypothesis]?
+    let temporalContext: DebugBoundaryTemporalContext?
+}
+struct DebugShadowEventHypothesis: Decodable {
+    let kind: String?; let anchorKind: String?; let startSeconds: Double?; let targetSeconds: Double?; let endSeconds: Double?
+    let supportingEvidence: [String]?; let conflictingEvidence: [String]?
+}
+struct DebugShadowBoundaryEvidence: Decodable {
+    let recurrenceChange: Double?; let structuralContextChange: Double?; let membershipExitStrength: Double?
+    let repeatedSectionEnd: Double?; let structuralRoute: String?; let structuralEvidence: Double?; let structuralTargetBar: Int?
+    let energyChange: Double?; let onsetChange: Double?; let silenceChange: Double?
+    let energyDelta: Double?; let onsetDelta: Double?; let silenceDelta: Double?
+}
+struct DebugHandoffState: Decodable { let trackMatch: String?; let availability: String?; let richAnalysis: DebugRichAnalysis?; let shadowAnalysis: DebugShadowAnalysis?; let fallbackReason: String?; let effectiveSource: String?; let selectedSource: String? }
+struct DebugShadowAnalysis: Decodable { let model: String?; let sectionCharacters: [DebugShadowSectionCharacter]?; let eventEvidence: [DebugShadowEventEvidence]? }
+struct DebugForceReanalysisResponse: Decodable { let status: String?; let jobId: String?; let filePath: String? }
 struct DebugRichAnalysis: Decodable {
     let model: String?
     let energyScale: String?
@@ -502,6 +565,7 @@ struct DebugNativePlugin: Decodable {
 }
 struct DebugNativePoller: Decodable { let alive: Bool?; let pollCounter: Int?; let lastPollUnixMilliseconds: Int? }
 struct DebugNativeSelectors: Decodable {
+    let masterDeckQuerySucceeded: Bool?; let masterDeckRaw: Double?; let masterDeck: Int?; let masterDeckObservedUnixMilliseconds: Int?
     let pluginDeckQuerySucceeded: Bool?; let pluginDeckRaw: Double?; let pluginDeck: Int?
     let leftDeckQuerySucceeded: Bool?; let leftDeckRaw: Double?; let leftDeck: Int?
     let rightDeckQuerySucceeded: Bool?; let rightDeckRaw: Double?; let rightDeck: Int?
@@ -511,10 +575,10 @@ struct DebugNativeCandidate: Decodable {
     let filePathQuerySucceeded: Bool?; let filePath: String?; let filePathExists: Bool?; let relevant: Bool?
 }
 struct DebugNativeSelection: Decodable {
-    let previousSelectedDeck: Int?; let selectedDeck: Int?; let selectedFilePath: String?; let reason: String?; let noSelectionReason: String?
+    let previousSelectedDeck: Int?; let selectedDeck: Int?; let selectedFilePath: String?; let reason: String?; let noSelectionReason: String?; let authoritativeSelectionUnixMilliseconds: Int?
 }
 struct DebugNativeIpc: Decodable {
-    let lastAction: String?; let lastDeck: Int?; let lastFilePath: String?; let lastSendSucceeded: Bool?; let lastError: String?; let lastSentUnixMilliseconds: Int?
+    let lastAction: String?; let lastDeck: Int?; let lastFilePath: String?; let lastSendSucceeded: Bool?; let lastError: String?; let lastSentUnixMilliseconds: Int?; let activateEmittedUnixMilliseconds: Int?
 }
 struct DebugNativeResponse: Decodable { let received: Bool?; let valid: Bool?; let success: Bool?; let accepted: Bool?; let status: String?; let errorCode: String?; let errorMessage: String?; let jobId: String? }
 struct DebugNativeRecovery: Decodable { let bridgeHealth: String?; let resyncPending: Bool? }
@@ -572,6 +636,10 @@ struct LiveDeckState: Decodable {
     let barsToNext: Int?
     let structureStatus: String?
     let structureReason: String?
+    let analysisStatus: String?
+    let prewarmStatus: String?
+    let generation: Int?
+    let isMaster: Bool?
 }
 
 struct RemoteAccessState: Decodable {
@@ -604,6 +672,8 @@ struct DmxState: Decodable {
     let conflicts: [ChannelConflict]
     let values: [String: Int]
     let developerVirtualdjBeatPulsePreview: VirtualDjBeatPulsePreviewState?
+    let rmePreviewDifferential: PreviewCompositionState?
+    let previewPulseTest: PreviewPulseTestState?
 
     private enum CodingKeys: String, CodingKey {
         case connected
@@ -622,6 +692,8 @@ struct DmxState: Decodable {
         case conflicts
         case values
         case developerVirtualdjBeatPulsePreview
+        case rmePreviewDifferential
+        case previewPulseTest
     }
 
     init(from decoder: Decoder) throws {
@@ -645,7 +717,103 @@ struct DmxState: Decodable {
             VirtualDjBeatPulsePreviewState.self,
             forKey: .developerVirtualdjBeatPulsePreview
         )
+        rmePreviewDifferential = try container.decodeIfPresent(
+            PreviewCompositionState.self,
+            forKey: .rmePreviewDifferential
+        )
+        previewPulseTest = try container.decodeIfPresent(PreviewPulseTestState.self, forKey: .previewPulseTest)
     }
+}
+
+struct PreviewPulseTestState: Decodable { let mode: String; let active: Bool; let pattern: String? }
+
+struct PreviewCompositionEvent: Decodable {
+    let type: String?
+}
+
+struct PreviewFixtureGroupIntent: Decodable {
+    let activity: Double?
+    let intensity: Double?
+    let movementAmount: Double?
+    let movementSpeed: Double?
+    let colorChangeRate: Double?
+    let paletteRole: String?
+    let pulseAmount: Double?
+    let accentStrength: Double?
+}
+
+struct PreviewContinuousMusicalState: Decodable {
+    let sectionProgress: Double?
+    let relativeEnergy: Double?
+    let energyTrajectory: Double?
+    let recurrenceStrength: Double?
+    let familySalience: Double?
+}
+
+struct PreviewMusicalEventEnvelope: Decodable {
+    let eventType: String?
+    let phase: String?
+    let progress: Double?
+    let beatsSinceEvent: Double?
+    let totalBeats: Double?
+    let timingSource: String?
+    let active: Bool?
+}
+
+/// Preview primitives deliberately evolve independently from the native UI.
+/// An unknown nested debug value must never make the complete live state fail.
+enum PreviewPrimitiveValue: Decodable {
+    case string(String)
+    case number(Double)
+    case boolean(Bool)
+    case object([String: PreviewPrimitiveValue])
+    case array([PreviewPrimitiveValue])
+    case null
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { self = .null }
+        else if let value = try? container.decode(String.self) { self = .string(value) }
+        else if let value = try? container.decode(Bool.self) { self = .boolean(value) }
+        else if let value = try? container.decode(Double.self) { self = .number(value) }
+        else if let value = try? container.decode([String: PreviewPrimitiveValue].self) { self = .object(value) }
+        else if let value = try? container.decode([PreviewPrimitiveValue].self) { self = .array(value) }
+        else { self = .null }
+    }
+
+    var displayText: String? {
+        switch self {
+        case .string(let value): return value
+        case .number(let value): return String(format: "%.3g", value)
+        case .boolean(let value): return value ? "true" : "false"
+        case .object(let values): return "parameters (\(values.count))"
+        case .array(let values): return "values (\(values.count))"
+        case .null: return nil
+        }
+    }
+}
+
+struct PreviewCompositionState: Decodable {
+    let mode: String?
+    let productionSource: String?
+    let previewSource: String?
+    let dynamicComposerActive: Bool?
+    let fallbackToBaseline: Bool?
+    let dynamicCompositionApplied: Bool?
+    let baselineSceneReused: Bool?
+    let baselineSceneComponentsReused: [String]?
+    let contextReason: String?
+    let continuousStateReason: String?
+    let continuousMusicalState: PreviewContinuousMusicalState?
+    let eventEnvelopeReason: String?
+    let eventEnvelope: PreviewMusicalEventEnvelope?
+    let event: PreviewCompositionEvent?
+    let interpretation: String?
+    let progress: Double?
+    let previewCue: String?
+    let fixtureGroupIntents: [String: PreviewFixtureGroupIntent]?
+    let selectedPrimitives: [String: [String: PreviewPrimitiveValue]]?
+    let changedDimensions: [String]?
 }
 
 struct VirtualDjBeatPulsePreviewState: Decodable {
@@ -963,6 +1131,7 @@ struct AutoShowState: Decodable {
     let available: Bool
     let style: String
     let styleLabel: String
+    let previewRmeMode: String
     let audiencePanFocusEnabled: Bool
     let audiencePanMin: Int
     let audiencePanMax: Int
@@ -973,6 +1142,7 @@ struct AutoShowState: Decodable {
     let phraseBucket: String
     let colorSource: String
     let energy: Double
+    let liveIntensity: LiveIntensityState?
     let movement: Double
     let beatPulse: Bool
     let strobeWindow: Bool
@@ -1001,6 +1171,7 @@ struct AutoShowState: Decodable {
         case available
         case style
         case styleLabel
+        case previewRmeMode
         case audiencePanFocusEnabled
         case audiencePanMin
         case audiencePanMax
@@ -1011,6 +1182,7 @@ struct AutoShowState: Decodable {
         case phraseBucket
         case colorSource
         case energy
+        case liveIntensity
         case movement
         case beatPulse
         case strobeWindow
@@ -1040,6 +1212,7 @@ struct AutoShowState: Decodable {
         available: false,
         style: "adaptive",
         styleLabel: "Adaptive",
+        previewRmeMode: "BASELINE",
         audiencePanFocusEnabled: true,
         audiencePanMin: 135,
         audiencePanMax: 205,
@@ -1050,6 +1223,7 @@ struct AutoShowState: Decodable {
         phraseBucket: "unknown",
         colorSource: "manual",
         energy: 0,
+        liveIntensity: nil,
         movement: 0,
         beatPulse: false,
         strobeWindow: false,
@@ -1079,6 +1253,7 @@ struct AutoShowState: Decodable {
         available: Bool,
         style: String,
         styleLabel: String,
+        previewRmeMode: String,
         audiencePanFocusEnabled: Bool,
         audiencePanMin: Int,
         audiencePanMax: Int,
@@ -1089,6 +1264,7 @@ struct AutoShowState: Decodable {
         phraseBucket: String,
         colorSource: String,
         energy: Double,
+        liveIntensity: LiveIntensityState? = nil,
         movement: Double,
         beatPulse: Bool,
         strobeWindow: Bool,
@@ -1116,6 +1292,7 @@ struct AutoShowState: Decodable {
         self.available = available
         self.style = style
         self.styleLabel = styleLabel
+        self.previewRmeMode = previewRmeMode
         self.audiencePanFocusEnabled = audiencePanFocusEnabled
         self.audiencePanMin = audiencePanMin
         self.audiencePanMax = audiencePanMax
@@ -1126,6 +1303,7 @@ struct AutoShowState: Decodable {
         self.phraseBucket = phraseBucket
         self.colorSource = colorSource
         self.energy = energy
+        self.liveIntensity = liveIntensity
         self.movement = movement
         self.beatPulse = beatPulse
         self.strobeWindow = strobeWindow
@@ -1162,6 +1340,7 @@ struct AutoShowState: Decodable {
             available: try container.decodeIfPresent(Bool.self, forKey: .available) ?? fallback.available,
             style: try container.decodeIfPresent(String.self, forKey: .style) ?? fallback.style,
             styleLabel: try container.decodeIfPresent(String.self, forKey: .styleLabel) ?? fallback.styleLabel,
+            previewRmeMode: try container.decodeIfPresent(String.self, forKey: .previewRmeMode) ?? fallback.previewRmeMode,
             audiencePanFocusEnabled: try container.decodeIfPresent(Bool.self, forKey: .audiencePanFocusEnabled) ?? fallback.audiencePanFocusEnabled,
             audiencePanMin: audiencePanMin,
             audiencePanMax: audiencePanMax,
@@ -1172,6 +1351,7 @@ struct AutoShowState: Decodable {
             phraseBucket: try container.decodeIfPresent(String.self, forKey: .phraseBucket) ?? fallback.phraseBucket,
             colorSource: try container.decodeIfPresent(String.self, forKey: .colorSource) ?? fallback.colorSource,
             energy: try container.decodeIfPresent(Double.self, forKey: .energy) ?? fallback.energy,
+            liveIntensity: try container.decodeIfPresent(LiveIntensityState.self, forKey: .liveIntensity),
             movement: try container.decodeIfPresent(Double.self, forKey: .movement) ?? fallback.movement,
             beatPulse: try container.decodeIfPresent(Bool.self, forKey: .beatPulse) ?? fallback.beatPulse,
             strobeWindow: try container.decodeIfPresent(Bool.self, forKey: .strobeWindow) ?? fallback.strobeWindow,
@@ -1196,6 +1376,20 @@ struct AutoShowState: Decodable {
             oneShotProgress: try container.decodeIfPresent(Double.self, forKey: .oneShotProgress) ?? fallback.oneShotProgress
         )
     }
+}
+
+struct LiveIntensityState: Decodable {
+    let analyzedIntensity: Double?
+    let rawSourceLevel: Double?
+    let liveIntensity: Double?
+    let effectiveIntensity: Double?
+    let liveModifier: Double?
+    let sourceAgeMilliseconds: Double?
+    let sourceDeck: Int?
+    let sourceGeneration: Int?
+    let sourceKind: String?
+    let sourceValid: Bool?
+    let fallbackReason: String?
 }
 
 struct WaveformBandsState: Decodable {
@@ -1995,6 +2189,7 @@ struct StructureBehaviorUpdateResponse: Decodable {
 struct AutoShowUpdateBody: Encodable {
     let enabled: Bool
     let style: String
+    let previewRmeMode: String
     let audiencePanFocusEnabled: Bool
     let audiencePanMin: Int
     let audiencePanMax: Int
@@ -2456,6 +2651,9 @@ final class AppModel: ObservableObject {
     @Published var autoShowAvailable = false
     @Published var autoShowStyle = "adaptive"
     @Published var autoShowStyleLabel = "Adaptive"
+    @Published var previewRmeMode = "BASELINE"
+    @Published var previewPulseTestMode = "OFF"
+    @Published var previewComposition: PreviewCompositionState?
     @Published var autoShowCueText = "Auto Show uit"
     @Published var autoShowDetailText = "Zet Auto Show aan om phrase- en beat-gestuurde output te laten spelen."
     @Published var autoShowAudiencePanFocusEnabled = true
@@ -2559,6 +2757,10 @@ final class AppModel: ObservableObject {
 
     func refreshDebugState() {
         Task { try? await refreshState() }
+    }
+
+    func forceReanalyzeActiveTrack() async throws -> DebugForceReanalysisResponse {
+        try await post("/api/developer/force-reanalyze-active-track", body: EmptyRequest(), as: DebugForceReanalysisResponse.self)
     }
 
     func copyRemoteURL() {
@@ -2937,6 +3139,26 @@ final class AppModel: ObservableObject {
         let request = currentAutoShowUpdateBody(enabled: autoShowEnabled, style: style)
         setPendingAutoShowRequest(request)
         postAutoShow(request)
+    }
+
+    func setPreviewRmeMode(_ mode: String) {
+        let normalized = ["RME_ENHANCED", "DYNAMIC_COMPOSER"].contains(mode) ? mode : "BASELINE"
+        if normalized == previewRmeMode { return }
+        beginLocalMutationHold(seconds: 1.2)
+        previewRmeMode = normalized
+        let request = currentAutoShowUpdateBody()
+        setPendingAutoShowRequest(request)
+        postAutoShow(request)
+    }
+
+    func setPreviewPulseTestMode(_ mode: String) {
+        let normalized = ["EVERY_BEAT", "HALF_TIME", "BAR_ACCENT"].contains(mode) ? mode : "OFF"
+        Task {
+            do {
+                let state: AppState = try await post("/api/developer/preview-pulse-test", body: ["mode": normalized], as: AppState.self)
+                apply(state, source: .action)
+            } catch { errorText = "Pulse Test wijzigen mislukt: \(error.localizedDescription)" }
+        }
     }
 
     func setAutoShowAudiencePanFocusEnabled(_ enabled: Bool) {
@@ -3782,6 +4004,7 @@ final class AppModel: ObservableObject {
         AutoShowUpdateBody(
             enabled: enabled ?? autoShowEnabled,
             style: style ?? autoShowStyle,
+            previewRmeMode: previewRmeMode,
             audiencePanFocusEnabled: autoShowAudiencePanFocusEnabled,
             audiencePanMin: autoShowAudiencePanMin,
             audiencePanMax: autoShowAudiencePanMax,
@@ -3812,6 +4035,7 @@ final class AppModel: ObservableObject {
         let matches =
             remote.enabled == pending.enabled &&
             remote.style == pending.style &&
+            remote.previewRmeMode == pending.previewRmeMode &&
             remote.audiencePanFocusEnabled == pending.audiencePanFocusEnabled &&
             remote.audiencePanMin == pending.audiencePanMin &&
             remote.audiencePanMax == pending.audiencePanMax &&
@@ -4018,6 +4242,8 @@ final class AppModel: ObservableObject {
         structureBehaviorSource = state.developerStructureBehavior?.selectedSource == "song_analyzer"
             ? "song_analyzer" : "legacy"
         slotPreviews = state.dmx.slotPreviews
+        previewComposition = state.dmx.rmePreviewDifferential
+        previewPulseTestMode = state.dmx.previewPulseTest?.mode ?? "OFF"
         dmxSlotOrder = state.dmx.slotOrder
         dmxSlotRanges = state.dmx.slotRanges
         dmxValues = Dictionary(uniqueKeysWithValues: state.dmx.values.compactMap { key, value in
@@ -4037,6 +4263,7 @@ final class AppModel: ObservableObject {
             autoShowAvailable = state.dmx.autoShow.available
             autoShowStyle = state.dmx.autoShow.style
             autoShowStyleLabel = state.dmx.autoShow.styleLabel
+            previewRmeMode = state.dmx.autoShow.previewRmeMode
             autoShowCueText = state.dmx.autoShow.cueLabel
             autoShowAudiencePanFocusEnabled = state.dmx.autoShow.audiencePanFocusEnabled
             autoShowAudiencePanMin = state.dmx.autoShow.audiencePanMin
@@ -4064,7 +4291,28 @@ final class AppModel: ObservableObject {
             let panFocusText = state.dmx.autoShow.audiencePanFocusEnabled
                 ? "front \(state.dmx.autoShow.audiencePanMin)-\(state.dmx.autoShow.audiencePanMax) • turn \(state.dmx.autoShow.audienceTurnPanMin)-\(state.dmx.autoShow.audienceTurnPanMax) • split \(state.dmx.autoShow.audienceTiltSplit)"
                 : "pan free"
-            autoShowDetailText = "Source \(state.dmx.autoShow.colorSource) • energy \(Int((state.dmx.autoShow.energy * 100).rounded()))% • move \(Int((state.dmx.autoShow.movement * 100).rounded()))% • beat \(state.dmx.autoShow.beatPulse ? "on" : "off") • \(panFocusText) • override \(overrideText)"
+            let intensity = state.dmx.autoShow.liveIntensity
+            let analyzedPercent = Int(((intensity?.analyzedIntensity ?? state.dmx.autoShow.energy) * 100).rounded())
+            let liveIntensityText: String
+            if intensity?.sourceValid == true {
+                let rawPercent = Int(((intensity?.rawSourceLevel ?? 0) * 100).rounded())
+                let livePercent = Int(((intensity?.liveIntensity ?? 0) * 100).rounded())
+                let effectivePercent = Int(((intensity?.effectiveIntensity ?? state.dmx.autoShow.energy) * 100).rounded())
+                let modifierPercent = Int(((intensity?.liveModifier ?? 0) * 100).rounded())
+                let modifier = String(format: "%+d%%", modifierPercent)
+                let deck = intensity?.sourceDeck.map { "Deck \($0)" } ?? "Deck —"
+                let age = intensity?.sourceAgeMilliseconds.map { "age \(Int($0.rounded())) ms" } ?? "age —"
+                liveIntensityText = "Analyzed \(analyzedPercent)% • Raw \(rawPercent)% • Live \(livePercent)% • Modifier \(modifier) • Effective \(effectivePercent)% • \(deck) • \(age)"
+            } else {
+                let reason = intensity?.fallbackReason ?? "missing"
+                let raw = intensity?.rawSourceLevel.map { "Raw \(Int(($0 * 100).rounded()))%" }
+                let deck = intensity?.sourceDeck.map { "Deck \($0)" }
+                let age = intensity?.sourceAgeMilliseconds.map { "age \(Int($0.rounded())) ms" }
+                let source = [raw, deck, age].compactMap { $0 }.joined(separator: " • ")
+                liveIntensityText = "Analyzed \(analyzedPercent)% • Live fallback (\(reason))" +
+                    (source.isEmpty ? "" : " • \(source)")
+            }
+            autoShowDetailText = "Source \(state.dmx.autoShow.colorSource) • energy \(Int((state.dmx.autoShow.energy * 100).rounded()))% • \(liveIntensityText) • move \(Int((state.dmx.autoShow.movement * 100).rounded()))% • beat \(state.dmx.autoShow.beatPulse ? "on" : "off") • \(panFocusText) • override \(overrideText)"
         }
         if autoShowEnabled {
             activeLivePreset = nil
@@ -4145,7 +4393,8 @@ final class AppModel: ObservableObject {
                 let beat = deck.beatNumber.map(String.init) ?? "Beat -"
                 let bar = deck.barNumber.map { "Bar \($0)" } ?? "Bar -"
                 let phrase = normalizedDisplay(deck.phrase, fallback: "Phrase -")
-                return "\(artist) • \(bpm) · \(beat) · \(bar)\n\(phrase)"
+                let status = normalizedDisplay(deck.prewarmStatus ?? deck.analysisStatus, fallback: "Loaded")
+                return "\(artist) • \(bpm) · \(beat) · \(bar)\n\(phrase) · \(status)"
             }
 
             let liveDeck1 = liveUi.decks?.first { $0.deckNumber == 1 }
@@ -4998,6 +5247,9 @@ final class AppModel: ObservableObject {
         environment["BEATBEAM_REMOTE_ACCESS_PATH"] = remoteAccessURL.path
         environment["BEATBEAM_TRIGGER_LOG_PATH"] = triggerLogURL.path
         environment["BEATBEAM_TRACK_PREVIEW_CACHE_DIR"] = previewCacheURL.path
+        // The signed app bundle is read-only runtime input; bytecode belongs
+        // nowhere in it and would invalidate its signature after launch.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         if bundledRuntimeAvailable {
             environment["PYTHONHOME"] = bundledPythonRuntimeURL.path
             if let bundledSitePackages = bundledPythonSitePackagesURL(runtimeRoot: bundledPythonRuntimeURL) {
@@ -6910,7 +7162,20 @@ struct TransportModePill: View {
 
 struct DebugInspectorView: View {
     @EnvironmentObject private var model: AppModel
+    @AppStorage("beatbeam.debug.liveExpanded") private var liveExpanded = true
+    @AppStorage("beatbeam.debug.canonicalExpanded") private var canonicalExpanded = true
+    @AppStorage("beatbeam.debug.richEventsExpanded") private var richEventsExpanded = false
+    @AppStorage("beatbeam.debug.shadowExpanded") private var shadowExpanded = true
+    @AppStorage("beatbeam.debug.fullShadowExpanded") private var fullShadowExpanded = false
+    @AppStorage("beatbeam.debug.shadowEventEvidenceExpanded") private var shadowEventEvidenceExpanded = true
+    @AppStorage("beatbeam.debug.queueExpanded") private var queueExpanded = false
+    @AppStorage("beatbeam.debug.failuresExpanded") private var failuresExpanded = false
+    @AppStorage("beatbeam.debug.handoffExpanded") private var handoffExpanded = false
+    @AppStorage("beatbeam.debug.legacyExpanded") private var legacyExpanded = false
+    @AppStorage("beatbeam.debug.bridgeControlExpanded") private var bridgeControlExpanded = false
     @State private var showFullStructure = false
+    @State private var forceReanalysisInFlight = false
+    @State private var forceReanalysisStatus: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -6918,11 +7183,31 @@ struct DebugInspectorView: View {
                 Text("Debug")
                     .font(.title2.bold())
                 Spacer()
+                Button("Actieve track heranalyseren") {
+                    forceReanalysisInFlight = true
+                    forceReanalysisStatus = "aangevraagd"
+                    Task {
+                        do {
+                            let response = try await model.forceReanalyzeActiveTrack()
+                            forceReanalysisStatus = response.jobId == nil ? "queued" : "queued · \(response.jobId!)"
+                            for _ in 0..<30 {
+                                model.refreshDebugState()
+                                try? await Task.sleep(for: .seconds(1))
+                                if let status = model.debugState?.bridgeDiagnostics?.diagnostics?.activeTrack?.forceStatus,
+                                   status != "queued" { break }
+                            }
+                        } catch {
+                            forceReanalysisStatus = "fout: \(error.localizedDescription)"
+                        }
+                        forceReanalysisInFlight = false
+                    }
+                }
+                .disabled(forceReanalysisInFlight || model.debugState?.activeTrack?.status != "ready")
                 Button("Vernieuwen") { model.refreshDebugState() }
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    debugCard("Live / VirtualDJ") {
+                    debugDisclosure("LIVE / VIRTUALDJ", isExpanded: $liveExpanded) {
                         row("Transport", model.debugState?.virtualdj?.transportSource)
                         row("Bridge", model.debugState?.virtualdj?.bridgeStatus)
                         row("Deck", model.debugState?.virtualdj?.activeDeck.map(String.init))
@@ -6934,27 +7219,91 @@ struct DebugInspectorView: View {
                         row("Status", model.debugState?.activeTrack?.status)
                         row("Generation", model.debugState?.activeTrack.map { String($0.generation) })
                         row("Activated", model.debugState?.activeTrack?.activatedAtUnixMilliseconds.map { "\($0) ms" })
+                        row("Force heranalyse", model.debugState?.bridgeDiagnostics?.diagnostics?.activeTrack?.forceStatus ?? forceReanalysisStatus)
                     }
-                    debugCard("Analyse") {
+                    debugDisclosure("CANONICAL ANALYSE", isExpanded: $canonicalExpanded) {
                         row("Schema", model.debugState?.analysis?.schemaVersion.map { "v\($0)" })
                         row("Analysis version", model.debugState?.analysis?.analysisVersion)
                         row("Phrase analysis", model.debugState?.analysis?.phraseAnalysisVersion)
                         row("Model", model.debugState?.analysis?.model)
                         row("Semantic section", model.debugState?.analysis?.semanticSection.map { "\($0.role ?? "—") \($0.occurrence.map(String.init) ?? "—")" })
-                        row("Native segment", model.debugState?.analysis?.segment?.label)
                         row("Energy z-score", signed(model.debugState?.analysis?.richCurrent?.energy))
                         row("Auto Show modifier", signed(model.debugState?.analysis?.energyModifier))
                         row("Confidence", model.debugState?.analysis?.richCurrent?.confidence.map { String(format: "%.0f", $0) })
-                        row("Current event", model.debugState?.analysis?.currentEvent?.type)
-                        row("Event confidence", model.debugState?.analysis?.currentEvent?.confidence.map { String(format: "%.0f", $0) })
-                        row("Next event", model.debugState?.analysis?.nextEvent?.type)
-                        row("Bars to next", model.debugState?.analysis?.nextEvent?.barsToNext.map(String.init))
                         DisclosureGroup("Volledige trackstructuur", isExpanded: $showFullStructure) {
                             fullTrackStructure
                         }
                         .font(.system(size: 12, weight: .semibold))
                     }
-                    debugCard("Queue / Cache / Playlist") {
+                    debugDisclosure("SHADOW ANALYSE · SECTION CHARACTER", isExpanded: $shadowExpanded) {
+                        let shadow = model.debugState?.analysis?.shadowSectionCharacter
+                        row("Observation", shadow?.observationId)
+                        row("Range", shadowRange(shadow))
+                        row("Relative energy", shadowValue(shadow?.relativeEnergy))
+                        row("Energy rise", signed(shadow?.energyRise))
+                        row("Recurrence", shadowValue(shadow?.recurrenceStrength))
+                        row("Family salience", shadowValue(shadow?.familySalience))
+                        row("Entry contrast", shadowValue(shadow?.entryContrast))
+                        row("Exit contrast", shadowValue(shadow?.exitContrast))
+                        row("Build momentum", shadowValue(shadow?.buildMomentum))
+                        row("Boundary novelty", shadowValue(shadow?.boundaryNovelty))
+                        row("PREPARATION", preparationSummary(shadow?.preparationProfile))
+                        row("ARRIVAL", arrivalSummary(shadow?.arrivalProfile))
+                        row("ENTRY STRUCTURAL DEPARTURE", structuralDepartureSummary(shadow?.entryStructuralDeparture))
+                        row("EXIT STRUCTURAL DEPARTURE", structuralDepartureSummary(shadow?.exitStructuralDeparture))
+                        row("Entry raw transition", shadowBoundaryTransition(shadow?.entryBoundary))
+                        row("Exit raw transition", shadowBoundaryTransition(shadow?.exitBoundary))
+                        row("Confidence", shadow == nil ? nil : "nog niet gekalibreerd")
+                        let allShadow = (model.debugState?.handoff?.shadowAnalysis?.sectionCharacters ?? [])
+                            .sorted {
+                                let start = ($0.startSeconds ?? .greatestFiniteMagnitude, $0.endSeconds ?? .greatestFiniteMagnitude, $0.observationId ?? "")
+                                let next = ($1.startSeconds ?? .greatestFiniteMagnitude, $1.endSeconds ?? .greatestFiniteMagnitude, $1.observationId ?? "")
+                                return start < next
+                            }
+                        DisclosureGroup("Volledige shadowstructuur (\(allShadow.count))", isExpanded: $fullShadowExpanded) {
+                            if allShadow.isEmpty {
+                                Text("Geen shadow observations beschikbaar").foregroundStyle(.secondary)
+                            } else {
+                                VStack(alignment: .leading, spacing: 7) {
+                                    ForEach(Array(allShadow.enumerated()), id: \.offset) { index, observation in
+                                        shadowObservationRow(observation, index: index, isLast: index == allShadow.count - 1, currentPositionMilliseconds: model.debugState?.virtualdj?.positionMilliseconds)
+                                    }
+                                }
+                                .padding(.top, 4)
+                            }
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                    }
+                    debugDisclosure("SHADOW EVENT EVIDENCE", isExpanded: $shadowEventEvidenceExpanded) {
+                        let currentEvidence = model.debugState?.analysis?.shadowEventEvidence
+                        row("Boundary", shadowEventBoundary(currentEvidence))
+                        row("Origin → destination", shadowEventRoute(currentEvidence))
+                        row("PREPARATION", preparationSummary(currentEvidence?.preparationAspect))
+                        row("ARRIVAL", arrivalSummary(currentEvidence?.arrivalAspect))
+                        row("RMS pre → post", temporalRmsSummary(currentEvidence?.temporalContext))
+                        row("Relative energy late-origin → early-destination", temporalRelativeEnergySummary(currentEvidence?.temporalContext))
+                        row("Energy window", temporalWindowSummary(currentEvidence?.temporalContext?.window))
+                        row("ORIGIN EXIT STRUCTURAL", structuralDepartureSummary(currentEvidence?.structuralDepartureAspect?.originExit))
+                        row("DESTINATION ENTRY STRUCTURAL", structuralDepartureSummary(currentEvidence?.structuralDepartureAspect?.destinationEntry))
+                        row("Identity", arrangementIdentitySummary(currentEvidence?.arrangementIdentityAspect))
+                        row("Destination terminal", currentEvidence?.destinationIsTerminal.map(bool))
+                        row("Hypotheses", shadowHypothesesSummary(currentEvidence?.hypotheses))
+                        let allEvidence = model.debugState?.handoff?.shadowAnalysis?.eventEvidence ?? []
+                        DisclosureGroup("Volledige boundary-evidence (\(allEvidence.count))") {
+                            if allEvidence.isEmpty {
+                                Text("Geen shadow boundary-evidence beschikbaar").foregroundStyle(.secondary)
+                            } else {
+                                VStack(alignment: .leading, spacing: 7) {
+                                    ForEach(Array(allEvidence.enumerated()), id: \.offset) { index, evidence in
+                                        shadowEventEvidenceRow(evidence, index: index, current: evidence.destinationObservationId == currentEvidence?.destinationObservationId)
+                                    }
+                                }
+                                .padding(.top, 4)
+                            }
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                    }
+                    debugDisclosure("QUEUE / CACHE / PLAYLIST", isExpanded: $queueExpanded) {
                         let diag = model.debugState?.bridgeDiagnostics?.diagnostics
                         row("Queue", diag?.analysisQueue?.capacity.map { "\(diag?.analysisQueue?.queuedNormal ?? 0) NORMAL · \(diag?.analysisQueue?.queuedHigh ?? 0) HIGH / \($0)" })
                         row("Running", diag?.analysisQueue?.running.map(String.init))
@@ -6966,40 +7315,51 @@ struct DebugInspectorView: View {
                         row("Running job", diag?.runningJob?.filePath.map { URL(fileURLWithPath: $0).lastPathComponent })
                         row("Priority", diag?.runningJob?.priority)
                         row("Running for", diag?.runningJob?.elapsedMilliseconds.map { "\($0) ms" })
-                        if let failure = diag?.activeTrack?.lastFailure {
-                            row("Analysis failure", [failure.phase, failure.message].compactMap { $0 }.joined(separator: " · "))
-                        }
                         row("Cache hits", diag?.playlistWatcher?.cacheHitsThisSession.map(String.init))
                         row("Playlist", diag?.playlistWatcher?.playlistCount.map { "\($0) playlists · \(diag?.playlistWatcher?.discoveredTrackCount ?? 0) tracks" })
                         row("Library current / stale", diag.map { "\($0.playlistWatcher?.currentTrackCount ?? 0) / \($0.playlistWatcher?.staleTrackCount ?? 0)" })
                         row("Needs / failed-known", diag.map { "\($0.playlistWatcher?.needsAnalysisTrackCount ?? 0) / \($0.playlistWatcher?.failedKnownTrackCount ?? 0)" })
-                        DisclosureGroup("Recente analysefouten") {
-                            if let failures = diag?.recentFailures, !failures.isEmpty {
-                                ForEach(Array(failures.enumerated()), id: \.offset) { _, failure in
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(failure.filePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "—")
-                                        Text([failure.phase, failure.message].compactMap { $0 }.joined(separator: " · "))
-                                            .foregroundStyle(.secondary)
-                                    }
+                    }
+                    debugDisclosure("RICH MUSICAL EVENTS", isExpanded: $richEventsExpanded) {
+                        row("Current event", model.debugState?.analysis?.currentEvent?.type)
+                        row("Event confidence", model.debugState?.analysis?.currentEvent?.confidence.map { String(format: "%.0f", $0) })
+                        row("Next event", model.debugState?.analysis?.nextEvent?.type)
+                        row("Bars to next", model.debugState?.analysis?.nextEvent?.barsToNext.map(String.init))
+                    }
+                    debugDisclosure("FAILURES", isExpanded: $failuresExpanded) {
+                        let diag = model.debugState?.bridgeDiagnostics?.diagnostics
+                        if let failure = diag?.activeTrack?.lastFailure {
+                            row("Last failure", [failure.phase, failure.message].compactMap { $0 }.joined(separator: " · "))
+                        }
+                        if let failures = diag?.recentFailures, !failures.isEmpty {
+                            ForEach(Array(failures.enumerated()), id: \.offset) { _, failure in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(failure.filePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "—")
+                                    Text([failure.phase, failure.message].compactMap { $0 }.joined(separator: " · "))
+                                        .foregroundStyle(.secondary)
                                 }
-                            } else {
-                                Text("Geen recente analysefouten").foregroundStyle(.secondary)
                             }
+                        } else {
+                            Text("Geen recente analysefouten").foregroundStyle(.secondary)
                         }
                     }
-                    debugCard("Handoff / BeatBeam") {
+                    debugDisclosure("HANDOFF / BEATBEAM", isExpanded: $handoffExpanded) {
                         row("Track match", model.debugState?.handoff?.trackMatch)
                         row("Availability", model.debugState?.handoff?.availability)
                         row("Rich analysis", model.debugState?.handoff?.richAnalysis == nil ? "Nee" : "Ja")
                         row("Rich current", model.debugState?.analysis?.richCurrent == nil ? "Nee" : "Ja")
+                        row("Shadow diagnostics", model.debugState?.handoff?.shadowAnalysis == nil ? "Nee" : "Ja")
                         row("Source", model.debugState?.handoff?.selectedSource)
                         row("Fallback", model.debugState?.handoff?.fallbackReason)
                     }
-                    debugCard("Native VDJ Plugin") {
+                    debugDisclosure("LEGACY / NATIVE DIAGNOSTICS", isExpanded: $legacyExpanded) {
+                        row("Native segment", model.debugState?.analysis?.segment?.label)
                         let native = model.debugState?.bridgeDiagnostics?.diagnostics?.nativePlugin
                         row("Poller", native?.poller?.alive.map { $0 ? "alive" : "stopped" })
                         row("Poll count", native?.poller?.pollCounter.map(String.init))
                         row("Last poll", native?.poller?.lastPollUnixMilliseconds.map { "\($0) ms" })
+                        row("Master deck", selector(native?.selectors?.masterDeck, native?.selectors?.masterDeckRaw, native?.selectors?.masterDeckQuerySucceeded))
+                        row("T0 master observed", native?.selectors?.masterDeckObservedUnixMilliseconds.map { "\($0) ms" })
                         row("Plugin deck", selector(native?.selectors?.pluginDeck, native?.selectors?.pluginDeckRaw, native?.selectors?.pluginDeckQuerySucceeded))
                         row("Left deck", selector(native?.selectors?.leftDeck, native?.selectors?.leftDeckRaw, native?.selectors?.leftDeckQuerySucceeded))
                         row("Right deck", selector(native?.selectors?.rightDeck, native?.selectors?.rightDeckRaw, native?.selectors?.rightDeckQuerySucceeded))
@@ -7012,15 +7372,17 @@ struct DebugInspectorView: View {
                         }
                         row("Selected", native?.selection?.selectedDeck.map { "deck \($0) · \(native?.selection?.selectedFilePath ?? "")" })
                         row("Selection reason", native?.selection?.reason)
+                        row("T1 selection", native?.selection?.authoritativeSelectionUnixMilliseconds.map { "\($0) ms" })
                         row("No-selection reason", native?.selection?.noSelectionReason)
                         row("Last action", native?.ipc?.lastAction)
+                        row("T2 activate emitted", native?.ipc?.activateEmittedUnixMilliseconds.map { "\($0) ms" })
                         row("Send result", native?.ipc?.lastSendSucceeded.map(bool))
                         row("Last error", native?.ipc?.lastError)
                         row("Response", native?.response?.status.map { "\($0) / \(bool(native?.response?.success))" })
                         row("Response error", native?.response?.errorMessage ?? native?.response?.errorCode)
                         row("Bridge / resync", native?.recovery.map { "\($0.bridgeHealth ?? "—") / \(bool($0.resyncPending))" })
                     }
-                    debugCard("Bridge Control") {
+                    debugDisclosure("LEGACY / BRIDGE CONTROL", isExpanded: $bridgeControlExpanded) {
                         let control = model.debugState?.bridgeDiagnostics?.diagnostics?.control
                         row("Last received", control?.type)
                         row("Request ID", control?.requestId)
@@ -7167,6 +7529,18 @@ struct DebugInspectorView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
+    private func debugDisclosure<Content: View>(_ title: String, isExpanded: Binding<Bool>, @ViewBuilder content: @escaping () -> Content) -> some View {
+        DisclosureGroup(isExpanded: isExpanded) {
+            VStack(alignment: .leading, spacing: 7) { content() }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(BeatBeamPalette.raisedGradient)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        } label: {
+            Text(title).font(.headline)
+        }
+    }
+
     private func row(_ label: String, _ value: String?) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label).foregroundStyle(.secondary).frame(width: 150, alignment: .leading)
@@ -7179,6 +7553,186 @@ struct DebugInspectorView: View {
     private func signed(_ value: Double?) -> String? {
         guard let value, value.isFinite else { return nil }
         return String(format: "%+.2f", value)
+    }
+
+    private func shadowValue(_ value: Double?) -> String? {
+        guard let value, value.isFinite else { return nil }
+        return String(format: "%.2f", value)
+    }
+
+    private func shadowRange(_ shadow: DebugShadowSectionCharacter?) -> String? {
+        guard let shadow, let start = shadow.startSeconds, let end = shadow.endSeconds else { return nil }
+        return String(format: "%.3f–%.3f s", start, end)
+    }
+
+    private func shadowObservationRow(_ observation: DebugShadowSectionCharacter, index: Int, isLast: Bool, currentPositionMilliseconds: Int?) -> some View {
+        let current = isCurrentShadowObservation(observation, isLast: isLast, positionMilliseconds: currentPositionMilliseconds)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text("#\(index + 1)  \(shadowRange(observation) ?? "—") · bars \(barRange(observation)) · \(barCountText(observation))")
+                Spacer(minLength: 4)
+                if current { Text("actueel").foregroundStyle(BeatBeamPalette.brandCyan) }
+            }
+            Text("Rec \(shadowValue(observation.recurrenceStrength) ?? "—") · Sal \(shadowValue(observation.familySalience) ?? "—") · Entry \(shadowValue(observation.entryContrast) ?? "—") · Exit \(shadowValue(observation.exitContrast) ?? "—")")
+            Text("Energy \(shadowValue(observation.relativeEnergy) ?? "—") · Rise \(signed(observation.energyRise) ?? "—") · Boundary novelty \(shadowValue(observation.boundaryNovelty) ?? "—")")
+            if let preparation = preparationSummary(observation.preparationProfile) { Text("Prep \(preparation)") }
+            if let arrival = arrivalSummary(observation.arrivalProfile) { Text("Arrival \(arrival)") }
+            if let entry = structuralDepartureSummary(observation.entryStructuralDeparture) { Text("Entry structural \(entry)") }
+            if let exit = structuralDepartureSummary(observation.exitStructuralDeparture) { Text("Exit structural \(exit)") }
+        }
+        .font(.system(size: 11, design: .monospaced))
+        .foregroundStyle(current ? Color.black : Color.white)
+        .padding(7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(current ? BeatBeamPalette.brandCyan : BeatBeamPalette.mutedBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private func barRange(_ observation: DebugShadowSectionCharacter) -> String {
+        [observation.startBar, observation.endBar].compactMap { $0.map(String.init) }.joined(separator: "–").isEmpty
+            ? "—" : [observation.startBar, observation.endBar].compactMap { $0.map(String.init) }.joined(separator: "–")
+    }
+
+    private func barCountText(_ observation: DebugShadowSectionCharacter) -> String {
+        observation.barCount.map { "\($0) bars" } ?? "— bars"
+    }
+
+    private func shadowBoundarySummary(_ boundary: DebugShadowBoundaryEvidence?) -> String? {
+        guard let boundary else { return nil }
+        var fields: [String] = []
+        if let value = shadowValue(boundary.structuralContextChange) { fields.append("Context \(value)") }
+        if let value = shadowValue(boundary.membershipExitStrength) { fields.append("Membership exit \(value)") }
+        if let value = shadowValue(boundary.repeatedSectionEnd) { fields.append("Repeat end \(value)") }
+        if let value = shadowValue(boundary.recurrenceChange) { fields.append("Recurrence change \(value)") }
+        if let route = boundary.structuralRoute { fields.append("Route \(route)") }
+        if let value = shadowValue(boundary.structuralEvidence) { fields.append("Evidence \(value)") }
+        if let target = boundary.structuralTargetBar { fields.append("Target bar \(target)") }
+        return fields.isEmpty ? nil : fields.joined(separator: " · ")
+    }
+
+    private func shadowBoundaryTransition(_ boundary: DebugShadowBoundaryEvidence?) -> String? {
+        guard let boundary else { return nil }
+        var fields: [String] = []
+        if let value = shadowValue(boundary.energyChange) { fields.append("E \(value)") }
+        if let value = signed(boundary.energyDelta) { fields.append("ΔE \(value)") }
+        if let value = shadowValue(boundary.onsetChange) { fields.append("Onset \(value)") }
+        if let value = signed(boundary.onsetDelta) { fields.append("ΔOnset \(value)") }
+        if let value = shadowValue(boundary.silenceChange) { fields.append("Silence \(value)") }
+        if let value = signed(boundary.silenceDelta) { fields.append("ΔSilence \(value)") }
+        return fields.isEmpty ? nil : fields.joined(separator: " · ")
+    }
+
+    private func preparationSummary(_ profile: DebugPreparationProfile?) -> String? {
+        guard let profile else { return nil }
+        let fields = [signed(profile.energyTrajectory).map { "Rise \($0)" },
+                      signed(profile.exitEnergyDirection).map { "Exit ΔE \($0)" },
+                      signed(profile.exitOnsetDirection).map { "ΔO \($0)" },
+                      signed(profile.exitSilenceDirection).map { "ΔS \($0)" },
+                      shadowValue(profile.exitStructuralContext).map { "Context \($0)" }].compactMap { $0 }
+        return fields.isEmpty ? nil : fields.joined(separator: " · ")
+    }
+
+    private func arrivalSummary(_ profile: DebugArrivalProfile?) -> String? {
+        guard let profile else { return nil }
+        let state: String? = {
+            guard let origin = shadowValue(profile.originRelativeEnergy), let destination = shadowValue(profile.destinationRelativeEnergy) else { return nil }
+            return "E \(origin)→\(destination)"
+        }()
+        let fields = [state, signed(profile.energyDirection).map { "ΔE \($0)" },
+                      signed(profile.onsetDirection).map { "ΔO \($0)" },
+                      signed(profile.silenceDirection).map { "ΔS \($0)" },
+                      shadowValue(profile.entryContrast).map { "Entry \($0)" },
+                      shadowValue(profile.boundaryNovelty).map { "Novelty \($0)" }].compactMap { $0 }
+        return fields.isEmpty ? nil : fields.joined(separator: " · ")
+    }
+
+    private func structuralDepartureSummary(_ profile: DebugStructuralDepartureProfile?) -> String? {
+        guard let profile else { return nil }
+        let fields = [shadowValue(profile.structuralContextChange).map { "Context \($0)" },
+                      shadowValue(profile.membershipExitStrength).map { "Membership exit \($0)" },
+                      shadowValue(profile.repeatedSectionEnd).map { "Repeat end \($0)" },
+                      shadowValue(profile.recurrenceChange).map { "Recurrence change \($0)" },
+                      profile.structuralRoute.map { "Route \($0)" },
+                      shadowValue(profile.structuralEvidence).map { "Evidence \($0)" },
+                      profile.structuralTargetBar.map { "Target bar \($0)" }].compactMap { $0 }
+        return fields.isEmpty ? nil : fields.joined(separator: " · ")
+    }
+
+    private func shadowEventBoundary(_ evidence: DebugShadowEventEvidence?) -> String? {
+        guard let evidence else { return nil }
+        let time = evidence.boundarySeconds.map { String(format: "%.3f s", $0) }
+        let bar = evidence.boundaryBar.map { "bar \($0)" }
+        return [time, bar].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    private func shadowEventRoute(_ evidence: DebugShadowEventEvidence?) -> String? {
+        guard let evidence else { return nil }
+        return [evidence.originObservationId, evidence.destinationObservationId].compactMap { $0 }.joined(separator: " → ")
+    }
+
+    private func arrangementIdentitySummary(_ aspect: DebugShadowArrangementIdentityAspect?) -> String? {
+        guard let aspect else { return nil }
+        let fields: [String] = [shadowValue(aspect.recurrenceStrength).map { "Rec \($0)" },
+                                shadowValue(aspect.familySalience).map { "Sal \($0)" },
+                                aspect.familyId.map { "Family \($0)" },
+                                aspect.hasEarlierFamilyOccurrence.map { "Earlier \(bool($0))" }].compactMap { $0 }
+        return fields.isEmpty ? nil : fields.joined(separator: " · ")
+    }
+
+    private func temporalRmsSummary(_ context: DebugBoundaryTemporalContext?) -> String? {
+        guard let context else { return nil }
+        return "\(signed(context.preBoundaryNormalizedRms) ?? "—") → \(signed(context.postBoundaryNormalizedRms) ?? "—")"
+    }
+
+    private func temporalRelativeEnergySummary(_ context: DebugBoundaryTemporalContext?) -> String? {
+        guard let context else { return nil }
+        return "\(shadowValue(context.lateOriginRelativeEnergy) ?? "—") → \(shadowValue(context.earlyDestinationRelativeEnergy) ?? "—")"
+    }
+
+    private func temporalWindowSummary(_ window: DebugBoundaryTemporalWindow?) -> String? {
+        guard let bars = window?.bars, !bars.isEmpty else { return nil }
+        return bars.compactMap { bar in
+            guard let offset = bar.relativeBarOffset else { return nil }
+            return String(format: "%+d E %@ | RMS %@", offset, shadowValue(bar.relativeEnergy) ?? "—", signed(bar.normalizedRms) ?? "—")
+        }.joined(separator: " · ")
+    }
+
+    private func shadowEventEvidenceRow(_ evidence: DebugShadowEventEvidence, index: Int, current: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("#\(index + 1)  \(shadowEventRoute(evidence) ?? "—") · \(shadowEventBoundary(evidence) ?? "—")")
+            if let preparation = preparationSummary(evidence.preparationAspect) { Text("Prep \(preparation)") }
+            if let arrival = arrivalSummary(evidence.arrivalAspect) { Text("Arrival \(arrival)") }
+            Text("RMS \(temporalRmsSummary(evidence.temporalContext) ?? "—")")
+            Text("Relative energy \(temporalRelativeEnergySummary(evidence.temporalContext) ?? "—")")
+            Text("Energy window \(temporalWindowSummary(evidence.temporalContext?.window) ?? "—")")
+            if let structural = structuralDepartureSummary(evidence.structuralDepartureAspect?.originExit) { Text("Origin structural \(structural)") }
+            if let structural = structuralDepartureSummary(evidence.structuralDepartureAspect?.destinationEntry) { Text("Destination structural \(structural)") }
+            if let identity = arrangementIdentitySummary(evidence.arrangementIdentityAspect) { Text("Identity \(identity)") }
+            if let terminal = evidence.destinationIsTerminal { Text("Destination terminal \(bool(terminal))") }
+            if let hypotheses = shadowHypothesesSummary(evidence.hypotheses) { Text("Hypotheses \(hypotheses)") }
+        }
+        .font(.system(size: 11, design: .monospaced))
+        .foregroundStyle(current ? Color.black : Color.white)
+        .padding(7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(current ? BeatBeamPalette.brandCyan : BeatBeamPalette.mutedBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private func shadowHypothesesSummary(_ hypotheses: [DebugShadowEventHypothesis]?) -> String? {
+        guard let hypotheses else { return nil }
+        guard !hypotheses.isEmpty else { return "—" }
+        return hypotheses.compactMap { hypothesis in
+            let support = hypothesis.supportingEvidence?.joined(separator: ", ")
+            return [hypothesis.kind, hypothesis.anchorKind.map { "anchor \($0)" },
+                    hypothesis.startSeconds.map { String(format: "%.3f s", $0) }, support].compactMap { $0 }.joined(separator: " · ")
+        }.joined(separator: " | ")
+    }
+
+    private func isCurrentShadowObservation(_ observation: DebugShadowSectionCharacter, isLast: Bool, positionMilliseconds: Int?) -> Bool {
+        guard let positionMilliseconds, let start = observation.startSeconds, let end = observation.endSeconds else { return false }
+        let position = Double(positionMilliseconds) / 1000
+        return position >= start && (position < end || (isLast && position == end))
     }
 }
 
@@ -7206,6 +7760,17 @@ struct AutoShowControlView: View {
             get: { model.autoShowStyle },
             set: { model.setAutoShowStyle($0) }
         )
+    }
+
+    private var previewRmeBinding: Binding<String> {
+        Binding(
+            get: { model.previewRmeMode },
+            set: { model.setPreviewRmeMode($0) }
+        )
+    }
+
+    private var previewPulseTestBinding: Binding<String> {
+        Binding(get: { model.previewPulseTestMode }, set: { model.setPreviewPulseTestMode($0) })
     }
 
     private var audiencePanFocusBinding: Binding<Bool> {
@@ -7257,6 +7822,103 @@ struct AutoShowControlView: View {
         return model.autoShowAvailable ? "Live OSC" : "Waiting"
     }
 
+    @ViewBuilder
+    private var previewCompositionCard: some View {
+        if let preview = model.previewComposition {
+            let isDynamicComposer = preview.mode == "DYNAMIC_COMPOSER"
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(isDynamicComposer ? "DYNAMIC COMPOSER" : "PREVIEW CUE")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(BeatBeamPalette.brandCyan)
+                    Spacer()
+                    Text(isDynamicComposer ? (preview.dynamicComposerActive == true ? "ACTIVE" : "FALLBACK") : (preview.previewSource ?? "baseline"))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(preview.dynamicComposerActive == true ? BeatBeamPalette.brandCyan : Color.secondary)
+                }
+                if isDynamicComposer {
+                    Text("MUSICAL STATE")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text(previewMusicalState(preview))
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text("RME MODIFIER · \(preview.event?.type ?? "None")")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text("EVENT ENVELOPE · \(previewEventEnvelope(preview))")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text("PREVIEW CUE")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(BeatBeamPalette.brandCyan)
+                }
+                Text(preview.previewCue ?? previewFallbackCue(preview))
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(2)
+                if preview.dynamicCompositionApplied == true {
+                    previewGroupRow("Moving", group: preview.fixtureGroupIntents?["moving"], primitives: preview.selectedPrimitives?["moving"])
+                    previewGroupRow("PAR", group: preview.fixtureGroupIntents?["par"], primitives: preview.selectedPrimitives?["par"])
+                    previewGroupRow("Wash", group: preview.fixtureGroupIntents?["wash"], primitives: preview.selectedPrimitives?["wash"])
+                    if let dimensions = preview.changedDimensions, !dimensions.isEmpty {
+                        Text("Changed: \(dimensions.joined(separator: ", "))")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                } else if isDynamicComposer {
+                    Text("Preview valt terug op baseline · \(preview.continuousStateReason ?? preview.contextReason ?? "ongeldige musical state")")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(9)
+            .background(BeatBeamPalette.raisedBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+    }
+
+    private func previewMusicalState(_ preview: PreviewCompositionState) -> String {
+        guard let state = preview.continuousMusicalState else {
+            return "Unavailable"
+        }
+        let energy = state.relativeEnergy.map { String(format: "energy %.2f", $0) } ?? "energy —"
+        let progress = state.sectionProgress.map { String(format: "progress %.0f%%", $0 * 100) } ?? "progress —"
+        let recurrence = state.recurrenceStrength.map { String(format: "recurrence %.2f", $0) } ?? "recurrence —"
+        return "\(energy) · \(progress) · \(recurrence)"
+    }
+
+    private func previewEventEnvelope(_ preview: PreviewCompositionState) -> String {
+        guard let envelope = preview.eventEnvelope, envelope.active == true else {
+            return "None"
+        }
+        let phase = envelope.phase?.capitalized ?? "Active"
+        let progress = envelope.progress.map { String(format: "%.0f%%", $0 * 100) } ?? "—"
+        if let beats = envelope.beatsSinceEvent, let total = envelope.totalBeats {
+            return "\(phase) \(progress) · \(String(format: "%.2g", beats / 4))/\(String(format: "%.2g", total / 4)) bars"
+        }
+        return "\(phase) \(progress)"
+    }
+
+    @ViewBuilder
+    private func previewGroupRow(_ title: String, group: PreviewFixtureGroupIntent?, primitives: [String: PreviewPrimitiveValue]?) -> some View {
+        let primitiveText = (primitives ?? [:]).keys.sorted().map { key in
+            "\(key) \(primitives?[key]?.displayText ?? "—")"
+        }.joined(separator: " · ")
+        let intensity = group?.intensity.map { String(format: "%.0f%%", $0 * 100) } ?? "—"
+        let movement = group?.movementAmount.map { String(format: "%.0f%%", $0 * 100) } ?? "—"
+        Text("\(title): \(primitiveText.isEmpty ? "neutral" : primitiveText) · intensity \(intensity) · movement \(movement)")
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
+    }
+
+    private func previewFallbackCue(_ preview: PreviewCompositionState) -> String {
+        let event = preview.event?.type ?? "geen actuele RME"
+        let progress = preview.progress.map { String(format: "%.0f%%", $0 * 100) } ?? ""
+        return "\(preview.mode ?? "BASELINE") • \(event) \(progress)"
+    }
+
     var body: some View {
         PanelSurface(title: "Auto Show", compact: true) {
             VStack(alignment: .leading, spacing: 12) {
@@ -7289,6 +7951,26 @@ struct AutoShowControlView: View {
                     MetricTile(title: "Cue", value: model.autoShowCueText)
                     MetricTile(title: "Status", value: statusValue)
                 }
+
+                Picker("Preview Map", selection: previewRmeBinding) {
+                    Text("Baseline").tag("BASELINE")
+                    Text("RME enhanced").tag("RME_ENHANCED")
+                    Text("Dynamic composer").tag("DYNAMIC_COMPOSER")
+                }
+                .pickerStyle(.segmented)
+                Text("Alleen Preview Map · fysieke DMX blijft baseline")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+
+                Picker("Pulse Test (Preview only)", selection: previewPulseTestBinding) {
+                    Text("Off").tag("OFF")
+                    Text("Every Beat").tag("EVERY_BEAT")
+                    Text("Half Time").tag("HALF_TIME")
+                    Text("Bar Accent").tag("BAR_ACCENT")
+                }
+                .pickerStyle(.segmented)
+
+                previewCompositionCard
 
                 HStack(alignment: .center, spacing: 12) {
                     Button {
@@ -7978,7 +8660,7 @@ struct StageMapCanvas: View {
     var selectionMode: ProjectionSelectionMode = .none
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !hasAnimatedStrobe)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !(hasAnimatedStrobe || model.previewPulseTestMode != "OFF"))) { timeline in
             GeometryReader { geometry in
                 ZStack {
                     if showBackdrop {
@@ -8087,7 +8769,7 @@ struct StageFrontCanvas: View {
     var selectionMode: ProjectionSelectionMode = .none
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !hasAnimatedStrobe)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !(hasAnimatedStrobe || model.previewPulseTestMode != "OFF"))) { timeline in
             GeometryReader { geometry in
                 ZStack {
                     ForEach(model.slotEditors) { editor in
@@ -8183,7 +8865,7 @@ struct StageSideCanvas: View {
     var selectionMode: ProjectionSelectionMode = .none
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !hasAnimatedStrobe)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !(hasAnimatedStrobe || model.previewPulseTestMode != "OFF"))) { timeline in
             GeometryReader { geometry in
                 ZStack {
                     ForEach(model.slotEditors) { editor in

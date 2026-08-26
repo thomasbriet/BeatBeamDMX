@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from beatbeam_app import SongAnalyzerStructureHandoff
+from beatbeam_app import SongAnalyzerStructureHandoff, shadow_section_character_at
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "beatbeam-structure-handoff-v1.json"
@@ -141,6 +141,221 @@ class SongAnalyzerStructureHandoffTests(unittest.TestCase):
             self.assertEqual(9, state["active_track"]["generation"])
             self.assertEqual(2.0, state["rich_current"]["energy"])
 
+    def test_optional_shadow_section_characters_are_parsed_and_are_debug_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            payload["tracks"][0]["shadow_analysis"] = shadow_analysis()
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            handoff = SongAnalyzerStructureHandoff(path, check_interval_seconds=0)
+
+            production = handoff.project(playback(TRACK, 8))
+            debug = handoff.project(playback(TRACK, 8), include_shadow=True)
+
+            self.assertNotIn("shadow_analysis", production)
+            self.assertEqual("Intro 1", production["current"]["label"])
+            character = debug["shadow_analysis"]["section_characters"][0]
+            self.assertEqual("raw-section-0000-0004", character["observation_id"])
+            self.assertEqual(.91, character["recurrence_strength"])
+            self.assertEqual(.72, character["relative_energy"])
+            self.assertEqual(.31, character["energy_rise"])
+            self.assertIsNone(character["build_momentum"])
+            self.assertEqual(.61, character["boundary_novelty"])
+            self.assertEqual(4, character["bar_count"])
+            self.assertEqual(.91, character["entry_boundary"]["membership_exit_strength"])
+            self.assertEqual(.46, character["entry_boundary"]["energy_change"])
+            self.assertEqual(.62, character["entry_boundary"]["energy_delta"])
+            self.assertEqual(-.40, character["entry_boundary"]["onset_delta"])
+            self.assertEqual(.31, character["preparation_profile"]["energy_trajectory"])
+            self.assertEqual(.62, character["arrival_profile"]["energy_direction"])
+            self.assertIsNone(character["arrival_profile"]["origin_relative_energy"])
+            self.assertEqual(.72, character["arrival_profile"]["destination_relative_energy"])
+            self.assertEqual("family-exit", character["entry_structural_departure"]["structural_route"])
+
+    def test_shadow_range_lookup_respects_boundaries_and_unknown_values(self):
+        sections = shadow_analysis()["section_characters"]
+
+        self.assertEqual("raw-section-0000-0004", shadow_section_character_at({"section_characters": sections}, 0)["observation_id"])
+        self.assertEqual("raw-section-0000-0004", shadow_section_character_at({"section_characters": sections}, 7.99)["observation_id"])
+        self.assertEqual("raw-section-0004-0008", shadow_section_character_at({"section_characters": sections}, 8)["observation_id"])
+        self.assertIsNone(shadow_section_character_at({"section_characters": sections}, -0.01))
+        self.assertIsNone(shadow_section_character_at({"section_characters": sections}, 16.01))
+
+    def test_optional_shadow_event_evidence_is_debug_only_and_maps_to_the_destination_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            shadow = shadow_analysis()
+            shadow["event_evidence"] = [{
+                "origin_observation_id": "raw-section-0000-0004",
+                "destination_observation_id": "raw-section-0004-0008",
+                "boundary_seconds": 8, "boundary_bar": 5,
+                "preparation_aspect": shadow["section_characters"][0]["preparation_profile"],
+                "arrival_aspect": shadow["section_characters"][1].get("arrival_profile"),
+                "structural_departure_aspect": {"origin_exit": None, "destination_entry": None},
+                "arrangement_identity_aspect": {"recurrence_strength": None, "family_salience": None,
+                                                "family_id": None, "has_earlier_family_occurrence": None},
+                "destination_is_terminal": True,
+                "temporal_context": {"pre_boundary_normalized_rms": -.42, "post_boundary_normalized_rms": 1.17,
+                                     "late_origin_relative_energy": .31, "early_destination_relative_energy": .86,
+                                     "window": {"bars": [
+                                         {"relative_bar_offset": -2, "normalized_rms": -.8, "relative_energy": .2},
+                                         {"relative_bar_offset": -1, "normalized_rms": -.42, "relative_energy": .31},
+                                         {"relative_bar_offset": 1, "normalized_rms": 1.17, "relative_energy": .86},
+                                         {"relative_bar_offset": 2, "normalized_rms": 1.4, "relative_energy": .9},
+                                     ]}},
+            }]
+            payload["tracks"][0]["shadow_analysis"] = shadow
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            handoff = SongAnalyzerStructureHandoff(path, check_interval_seconds=0)
+
+            production = handoff.project(playback(TRACK, 10))
+            debug = handoff.project(playback(TRACK, 10), include_shadow=True)
+
+            self.assertNotIn("shadow_analysis", production)
+            evidence = debug["shadow_analysis"]["event_evidence"]
+            self.assertEqual(1, len(evidence))
+            self.assertEqual("raw-section-0000-0004", evidence[0]["origin_observation_id"])
+            self.assertEqual("raw-section-0004-0008", evidence[0]["destination_observation_id"])
+            self.assertTrue(evidence[0]["destination_is_terminal"])
+            self.assertEqual(-.42, evidence[0]["temporal_context"]["pre_boundary_normalized_rms"])
+            self.assertEqual(1.17, evidence[0]["temporal_context"]["post_boundary_normalized_rms"])
+            self.assertEqual(.31, evidence[0]["temporal_context"]["late_origin_relative_energy"])
+            self.assertEqual(.86, evidence[0]["temporal_context"]["early_destination_relative_energy"])
+            self.assertEqual([-2, -1, 1, 2], [bar["relative_bar_offset"]
+                             for bar in evidence[0]["temporal_context"]["window"]["bars"]])
+            self.assertNotIn("upward", json.dumps(evidence[0]).lower())
+
+    def test_temporal_window_missing_partial_and_malformed_are_debug_fail_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            shadow = shadow_analysis()
+            event = {"origin_observation_id": "raw-section-0000-0004", "destination_observation_id": "raw-section-0004-0008",
+                     "boundary_seconds": 8, "boundary_bar": 5, "structural_departure_aspect": {"origin_exit": None, "destination_entry": None},
+                     "arrangement_identity_aspect": {"family_id": None, "has_earlier_family_occurrence": None},
+                     "temporal_context": {"pre_boundary_normalized_rms": -.42, "post_boundary_normalized_rms": 1.17,
+                                          "late_origin_relative_energy": .31, "early_destination_relative_energy": .86}}
+            shadow["event_evidence"] = [event]
+            payload["tracks"][0]["shadow_analysis"] = shadow
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            context = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(
+                playback(TRACK, 10), include_shadow=True)["shadow_analysis"]["event_evidence"][0]["temporal_context"]
+            self.assertIsNone(context["window"])
+
+            event["temporal_context"]["window"] = {"bars": [
+                {"relative_bar_offset": -1, "normalized_rms": -.42, "relative_energy": .31},
+                {"relative_bar_offset": 1, "normalized_rms": 1.17, "relative_energy": .86},
+            ]}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            context = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(
+                playback(TRACK, 10), include_shadow=True)["shadow_analysis"]["event_evidence"][0]["temporal_context"]
+            self.assertEqual([-1, 1], [bar["relative_bar_offset"] for bar in context["window"]["bars"]])
+
+            event["temporal_context"]["window"] = {"bars": [{"relative_bar_offset": 0, "normalized_rms": 0, "relative_energy": .5}]}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            state = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(playback(TRACK, 10), include_shadow=True)
+            self.assertNotEqual("invalid", state["load_status"])
+            self.assertIsNone(state["shadow_analysis"]["event_evidence"][0]["temporal_context"]["window"])
+            self.assertNotIn("shadow_analysis", SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(playback(TRACK, 10)))
+
+    def test_temporal_context_nulls_remain_null_and_partial_context_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            shadow = shadow_analysis()
+            event = {
+                "origin_observation_id": "raw-section-0000-0004", "destination_observation_id": "raw-section-0004-0008",
+                "boundary_seconds": 8, "boundary_bar": 5,
+                "structural_departure_aspect": {"origin_exit": None, "destination_entry": None},
+                "arrangement_identity_aspect": {"family_id": None, "has_earlier_family_occurrence": None},
+                "temporal_context": {"pre_boundary_normalized_rms": None, "post_boundary_normalized_rms": None,
+                                     "late_origin_relative_energy": None, "early_destination_relative_energy": None},
+            }
+            shadow["event_evidence"] = [event]
+            payload["tracks"][0]["shadow_analysis"] = shadow
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            debug = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(playback(TRACK, 10), include_shadow=True)
+            self.assertEqual({**event["temporal_context"], "window": None},
+                             debug["shadow_analysis"]["event_evidence"][0]["temporal_context"])
+            self.assertNotIn("shadow_analysis", SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(playback(TRACK, 10)))
+
+            event["temporal_context"] = {"pre_boundary_normalized_rms": -.42}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertEqual("invalid", SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(playback(TRACK, 10))["load_status"])
+
+    def test_missing_shadow_event_terminality_remains_backward_compatible_without_inference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            shadow = shadow_analysis()
+            shadow["event_evidence"] = [{
+                "origin_observation_id": "raw-section-0000-0004",
+                "destination_observation_id": "raw-section-0004-0008",
+                "boundary_seconds": 8, "boundary_bar": 5,
+                "structural_departure_aspect": {"origin_exit": None, "destination_entry": None},
+                "arrangement_identity_aspect": {"family_id": None, "has_earlier_family_occurrence": None},
+            }]
+            payload["tracks"][0]["shadow_analysis"] = shadow
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            evidence = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(
+                playback(TRACK, 10), include_shadow=True)["shadow_analysis"]["event_evidence"]
+
+            self.assertIsNone(evidence[0]["destination_is_terminal"])
+
+    def test_non_contiguous_shadow_event_evidence_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            shadow = shadow_analysis()
+            shadow["event_evidence"] = [{
+                "origin_observation_id": "raw-section-0000-0004",
+                "destination_observation_id": "raw-section-0004-0008",
+                "boundary_seconds": 9,
+                "structural_departure_aspect": {"origin_exit": None, "destination_entry": None},
+                "arrangement_identity_aspect": {"family_id": None, "has_earlier_family_occurrence": None},
+            }]
+            payload["tracks"][0]["shadow_analysis"] = shadow
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            state = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(playback(TRACK, 10), include_shadow=True)
+
+            self.assertEqual("invalid", state["load_status"])
+
+    def test_legacy_structural_novelty_remains_readable_but_is_republished_as_boundary_novelty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            legacy = shadow_analysis()
+            first = legacy["section_characters"][0]
+            first["structural_novelty"] = first.pop("boundary_novelty")
+            first.pop("bar_count")
+            payload["tracks"][0]["shadow_analysis"] = legacy
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            shadow = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(playback(TRACK, 2), include_shadow=True)["shadow_analysis"]
+
+            character = shadow["section_characters"][0]
+            self.assertEqual(.61, character["boundary_novelty"])
+            self.assertNotIn("structural_novelty", character)
+            self.assertIsNone(character["bar_count"])
+
+    def test_invalid_shadow_value_fails_closed_without_affecting_legacy_handoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            payload["tracks"][0]["shadow_analysis"] = shadow_analysis()
+            payload["tracks"][0]["shadow_analysis"]["section_characters"][0]["recurrence_strength"] = 1.1
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            invalid = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(playback(TRACK, 2), include_shadow=True)
+
+            self.assertEqual("invalid", invalid["load_status"])
+            self.assertIsNone(invalid["current"])
+
     def test_v2_events_project_current_next_and_safe_empty_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "handoff.json"
@@ -229,6 +444,34 @@ class SongAnalyzerStructureHandoffTests(unittest.TestCase):
             other = handoff.project(playback(TRACK, 2))
             self.assertEqual("not_active", other["track_match"])
             self.assertIsNone(other["current"])
+
+def shadow_analysis():
+    return {
+        "model": "SectionCharacterProfileShadow",
+        "section_characters": [
+            {"observation_id": "raw-section-0000-0004", "start_seconds": 0, "end_seconds": 8,
+             "start_bar": 1, "end_bar": 4, "bar_count": 4, "recurrence_strength": .91, "family_salience": .65,
+             "relative_energy": .72, "energy_rise": .31, "entry_contrast": .74, "exit_contrast": None, "build_momentum": None, "boundary_novelty": .61,
+             "preparation_profile": {"energy_trajectory": .31, "exit_energy_direction": .62,
+                                     "exit_onset_direction": -.40, "exit_silence_direction": -1.2,
+                                     "exit_structural_context": .3},
+             "arrival_profile": {"entry_contrast": .74, "boundary_novelty": .61, "energy_direction": .62,
+                                 "onset_direction": -.40, "silence_direction": -1.2,
+                                 "origin_relative_energy": None, "destination_relative_energy": .72},
+             "entry_structural_departure": {"structural_context_change": .3, "membership_exit_strength": .91,
+                                              "repeated_section_end": .8, "recurrence_change": .2, "structural_route": "family-exit",
+                                              "structural_evidence": .55, "structural_target_bar": 13},
+             "entry_boundary": {"recurrence_change": .2, "structural_context_change": .3,
+                                "membership_exit_strength": .91, "repeated_section_end": .8,
+                                "structural_route": "family-exit", "structural_evidence": .55,
+                                "structural_target_bar": 13, "energy_change": .46, "onset_change": .28,
+                                "silence_change": .14, "energy_delta": .62, "onset_delta": -.40,
+                                "silence_delta": .18}},
+            {"observation_id": "raw-section-0004-0008", "start_seconds": 8, "end_seconds": 16,
+             "start_bar": 5, "end_bar": 8, "bar_count": 4, "recurrence_strength": None, "family_salience": None,
+             "entry_contrast": None, "exit_contrast": None, "build_momentum": None, "boundary_novelty": None},
+        ],
+    }
 
 
 if __name__ == "__main__":

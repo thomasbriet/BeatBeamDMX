@@ -167,6 +167,11 @@ BACKEND_PYTHON_SOURCES=(
   show_intent_candidate_mapper.py
   show_interpreter_input_adapter.py
   rich_musical_events.py
+  rme_preview.py
+  dynamic_composer.py
+  production_show_selector.py
+  live_intensity.py
+  musical_event_envelope.py
 )
 for backend_source in "${BACKEND_PYTHON_SOURCES[@]}"; do
   cp "${backend_source}" "${BACKEND_RESOURCES}/"
