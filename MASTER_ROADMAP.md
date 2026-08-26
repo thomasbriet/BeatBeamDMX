@@ -29,8 +29,31 @@ uitsluitend `LEGACY / HISTORICAL / RESEARCH CONTEXT`.
 | M24/M24A canonical candidate-pad | `CLOSED`: `M24_CANONICAL_AUTHORITY_CLOSEOUT_PASS`; `LEGACY_ONLY_PRODUCTION_CANDIDATE_SHADOW_RETAINED`; `CANONICAL_CANDIDATE_PRODUCTION_AUTHORITY = DISABLED_UNDER_CURRENT_EVIDENCE_CONTRACT`. Niet heropenen via thresholds, whitelist, kleine samples, candidate==legacy of hetzelfde evidencepakket. |
 | Continuous state, Event Envelope, variation en production selector | `COMPLETED_TECHNICAL / PRODUCTION_GATE_OFF`; runtime blijft `BASELINE_ONLY`, production promotion is alleen een toekomstige expliciete gated beslissing. |
 | VirtualDJ prewarm, master authority, observability en activate-path | `COMPLETED`: `VDJ_DECK_PREWARM_MASTER_SYNC = PASS` en `MASTER_SWITCH_ACTIVATE_LATENCY_OPTIMIZATION_PASS`. |
+| Analysis-worker operations en job lifecycle | `COMPLETED`: `ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`; bounded sequential queue, explicit states, cancellation/timeout, crash isolation, stale recovery en diagnostics. |
 | FILL micro-evidence | `TECHNICAL_PASS / HOLD_HUMAN_LABELS`; het 36-item reviewpakket bepaalt of calibratie of shadow-eventpromotie ooit gerechtvaardigd is. Geen FILL → strobe-regel. |
 | Beat pulse, live intensity, Event Envelope en variation | `TECHNICAL_PASS / HUMAN_HOLD`; uitsluitend de actuele reviewgates in `MASTER_BACKLOG.md` zijn nog open. |
+
+## Analysis-worker operational hardening
+
+`ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`. De bestaande VirtualDJ-bridge
+behoudt één sequential heavy-analysis worker en begrenst de queue op 128 jobs,
+terminal history op 256 en failure diagnostics op 24. Jobs exposen `QUEUED`,
+`RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED` en `TIMED_OUT`; equivalente
+inflight aanvragen worden samengevoegd. Running cancellation en de
+10-minutentimeout beëindigen de exacte child-process tree bounded, waarna de
+queue zonder service-restart doorgaat. Protocol-, request-, filepath-,
+file-content- en snapshot-identiteit falen closed met beperkte machinecodes.
+
+Cache en BeatBeam-handoff blijven via hun bestaande atomic writers publiceren;
+een fout, cancellation of timeout kan dus geen partial current state maken. Een
+persisted `pending` active-track wordt bij bridgestart naar `unavailable`
+hersteld, met behoud van de laatste valide analyse-index en normale plugin-resync.
+Queue-/jobleeftijd, worker-PID/health, terminal counters, failurecategorie en
+stale recovery zijn additief zichtbaar in protocol v1 diagnostics. Pressure-,
+failure-storm-, shutdown-, restart- en echte runtimeacceptatie eindigden idle
+met nul orphan workers. Analysis-, phrase-, RME- en continuous-stateversies zijn
+ongewijzigd; de current library bleef 215/215 en BeatBeam bleef
+`BASELINE_ONLY`.
 
 ## Historical planning snapshot — superseded as active backlog
 

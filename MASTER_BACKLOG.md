@@ -37,7 +37,7 @@
 | --- | --- | --- | --- |
 | VirtualDJ workflow / reanalysis UX | `DEFERRED` | Voorbereidings-, batch-, retry- en statuservaring verfijnen. | Productprioriteit en scoped workflow. |
 | Smart Hot Cues | `DEFERRED_VIRTUALDJ_ORIENTED` | Eventuele VirtualDJ-georiënteerde cue-ondersteuning. | Productbesluit; geen Rekordbox-outputrichting. |
-| Productization | `DEFERRED` | Installer/update, operationele diagnostics, worker crash isolation, cancellation en resourcebeheer. | Expliciete release-/operational milestone. |
+| Productization | `DEFERRED` | Installer/update en release-/distributiediscipline verder productiseren. | Expliciete release-milestone; worker lifecycle, diagnostics en resource bounds zijn technisch pass. |
 
 ## DONE RECENTLY
 
@@ -46,6 +46,7 @@
 - Dynamic Composer continuous backbone, RME-modulation, Event Envelope, generative variation, selector hardening, fault injection en 100k soak.
 - `LIVE_INTENSITY_STRUCTURED_TECHNICAL_PASS` en beat/dimmer phase-sync pass.
 - `VDJ_DECK_PREWARM_MASTER_SYNC = PASS` en `MASTER_SWITCH_ACTIVATE_LATENCY_OPTIMIZATION_PASS`.
+- `ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`: expliciete bounded joblifecycle, cancellation/timeout, worker crash isolation en cleanup, stale-pending recovery, atomic cache/handoff publication en operationele diagnostics; 215/215 current bleef behouden.
 - FILL micro-evidence/tooling en het 36-item blinded reviewpakket.
 
 ## LEGACY / CLOSED

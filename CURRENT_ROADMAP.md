@@ -27,6 +27,7 @@
 - Live intensity: `LIVE_INTENSITY_STRUCTURED_TECHNICAL_PASS`; attack 0,16 s, release 0,85 s, 5 s baseline en begrensde ±0,06 previewmodifier.
 - Beat/dimmer: fase-locked `get_beatpos`-route is technisch pass; EVERY_BEAT, HALF_TIME en BAR_ACCENT zijn expliciete presentatie-intenties.
 - VirtualDJ lifecycle: active-deck/master-authority, prewarm, deck/path-generation identity, observability en fast activate-path zijn pass: `VDJ_DECK_PREWARM_MASTER_SYNC = PASS` en `MASTER_SWITCH_ACTIVATE_LATENCY_OPTIMIZATION_PASS`.
+- `ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`: de bestaande sequential bridgequeue is bounded (128 queued, 256 terminal history), heeft expliciete terminal states, cancellation, een 10-minutentimeout, child-process cleanup, failure isolation, content-/response-identitychecks, restart recovery en operationele diagnostics. De 215/215 current library en bestaande prewarm/master-authority zijn behouden.
 - FILL: pre-native micro-evidence, tooling en geblindeerd reviewpakket zijn gereed; 82 candidates in de 24-track diagnose. Geen FILL-promotie.
 
 ## Human Holds / thuisreview
@@ -49,7 +50,7 @@
 - Evidence-first micro-events: andere short accents, risers/downlifters, impact- en vocal/percussion/bass entry/removal-signalen.
 - Reële UX-uitbreidingen: Live UI-polish, fixture/manual UX en moving-head-snelheidsbediening. Loaded deck/master/track-prewarm, Preview-state en Composerdiagnostics bestaan al.
 - Show Simulator is **Later** en is onderscheiden van de bestaande Native Preview Map.
-- VirtualDJ workflow-/reanalyze-UX, Smart Hot Cues en productization (installer, updates, diagnostics, crash isolation, cancellation/resources) zijn Deferred totdat er productprioriteit en een apart scoped plan is.
+- VirtualDJ workflow-/reanalyze-UX, Smart Hot Cues en resterende productization (installer, updates en release/distributie) zijn Deferred totdat er productprioriteit en een apart scoped plan is.
 
 ## Safety Gates
 
@@ -60,6 +61,6 @@
 
 ## Git State
 
-- SongAnalyzer-checkpoints: `397e071` (FILL), `d3fd28f` (shadow handoff), `b982211` (VirtualDJ lifecycle); geen remote.
+- SongAnalyzer-checkpoints: `397e071` (FILL), `d3fd28f` (shadow handoff), `b982211` (VirtualDJ lifecycle), `f6025a1` (analysis-worker operational hardening); geen remote.
 - BeatBeam-checkpoints: `84c1779` (composer foundation), `c499a0c` (preview/runtime diagnostics), `ad3dd8a` (continuous coverage/checkpoint).
 - Generated review-/soakartifacts zijn geen source-dirty state. Lokale commits blijven de veilige werkwijze; geen automatische push.
