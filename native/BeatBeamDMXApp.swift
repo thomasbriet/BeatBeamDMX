@@ -111,7 +111,6 @@ let backendLogURL = FileManager.default.temporaryDirectory.appendingPathComponen
 private let stageMapAspectRatio: CGFloat = 16.0 / 9.0
 private let requiredBackendSchemaVersion = 4
 private let defaultBackendOscPort = beatBeamBackendOscPort
-private let nativeDebugUIEnabled = ProcessInfo.processInfo.environment["BEATBEAM_DEBUG_UI"] != "0"
 
 private func defaultRekordboxBridgeScriptPath() -> String {
     let fallback = (URL(fileURLWithPath: NSHomeDirectory()) as URL)
@@ -446,6 +445,7 @@ struct DebugActiveTrack: Decodable {
 struct DebugFailure: Decodable {
     let filePath: String?; let timestampUtc: String?; let priority: String?; let phase: String?
     let message: String?; let exitCode: Int?; let timedOut: Bool?; let stderr: String?
+    let category: String?; let jobId: String?
 }
 struct DebugAnalysisState: Decodable {
     let schemaVersion: Int?
@@ -546,14 +546,15 @@ struct DebugTrackStructureEvent: Decodable {
     let startBar: Int?; let targetBar: Int?; let confidence: Double?
 }
 struct DebugBridgeDiagnostics: Decodable { let status: String?; let error: String?; let diagnostics: DebugBridgeDetails? }
-struct DebugBridgeDetails: Decodable { let playlistWatcher: DebugPlaylistWatcher?; let analysisQueue: DebugQueue?; let activeTrack: DebugActiveTrack?; let nativePlugin: DebugNativePlugin?; let control: DebugBridgeControl?; let runningJob: DebugRunningJob?; let recentFailures: [DebugFailure]? }
+struct DebugBridgeDetails: Decodable { let playlistWatcher: DebugPlaylistWatcher?; let analysisQueue: DebugQueue?; let activeTrack: DebugActiveTrack?; let nativePlugin: DebugNativePlugin?; let control: DebugBridgeControl?; let runningJob: DebugRunningJob?; let recentFailures: [DebugFailure]?; let prewarmTracks: [DebugPrewarmTrack]?; let staleRecoveryCount: Int? }
 struct DebugRunningJob: Decodable {
     let filePath: String?; let priority: String?; let enqueuedAtUtc: String?; let startedAtUtc: String?
     let elapsedMilliseconds: Int?; let analysisVersion: String?; let phraseAnalysisVersion: String?
-    let source: String?; let generation: Int?
+    let source: String?; let generation: Int?; let jobId: String?; let state: String?; let workerPid: Int?
 }
+struct DebugPrewarmTrack: Decodable { let filePath: String?; let deck: Int?; let status: String?; let generation: Int?; let jobId: String?; let lastFailure: DebugFailure? }
 struct DebugPlaylistWatcher: Decodable { let enabled: Bool?; let playlistDirectory: String?; let playlistCount: Int?; let discoveredTrackCount: Int?; let cacheHitsThisSession: Int?; let lastReconcileUtc: String?; let lastError: String?; let currentTrackCount: Int?; let staleTrackCount: Int?; let needsAnalysisTrackCount: Int?; let failedKnownTrackCount: Int? }
-struct DebugQueue: Decodable { let capacity: Int?; let queuedNormal: Int?; let queuedHigh: Int?; let running: Int?; let analyzing: Int?; let completedThisSession: Int?; let failedThisSession: Int?; let oldestQueuedMilliseconds: Int?; let failedRunner: Int?; let failedInvalidResult: Int?; let evictedNormalForHigh: Int?; let otherFailed: Int?; let uniqueFailedTracks: Int?; let uniqueFailureTrackingSaturated: Bool? }
+struct DebugQueue: Decodable { let capacity: Int?; let queuedNormal: Int?; let queuedHigh: Int?; let running: Int?; let analyzing: Int?; let completedThisSession: Int?; let failedThisSession: Int?; let oldestQueuedMilliseconds: Int?; let failedRunner: Int?; let failedInvalidResult: Int?; let evictedNormalForHigh: Int?; let otherFailed: Int?; let uniqueFailedTracks: Int?; let uniqueFailureTrackingSaturated: Bool?; let cancelledThisSession: Int?; let timedOutThisSession: Int?; let deduplicatedThisSession: Int?; let terminalHistoryCount: Int?; let workerAlive: Bool?; let workerHealthy: Bool?; let lastFailureCategory: String?; let analysisTimeoutSeconds: Int? }
 struct DebugNativePlugin: Decodable {
     let poller: DebugNativePoller?
     let selectors: DebugNativeSelectors?
@@ -640,6 +641,7 @@ struct LiveDeckState: Decodable {
     let prewarmStatus: String?
     let generation: Int?
     let isMaster: Bool?
+    let isPlaying: Bool?
 }
 
 struct RemoteAccessState: Decodable {
@@ -814,6 +816,7 @@ struct PreviewCompositionState: Decodable {
     let fixtureGroupIntents: [String: PreviewFixtureGroupIntent]?
     let selectedPrimitives: [String: [String: PreviewPrimitiveValue]]?
     let changedDimensions: [String]?
+    let physicalOutputSource: String?
 }
 
 struct VirtualDjBeatPulsePreviewState: Decodable {
@@ -2676,6 +2679,13 @@ final class AppModel: ObservableObject {
     @Published var remoteStatusText = "Remote niet beschikbaar"
     @Published var errorText = ""
     @Published var debugState: DebugState?
+    @Published private(set) var liveUiState: LiveUiState?
+    @Published private(set) var liveIntensityState: LiveIntensityState?
+    @Published private(set) var physicalDmxConnected = false
+    @Published private(set) var physicalDmxError: String?
+    @Published private(set) var blackoutActive = false
+    @Published private(set) var physicalOutputSource = "auto_show -> current_values"
+    @Published private(set) var productionShowSource = "existing_autoshow"
 
     private var baseURL: URL {
         URL(string: "http://127.0.0.1:\(beatBeamBackendPort)")!
@@ -4239,10 +4249,17 @@ final class AppModel: ObservableObject {
         transportExternalAvailable = state.transport.externalAvailable
         transportStatusText = transportResolvedLabel(for: state.transport.resolvedMode)
         debugState = state.debug
+        liveUiState = state.liveUi
+        liveIntensityState = state.dmx.autoShow.liveIntensity
+        physicalDmxConnected = state.dmx.connected
+        physicalDmxError = state.dmx.error
+        blackoutActive = state.dmx.blackoutActive
         structureBehaviorSource = state.developerStructureBehavior?.selectedSource == "song_analyzer"
             ? "song_analyzer" : "legacy"
         slotPreviews = state.dmx.slotPreviews
         previewComposition = state.dmx.rmePreviewDifferential
+        physicalOutputSource = state.dmx.rmePreviewDifferential?.physicalOutputSource ?? "auto_show -> current_values"
+        productionShowSource = state.dmx.rmePreviewDifferential?.productionSource ?? "existing_autoshow"
         previewPulseTestMode = state.dmx.previewPulseTest?.mode ?? "OFF"
         dmxSlotOrder = state.dmx.slotOrder
         dmxSlotRanges = state.dmx.slotRanges
@@ -5621,9 +5638,10 @@ struct ContentView: View {
     @State private var utilityPanel: UtilityPanel? = nil
 
     private enum WorkspaceMode: String, CaseIterable, Identifiable {
-        case live = "Live"
-        case fixtures = "Fixtures"
-        case map = "Map"
+        case live = "Live Show"
+        case preview = "Preview"
+        case manual = "Manual"
+        case advanced = "Advanced"
 
         var id: String { rawValue }
     }
@@ -5667,7 +5685,6 @@ struct ContentView: View {
                     .ignoresSafeArea()
 
                 VStack(alignment: .leading, spacing: 14) {
-                    statusDeck
                     workspaceModeBar
                     if !model.errorText.isEmpty {
                         Text(model.errorText)
@@ -5686,11 +5703,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
                 .padding(18)
-                .frame(
-                    width: max(proxy.size.width, 1420),
-                    height: max(proxy.size.height, 860),
-                    alignment: .topLeading
-                )
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
             }
         }
         .onAppear {
@@ -5771,12 +5784,12 @@ struct ContentView: View {
 
             Spacer(minLength: 12)
 
-            if nativeDebugUIEnabled {
+            if workspaceMode == .advanced {
                 Button {
                     model.refreshDebugState()
-                    openWindow(id: "debug")
+                    workspaceMode = .advanced
                 } label: {
-                    Label("Debug", systemImage: "ladybug")
+                    Label("Refresh", systemImage: "arrow.clockwise")
                         .font(.system(size: 14, weight: .semibold))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 9)
@@ -5784,30 +5797,32 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
 
-            ForEach(UtilityPanel.allCases) { panel in
-                Button {
-                    utilityPanel = utilityPanel == panel ? nil : panel
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: panel.icon)
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(panel.title)
-                            .font(.system(size: 14, weight: .semibold))
+            if workspaceMode == .advanced {
+                ForEach(UtilityPanel.allCases) { panel in
+                    Button {
+                        utilityPanel = utilityPanel == panel ? nil : panel
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: panel.icon)
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(panel.title)
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(utilityPanel == panel ? AnyShapeStyle(BeatBeamPalette.utilityGradient) : AnyShapeStyle(BeatBeamPalette.raisedGradient))
+                        )
+                        .foregroundStyle(utilityPanel == panel ? Color.white : Color.white.opacity(0.92))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(utilityPanel == panel ? BeatBeamPalette.brandMagenta.opacity(0.72) : BeatBeamPalette.border, lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(utilityPanel == panel ? AnyShapeStyle(BeatBeamPalette.utilityGradient) : AnyShapeStyle(BeatBeamPalette.raisedGradient))
-                    )
-                    .foregroundStyle(utilityPanel == panel ? Color.white : Color.white.opacity(0.92))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(utilityPanel == panel ? BeatBeamPalette.brandMagenta.opacity(0.72) : BeatBeamPalette.border, lineWidth: 1)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
     }
@@ -5824,37 +5839,28 @@ struct ContentView: View {
         Group {
             if workspaceMode == .live {
                 ScrollView {
+                    LiveShowWorkspaceView()
+                        .padding(.trailing, 4)
+                        .padding(.bottom, 32)
+                }
+            } else if workspaceMode == .preview {
+                ScrollView {
+                    PreviewComposerWorkspaceView()
+                        .padding(.trailing, 4)
+                        .padding(.bottom, 32)
+                }
+            } else if workspaceMode == .manual {
+                ScrollView {
                     LivePresetWorkspaceView()
                         .padding(.trailing, 4)
-                        .padding(.bottom, 160)
+                        .padding(.bottom, 32)
                 }
-            } else if workspaceMode == .map {
-                MapWorkspaceView()
-                    .padding(.trailing, 4)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    fixtureBankPanel
-
-                    if let editor = selectedEditor {
-                        ScrollView {
-                            SlotPanelView(editor: editor)
-                                .padding(.trailing, 4)
-                                .padding(.bottom, 160)
-                        }
-                    } else {
-                        PanelSurface(title: "Fixture") {
-                            VStack(spacing: 8) {
-                                Image(systemName: "lightbulb.slash")
-                                    .font(.system(size: 28))
-                                    .foregroundStyle(.secondary)
-                                Text("Geen fixtures")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 280)
-                        }
-                    }
-                }
+                AdvancedOperationsWorkspaceView(
+                    fixtureBank: AnyView(fixtureBankPanel),
+                    selectedEditor: selectedEditor
+                )
+                .padding(.trailing, 4)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -6525,11 +6531,9 @@ struct LivePresetWorkspaceView: View {
         VStack(alignment: .leading, spacing: 12) {
             PanelSurface(title: "Live Overrides", compact: true) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Global override-laag bovenop Auto Show. Kleur en effecten gaan direct naar de backend en laten fixture-editors verder met rust.")
+                    Text("Global override-laag bovenop Auto Show. Actieve overrides zijn ook altijd zichtbaar in Live Show.")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
-
-                    AutoShowControlView()
 
                     PanelSurface(title: "Color", compact: true) {
                         VStack(alignment: .leading, spacing: 10) {
@@ -7308,6 +7312,12 @@ struct DebugInspectorView: View {
                         row("Queue", diag?.analysisQueue?.capacity.map { "\(diag?.analysisQueue?.queuedNormal ?? 0) NORMAL · \(diag?.analysisQueue?.queuedHigh ?? 0) HIGH / \($0)" })
                         row("Running", diag?.analysisQueue?.running.map(String.init))
                         row("Completed / failed", diag.map { "\($0.analysisQueue?.completedThisSession ?? 0) / \($0.analysisQueue?.failedThisSession ?? 0)" })
+                        row("Cancelled / timed out", diag.map { "\($0.analysisQueue?.cancelledThisSession ?? 0) / \($0.analysisQueue?.timedOutThisSession ?? 0)" })
+                        row("Deduplicated / history", diag.map { "\($0.analysisQueue?.deduplicatedThisSession ?? 0) / \($0.analysisQueue?.terminalHistoryCount ?? 0)" })
+                        row("Worker", diag?.analysisQueue?.workerHealthy.map { "\($0 ? "healthy" : "unhealthy") · \(diag?.analysisQueue?.workerAlive == true ? "alive" : "idle")" })
+                        row("Worker PID", diag?.runningJob?.workerPid.map(String.init))
+                        row("Worker timeout", diag?.analysisQueue?.analysisTimeoutSeconds.map { "\($0) s" })
+                        row("Last failure category", diag?.analysisQueue?.lastFailureCategory)
                         row("Failed runner", diag?.analysisQueue?.failedRunner.map(String.init))
                         row("Invalid / evicted", diag.map { "\($0.analysisQueue?.failedInvalidResult ?? 0) / \($0.analysisQueue?.evictedNormalForHigh ?? 0)" })
                         row("Other / unique", diag.map { "\($0.analysisQueue?.otherFailed ?? 0) / \($0.analysisQueue?.uniqueFailedTracks ?? 0)" })
@@ -7319,6 +7329,7 @@ struct DebugInspectorView: View {
                         row("Playlist", diag?.playlistWatcher?.playlistCount.map { "\($0) playlists · \(diag?.playlistWatcher?.discoveredTrackCount ?? 0) tracks" })
                         row("Library current / stale", diag.map { "\($0.playlistWatcher?.currentTrackCount ?? 0) / \($0.playlistWatcher?.staleTrackCount ?? 0)" })
                         row("Needs / failed-known", diag.map { "\($0.playlistWatcher?.needsAnalysisTrackCount ?? 0) / \($0.playlistWatcher?.failedKnownTrackCount ?? 0)" })
+                        row("Stale recovery", diag?.staleRecoveryCount.map(String.init))
                     }
                     debugDisclosure("RICH MUSICAL EVENTS", isExpanded: $richEventsExpanded) {
                         row("Current event", model.debugState?.analysis?.currentEvent?.type)
@@ -7329,13 +7340,13 @@ struct DebugInspectorView: View {
                     debugDisclosure("FAILURES", isExpanded: $failuresExpanded) {
                         let diag = model.debugState?.bridgeDiagnostics?.diagnostics
                         if let failure = diag?.activeTrack?.lastFailure {
-                            row("Last failure", [failure.phase, failure.message].compactMap { $0 }.joined(separator: " · "))
+                            row("Last failure", [failure.category, failure.phase, failure.message].compactMap { $0 }.joined(separator: " · "))
                         }
                         if let failures = diag?.recentFailures, !failures.isEmpty {
                             ForEach(Array(failures.enumerated()), id: \.offset) { _, failure in
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(failure.filePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "—")
-                                    Text([failure.phase, failure.message].compactMap { $0 }.joined(separator: " · "))
+                                    Text([failure.category, failure.phase, failure.message].compactMap { $0 }.joined(separator: " · "))
                                         .foregroundStyle(.secondary)
                                 }
                             }
@@ -16793,12 +16804,5 @@ struct BeatBeamDMXNativeApp: App {
         }
         .defaultSize(width: 1280, height: 800)
 
-        Window("BeatBeam Debug", id: "debug") {
-            DebugInspectorView()
-                .environmentObject(model)
-                .preferredColorScheme(.dark)
-        }
-        .defaultSize(width: 760, height: 680)
-        .windowResizability(.contentSize)
     }
 }

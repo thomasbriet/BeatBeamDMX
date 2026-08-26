@@ -36,6 +36,7 @@ struct ContractLiveDeck: Decodable {
     let beatNumber: Int?
     let barNumber: Int?
     let phrase: String?
+    let isPlaying: Bool?
 }
 
 struct ContractLiveUi: Decodable {
@@ -266,7 +267,7 @@ do {
         "bars_to_next": 8,
         "decks": [
           { "deck_number": 1, "is_loaded": false, "is_active": false, "track_title": null, "beat_number": null, "bar_number": null, "phrase": null },
-          { "deck_number": 2, "is_loaded": true, "is_active": true, "track_title": "Test", "beat_number": 3, "bar_number": 4, "phrase": "Chorus 1" }
+          { "deck_number": 2, "is_loaded": true, "is_active": true, "track_title": "Test", "beat_number": 3, "bar_number": 4, "phrase": "Chorus 1", "is_playing": true }
         ]
       },
       "dmx": { "playback": { "source": "virtualdj" } }
@@ -284,6 +285,7 @@ do {
     require(virtualDj.liveUi?.barsToNext == 8, "VirtualDJ live UI countdown")
     require(virtualDj.liveUi?.decks?.first?.isLoaded == false, "VirtualDJ live UI empty deck")
     require(virtualDj.liveUi?.decks?.last?.isActive == true, "VirtualDJ live UI active deck card")
+    require(virtualDj.liveUi?.decks?.last?.isPlaying == true, "VirtualDJ live UI playing deck card")
 
     let legacy = try decode("""
     {

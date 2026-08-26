@@ -16444,6 +16444,7 @@ def _live_ui_deck(raw, active_deck_number, active_transport=None):
         "prewarm_status": raw.get("prewarm_status"),
         "generation": raw.get("generation"),
         "is_master": bool(raw.get("is_master")),
+        "is_playing": bool(raw.get("is_playing")),
     }
 
 

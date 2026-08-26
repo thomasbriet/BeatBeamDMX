@@ -21,16 +21,17 @@ class StructureSourceUiTests(unittest.TestCase):
         self.assertNotIn("structureSource", javascript)
         self.assertNotIn("structure-source-control", css)
 
-    def test_native_debug_entrypoint_has_one_central_feature_gate(self):
+    def test_advanced_diagnostics_is_part_of_the_primary_information_architecture(self):
         native = (ROOT / "native" / "BeatBeamDMXApp.swift").read_text(encoding="utf-8")
-        self.assertIn('BEATBEAM_DEBUG_UI', native)
-        self.assertIn('if nativeDebugUIEnabled', native)
-        self.assertIn('Label("Debug", systemImage: "ladybug")', native)
-        self.assertIn('DebugInspectorView()', native)
-        self.assertIn('Window("BeatBeam Debug", id: "debug")', native)
-        self.assertIn('openWindow(id: "debug")', native)
-        debug_window_start = native.index('Window("BeatBeam Debug", id: "debug")')
-        self.assertNotIn('.sheet', native[debug_window_start:])
+        live_show = (ROOT / "native" / "LiveShowUX.swift").read_text(encoding="utf-8")
+        for title in ('case live = "Live Show"', 'case preview = "Preview"',
+                      'case manual = "Manual"', 'case advanced = "Advanced"'):
+            self.assertIn(title, native)
+        self.assertIn('LiveShowWorkspaceView()', native)
+        self.assertIn('AdvancedOperationsWorkspaceView(', native)
+        self.assertIn('DebugInspectorView()', live_show)
+        self.assertNotIn('openWindow(id: "debug")', native)
+        self.assertNotIn('Window("BeatBeam Debug", id: "debug")', native)
 
     def test_debug_state_is_bounded_and_reuses_existing_diagnostics(self):
         backend = (ROOT / "beatbeam_app.py").read_text(encoding="utf-8")

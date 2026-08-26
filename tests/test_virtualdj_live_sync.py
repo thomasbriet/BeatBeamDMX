@@ -181,6 +181,7 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
         self.assertIsNone(live["next_phrase"])
         self.assertFalse(live["decks"][0]["is_loaded"])
         self.assertTrue(live["decks"][1]["is_active"])
+        self.assertTrue(live["decks"][1]["is_playing"])
 
     def test_live_ui_enriches_nonactive_prewarm_without_changing_authority(self):
         state = {
@@ -200,6 +201,7 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
         self.assertEqual((1, "/Music/A.flac"), (live["active_deck_number"], live["track_path"]))
         self.assertEqual((True, "X", "ready", 22, False),
                          (deck_two["is_loaded"], deck_two["track_title"], deck_two["prewarm_status"], deck_two["generation"], deck_two["is_active"]))
+        self.assertFalse(deck_two["is_playing"])
 
     def test_live_ui_candidate_replacement_does_not_retain_old_prewarm(self):
         state = {"_active_playback_source": "virtualdj", "playback_state": {"source": "virtualdj", "availability": "available",

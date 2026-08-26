@@ -110,6 +110,7 @@ swiftc \
   -framework MetalKit \
   -framework SwiftUI \
   native/BeatBeamDMXApp.swift \
+  native/LiveShowUX.swift \
   -o "${MACOS}/${APP_NAME}"
 
 cat > "${CONTENTS}/Info.plist" <<PLIST
