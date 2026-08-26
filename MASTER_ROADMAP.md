@@ -2734,8 +2734,9 @@ Aanbevolen volgorde vanaf de huidige productrichting:
 
 # 13. Smart Hot Cues / DJ Preparation voor VirtualDJ
 
-`TODO` — toekomstige VirtualDJ-richting, na of naast de fundamenten voor rijke
-analyse. Dit is geen uitbreiding van de huidige M22A-runtimeacceptatie.
+`ACTIVE / TECHNICAL FOUNDATION DONE` — `SMART_CUE_PLANNER_V1_TECHNICAL_PASS`
+en `SMART_CUE_VDJ_WRITER_GATE_OFF_PASS` zijn op 2026-08-26 bewezen. Muzikale
+placement blijft `HOLD_HUMAN_REVIEW`; production apply blijft hard uit.
 
 VirtualDJ is het enige actieve DJ-doel. SongAnalyzer blijft de analyse- en
 preparation-engine, VirtualDJ de playback-/DJ-interface en BeatBeam de live
@@ -2753,52 +2754,53 @@ lighting/show-engine.
 
 Chorus, drop, build-up, breakdown, transitie en event-hiërarchie kunnen deze
 basis later verfijnen.
+Dit zijn productsemantieken, geen `Intro/Chorus/Outro => cue`-labelmapping.
 
 ## 13.2 Smart countdowns en cueplan
 
 Rond drops, chorussen, sterke transities en andere betrouwbare events kan een
 praktische countdown worden gepland, conceptueel bijvoorbeeld `16 / 12 / 8 / 4 /
 target` maten. De planner gebruikt alleen intervallen die passen bij
-beschikbare lengte, phrase/downbeat, intro/outro, pickup, eerdere secties,
-tracklengte, bestaande cues, slots en confidence. Exacte maat- en
+beschikbare lengte, phrase/downbeat, pickup, eerdere structurele observaties,
+tracklengte, bestaande cues, slots en provenance-evidence. Exacte maat- en
 downbeatplaatsing is vereist: dit is een muzikale mixhulp, geen overvolle
 cue-lijst.
 
 De prioriteit is deterministisch: eerst MIX IN, MAIN, BREAK en MIX OUT; daarna
-drop-/chorus-countdowns en event-cues. Dubbelen, lage-confidence events, cues
+MAIN-countdowns. Dubbelen, onvoldoende bewezen events, cues
 buiten een zinvolle mixcontext en onnodige overload worden weggelaten. Bij
 beperkte slots blijven de belangrijkste cues behouden. Het conceptuele model
-bevat rol, doel-event, timestamp, beat/maat, phrasecontext,
-countdown-afstand-in-maten, confidence en prioriteit. Rollen zijn onder meer
-`MIX_IN`, `MAIN`, `BREAK`, `MIX_OUT`, `DROP_COUNTDOWN`, `CHORUS_COUNTDOWN`,
-`DROP` en `CHORUS`; dit legt nog geen implementatie vast.
+bevat rol, doel-event, timestamp, beat/maat, observation/provenance-reasons en
+countdown-afstand-in-maten. V1-rollen zijn `MIX_IN`, `MAIN`, `BREAK`, `MIX_OUT`
+en `COUNTDOWN_16/12/8/4`; dit legt geen canonical labelauthority vast.
 
 ## 13.3 Canonieke bron en fasen
 
-Smart Hot Cues gebruikt hetzelfde canonical rich-analysis-contract als BeatBeam:
-phrase-/segmentgrenzen, maten/downbeats, energie/confidence, hiërarchie,
-builds, drops, chorussen, breakdowns, transities, sterkte en toekomstige
-events. Er komt geen parallel model.
+Smart Hot Cues gebruikt dezelfde software-onafhankelijke rich-analysisdata als
+BeatBeam: phrase-/segmentgrenzen, track-specifieke maten/downbeats, relatieve
+energie/traject, recurrence/materialfamilies en provenance-clean Rich Musical
+Events. Canonical section labels, titel, artiest en genre zijn geen
+production-truth of plannerinput. Er komt geen parallel audiomodel.
 
 1. **Fase 1:** betrouwbare maten, downbeats, phrases en semantische segmentatie;
    A/B/C/D; eenvoudige 4-maten-countdowns rond betrouwbare doelen.
-2. **Fase 2:** rijkere chorus-, drop-, build-, breakdown-, transitie- en
-   hiërarchische events met confidence.
+2. **Fase 2:** rijkere provenance-clean drop-, build-, break-, arrival-,
+   release-, return- en transitie-events.
 3. **Fase 3:** prioritering verfijnen op basis van DJ-tests en mixkwaliteit.
 
 Fase-2-features worden niet kunstmatig naar voren gehaald.
 
 ## 13.4 VirtualDJ-workflow, cache en veiligheid
 
-De beoogde keten is: playlist → SongAnalyzer-preanalyse → canonical rich
-analysis → Smart Hot Cue Plan → beschikbaar voor VirtualDJ → DJ laadt track →
+De beoogde keten is: playlist → SongAnalyzer-preanalyse → software-independent
+rich analysis → Smart Hot Cue Plan → beschikbaar voor VirtualDJ → DJ laadt track →
 cues zijn bruikbaar. Dit sluit aan op M21A-playlist-preanalyse en minimaliseert
 handmatige voorbereiding.
 
 Het cueplan wordt uit persistente analyse opgebouwd of hergebruikt. Een cache-hit
 start geen Essentia-heranalyse; ontbrekende of stale `AnalysisVersion` volgt de
-normale analyseflow. Onzekere cues worden weggelaten, event-cues vereisen
-voldoende confidence en dezelfde input levert altijd hetzelfde plan. Geavanceerde
+normale analyseflow. Onvoldoende bewezen cues worden weggelaten, event-cues
+vereisen expliciete provenance-evidence en dezelfde input levert altijd hetzelfde plan. Geavanceerde
 handmatige correctie is later optioneel, niet de eerste vereiste.
 
 Er komen geen custom waveform-overlays, native VirtualDJ-waveform-hacks of
@@ -2817,9 +2819,32 @@ van beide systemen krijgt een verborgen afhankelijkheid van het andere.
 - Cache-hits starten geen nieuwe zware analyse; gelijke input levert gelijk plan.
 - De VirtualDJ-workflow vereist zo weinig mogelijk handmatige voorbereiding.
 
-_Last updated: 2026-08-21_
+_Last updated: 2026-08-26_
 
-## 13.6 M23A runtime failure diagnostics
+## 13.6 Smart Cue V1 technical foundation
+
+- Contract: `smart-cue-plan-v1`; vaste slots voor MIX IN, MAIN, BREAK, MIX OUT
+  en MAIN -16/-12/-8/-4 bars. Ontbrekende evidence levert een expliciete
+  omission, nooit een gefabriceerde cue.
+- Corpus: 215/215 current analyses gepland zonder audioheranalyse; twee runs
+  leverden exact corpusdigest
+  `8d6c02b37e54614f41e3837ef5d79cf88991dc3ca0156f4edb7d7c8c61ba2f50`.
+- VirtualDJ: uitsluitend officiële deck-scoped VDJScript-semantiek via de
+  bestaande native plugin; geen database.xml-mutatie of tweede control channel.
+  Loaded-deck cue-state wordt read-only gepreflicht.
+- Safety: exact deck/file/content/generation, dubbel non-advancing preflight,
+  whole-apply user-cue conflict abort, managed snapshotownership, readback en
+  bounded rollback. `SMART_CUE_AUTO_APPLY_OFF` is compile-/productgate.
+- Live gate-off acceptance: twee geladen tracks hadden elk een exact plan; 0
+  bestaande cues vóór/na, apply `accepted=false`, master/identity onveranderd
+  en geen transportseek.
+- Reviewpakket: 24 diverse tracks onder `artifacts/smart-cue-review/`; status
+  `SMART_CUE_PLACEMENT = HOLD_HUMAN_REVIEW`.
+
+Exact vervolg: `SMART_CUE_HUMAN_PLACEMENT_REVIEW`, daarna uitsluitend bij
+expliciete toestemming `CONTROLLED_VDJ_APPLY` op een disposable/testasset.
+
+## 13.7 M23A runtime failure diagnostics
 
 M23A-runtimetests hebben track-specifieke analyzerfailures blootgelegd terwijl
 HIGH-prioriteit, queuegezondheid en v14-voortgang correct werken. De bridge

@@ -29,6 +29,7 @@
 - VirtualDJ lifecycle: active-deck/master-authority, prewarm, deck/path-generation identity, observability en fast activate-path zijn pass: `VDJ_DECK_PREWARM_MASTER_SYNC = PASS` en `MASTER_SWITCH_ACTIVATE_LATENCY_OPTIMIZATION_PASS`.
 - `ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`: de bestaande sequential bridgequeue is bounded (128 queued, 256 terminal history), heeft expliciete terminal states, cancellation, een 10-minutentimeout, child-process cleanup, failure isolation, content-/response-identitychecks, restart recovery en operationele diagnostics. De 215/215 current library en bestaande prewarm/master-authority zijn behouden.
 - `BEATBEAM_LIVE_SHOW_UX_V2_TECHNICAL_PASS`: de native standaardweergave is nu Live Show met compacte Live/Preview/Manual/Advanced-navigatie. Zij projecteert uitsluitend bestaande typed runtime-state: authoritative playback, decks/readiness, continuous state, intensity, event/envelope, composer/fixture-intent, manual safety en fysieke DMX-status. Raw diagnostics en de bestaande Preview Map zijn behouden; `is_playing` is alleen additief in de bestaande deck-state. Productie blijft `BASELINE_ONLY` en Preview blijft niet-authoritative.
+- `SMART_CUE_PLANNER_V1_TECHNICAL_PASS` en `SMART_CUE_VDJ_WRITER_GATE_OFF_PASS`: 215/215 current analyses leveren deterministisch `smart-cue-plan-v1` zonder audioheranalyse; MIX IN/MAIN/BREAK/MIX OUT en MAIN-countdowns zijn provenance-clean en fail-closed. De bestaande VirtualDJ plugin/bridge exposeert plan-, cue-preflight- en conflictstatus read-only. De writer heeft exact deck/file/content/generation-preflight, managed ownership, verify/rollback en transportguards, maar production apply is hard `SMART_CUE_AUTO_APPLY_OFF`.
 - FILL: pre-native micro-evidence, tooling en geblindeerd reviewpakket zijn gereed; 82 candidates in de 24-track diagnose. Geen FILL-promotie.
 
 ## Human Holds / thuisreview
@@ -39,6 +40,7 @@
 4. **Event Envelope:** beoordeel ARRIVAL, DROP, RELEASE en transities op muzikale timing, duration en settle.
 5. **Variatie:** beoordeel repeat, variation, recurrence en muzikale fit.
 6. **Live Show UX V2:** beoordeel de scanbaarheid, taal, compact/breed gedrag en de scheiding Live/Preview/Manual/Advanced tijdens echte bediening.
+7. **Smart Cues V1:** beoordeel de 24-track thuisreview op praktische MIX IN-runway, juiste MAIN, bruikbare BREAK/MIX OUT en muzikale 16/12/8/4-bar aftellingen. `SMART_CUE_PLACEMENT = HOLD_HUMAN_REVIEW`.
 
 ## Active / Next
 
@@ -46,18 +48,20 @@
 - Na FILL-labels: kalibratiebesluit op evidence, of expliciet niet promoveren.
 - Na consistente human evidence: afzonderlijke beslissing over shadow-event promotie en eventuele envelope-integratie.
 - Een eventuele Dynamic Composer-production promotion komt pas ná alle expliciete safety- en human gates; dit is geen huidige enablementtaak.
+- Na voldoende Smart Cue-placementreview: een afzonderlijke `CONTROLLED_VDJ_APPLY`-milestone op een expliciet toegestaan disposable/testasset; geen library-wide apply.
 
 ## Later / Deferred
 
 - Evidence-first micro-events: andere short accents, risers/downlifters, impact- en vocal/percussion/bass entry/removal-signalen.
 - Reële UX-uitbreidingen: fixture/manual UX-polish en moving-head-snelheidsbediening. Live Show UX V2 is technisch gereed en wacht uitsluitend op human review.
 - Show Simulator is **Later** en is onderscheiden van de bestaande Native Preview Map.
-- VirtualDJ workflow-/reanalyze-UX, Smart Hot Cues en resterende productization (installer, updates en release/distributie) zijn Deferred totdat er productprioriteit en een apart scoped plan is.
+- VirtualDJ workflow-/reanalyze-UX en resterende productization (installer, updates en release/distributie) zijn Deferred totdat er productprioriteit en een apart scoped plan is. Smart Hot Cues is niet meer deferred: de technische V1-foundation is gereed en wacht op human placementreview.
 
 ## Safety Gates
 
 - `CANONICAL_CANDIDATE_PRODUCTION_AUTHORITY = DISABLED_UNDER_CURRENT_EVIDENCE_CONTRACT`. `M24_CANONICAL_AUTHORITY_CLOSEOUT_PASS` blijft gesloten; `LEGACY_ONLY_PRODUCTION_CANDIDATE_SHADOW_RETAINED` is geen open TODO. Geen heropening via thresholds, whitelist, kleine sample, candidate==legacy of hetzelfde evidencepakket.
 - `FILL_EVIDENCE_PROMISING_MORE_REVIEW_REQUIRED` en `FILL_CALIBRATION = HOLD_HUMAN_LABELS`; FILL is nooit een directe “FILL → strobe”-productregel.
+- `SMART_CUE_PLACEMENT = HOLD_HUMAN_REVIEW` en `SMART_CUE_AUTO_APPLY = OFF`; geen production- of library-wide cuewrites vóór review plus een apart gecontroleerd applybesluit.
 - `MUSICAL_EVENT_ENVELOPE_HUMAN_VISUAL_ACCEPTANCE = HOLD`, `LIVE_INTENSITY_FEEDBACK = HOLD_HUMAN_RETEST`, `PREVIEW_BEAT_PULSE_RENDER_QUALITY = HOLD_HUMAN_RETEST` en `BEATBEAM_LIVE_SHOW_UX_V2 = HOLD_USER_REVIEW`.
 - Unknown, stale, mismatch, invalid state, lifecycle discontinuity, renderer failure en manual override vallen same-frame terug naar baseline.
 

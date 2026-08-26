@@ -12,6 +12,7 @@
 | Event Envelope review | `HOLD_HUMAN_VISUAL_ACCEPTANCE` | Beoordeel ARRIVAL, DROP, RELEASE en transities. | Muzikale timing/duration/settle nog niet live bevestigd. |
 | Variation review | `HOLD_HUMAN_VISUAL_ACCEPTANCE` | Beoordeel repeat, variation, recurrence en muzikale fit. | Technisch geen directe repeats; visuele/muzikale acceptatie ontbreekt. |
 | Live Show UX V2 review | `HOLD_USER_REVIEW` | Beoordeel scanbaarheid, taal, responsive gedrag en Live/Preview/Manual/Advanced-scheiding in echte bediening. | Technische pass is gereed; uitsluitend menselijke UX-acceptatie ontbreekt. |
+| Smart Cue V1 placementreview | `HOLD_HUMAN_REVIEW` | Beoordeel 24 diverse tracks op MIX IN, MAIN, BREAK, MIX OUT en exacte 16/12/8/4-bar aftellingen. | Technische planner/writer-foundation is pass; muzikale plaatsing is niet menselijk geaccepteerd en auto-apply blijft hard uit. |
 
 ## NEXT
 
@@ -20,6 +21,7 @@
 | FILL calibration decision | `BLOCKED_ON_HUMAN_LABELS` | Evalueer de gelabelde set; kies bounded kalibratie, shadow-event-experiment of geen promotie. | NOW/FILL-review. |
 | FILL shadow-event / envelope decision | `BLOCKED_ON_CALIBRATION_EVIDENCE` | Alleen bij aantoonbaar bewijs bepalen of FILL als bounded micro-event mag worden geprojecteerd. | Kalibratiebesluit; geen directe strobe-regel. |
 | Dynamic Composer production decision | `GATED_OFF` | Alleen als aparte milestone beoordelen of promotie verantwoord is. | Alle relevante human/safety-gates; huidige runtime blijft `BASELINE_ONLY`. |
+| Controlled VirtualDJ Smart Cue apply | `BLOCKED_ON_HUMAN_PLACEMENT_REVIEW` | Alleen met expliciete toestemming een write/readback/delete-cyclus op een disposable/testasset uitvoeren. | Smart Cue-human-review; geen normale librarytrack en geen library-wide apply. |
 
 ## LATER
 
@@ -36,7 +38,6 @@
 | Item | Status | Doel | Blokker |
 | --- | --- | --- | --- |
 | VirtualDJ workflow / reanalysis UX | `DEFERRED` | Voorbereidings-, batch-, retry- en statuservaring verfijnen. | Productprioriteit en scoped workflow. |
-| Smart Hot Cues | `DEFERRED_VIRTUALDJ_ORIENTED` | Eventuele VirtualDJ-georiënteerde cue-ondersteuning. | Productbesluit; geen Rekordbox-outputrichting. |
 | Productization | `DEFERRED` | Installer/update en release-/distributiediscipline verder productiseren. | Expliciete release-milestone; worker lifecycle, diagnostics en resource bounds zijn technisch pass. |
 
 ## DONE RECENTLY
@@ -48,6 +49,7 @@
 - `VDJ_DECK_PREWARM_MASTER_SYNC = PASS` en `MASTER_SWITCH_ACTIVATE_LATENCY_OPTIMIZATION_PASS`.
 - `ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`: expliciete bounded joblifecycle, cancellation/timeout, worker crash isolation en cleanup, stale-pending recovery, atomic cache/handoff publication en operationele diagnostics; 215/215 current bleef behouden.
 - `BEATBEAM_LIVE_SHOW_UX_V2_TECHNICAL_PASS`: Live Show als standaard, aparte Preview/Manual/Advanced, bestaande Preview Map/raw diagnostics behouden en geen wijziging van production authority.
+- `SMART_CUE_PLANNER_V1_TECHNICAL_PASS` en `SMART_CUE_VDJ_WRITER_GATE_OFF_PASS`: deterministic 215-track planning, corpus/reviewpackage, read-only native cue-preflight en exact-identity writer/ownership/verify/rollback foundation; `SMART_CUE_AUTO_APPLY_OFF` live bewezen.
 - FILL micro-evidence/tooling en het 36-item blinded reviewpakket.
 
 ## LEGACY / CLOSED
