@@ -4,6 +4,96 @@
 > Dit bestand moet tijdens programmeerwerk actief worden geraadpleegd en bijgewerkt.
 > Zie ook `CURRENT_ROADMAP.md` voor de compacte actuele status, prioriteiten en blockers.
 
+## Full continuous-state coverage en protected-worktree checkpoint
+
+`PASS / PRODUCTION GATE OFF`. Vijf tracks met een actuele analysis-container
+maar oude phrase-analysis zijn via de normale VirtualDJ bridge-workerflow
+gericht heranalyseerd. Daarna waren 215/215 tracks current en bruikbaar voor
+continuous-state shadowcomposition: 2.203 sectie-observaties en 11.741/11.741
+geldige frames. No-current-RME bleef normale composerinput; alle envelope-
+completion-, renderer- en baseline-identityinvarianten bleven groen. Een tweede
+pass over dezelfde vijf tracks veranderde geen cachehash, saved timestamp of
+mtime en bevestigde daarmee echte cache-hits en current handofflifecycle.
+
+De eerder beschermde dirty sourcegraphs zijn na actuele hunkreview in normale
+lokale commits bewaard: FILL evidence, pure Dynamic Composer, BeatBeam preview/
+runtime-diagnostics, shadow-handoff persistence en VirtualDJ deck lifecycle.
+Generated audio/soaks/buildoutput en de user-owned workspacefile bleven buiten
+Git. SongAnalyzer heeft geen remote; BeatBeam bleef `LOCAL_COMMITS_ONLY`.
+Production blijft de bestaande `BASELINE_ONLY`-route
+`existing_autoshow -> current_values`; human review-/visual gates zijn niet
+automatisch gepromoveerd.
+
+## FILL micro-evidence en Dynamic Composer production selector
+
+`TECHNICAL PASS / PRODUCTION GATE OFF / HUMAN HOLDS`. Live-intensity status exposeert analyzed,
+raw/normalized live, modifier, effective, source age/deck/generation en
+fallback. De bestaande filter en ±0,06-bound zijn niet getuned omdat de live
+runtime tijdens acceptatie niet advancing was; echte passage- en human evidence
+blijft vereist.
+
+SongAnalyzer heeft een kleine pre-native `ShortAccentObservation`-laag. Zij
+hergebruikt de bestaande 512-hop RMS-onset-envelope en reeds berekende
+beat-onset, spectral-flux en RMS, aggregeert die muzikaal in kwartbeats en
+publiceert alleen sparse twee-beat shadow candidates. Canonical/native labels,
+genre, titel en artiest zijn geen input; raw-boundaryafstand is annotatie en
+geen gate. Synthetische guards dekken steady four-on-floor/hi-hat, sustained
+chorus, BUILD, DROP/ARRIVAL-impact, BREAK, isolated clap en silence-to-sound.
+De representatieve corpusrun (24 tracks, 71,54 min, 8.855 windows) leverde 82
+candidates op 23 tracks; 7 lagen binnen 0–2 beats vóór een raw boundary en er
+was overlap met BUILD 24, BREAK 17, ARRIVAL 12, RELEASE 6 en DROP 2. Gate:
+`EVIDENCE_PROMISING_MORE_CALIBRATION_REQUIRED`; FILL-RME en EventEnvelope blijven
+HOLD tot een compacte hoorbare labeled review calibratie rechtvaardigt.
+
+De eerder ontworpen production-selector is nu centraal vóór de ene bestaande
+renderer geïmplementeerd. Modi zijn `BASELINE_ONLY`,
+`DYNAMIC_COMPOSER_SHADOW` en `DYNAMIC_COMPOSER_ENABLED`; de runtime gebruikt
+een niet-configureerbare interne `BASELINE_ONLY`-constante en unknown faalt
+eveneens daarheen. SHADOW meet candidate/eligibility/signatures maar selecteert
+altijd bestaande Auto Show. De pure selector valideert exacte track, current
+handoff, playback/handoff/composer-generation, continuous state, finite bekende
+bounded primitives, rendererstatus en alle manual overrides; iedere fout kiest
+de baseline van hetzelfde frame. Current RME en live intensity zijn optioneel.
+Blackout, capabilitychecks, clamps en strobe-safety blijven downstream in de
+bestaande renderer. Preview blijft Dynamic Composer kunnen tonen terwijl
+physical output `auto_show -> current_values` blijft. ENABLED is alleen direct
+in pure tests aangeroepen; er is geen UI/config/env/automatische activatie.
+Rollback is één interne mode naar `BASELINE_ONLY`, zonder migratie of reinstall.
+Zie `DYNAMIC_COMPOSER_PRODUCTION_PROMOTION_DESIGN.md`.
+
+Een volledige current-handoff shadow-soak (210/215 bruikbare tracks, 11.445
+frames) en een 100.000-frame lifecycle-soak bevestigen de centrale
+architectuur: no-current-RME en analyzed-only intensity blijven geldige
+composerinput, terwijl fysieke output in ieder frame dezelfde baselinebron
+houdt. Fault injection valideert same-frame failback voor alle selector- en
+safetygates. De soak vond twee generieke state-machinefouten die bounded zijn
+hersteld: een lager-prioritaire point-envelope kon na de completion van een
+same-boundary DROP herleven, en recurrence reuse kon de direct vorige volledige
+signature kiezen. De invariant is nu respectievelijk boundary-winner completion
+zonder oudere resurrection en geen directe recurrence-repeat. Dit verandert
+geen production authority; runtime blijft intern `BASELINE_ONLY`.
+
+De FILL-foundation heeft nu een reproduceerbaar geblindeerd human-reviewpakket
+met 24 gestratificeerde candidates, 12 guarded controls en lokale snippets.
+Dit is uitsluitend reviewvoorbereiding: labels blijven pending, thresholds zijn
+ongewijzigd en `FILL_CALIBRATION = HOLD_HUMAN_LABELS`.
+
+## Realtime Beat Phase + Live Intensity Foundation — technical pass / runtime hold
+
+De VirtualDJ-transportlaag gebruikt `get_beatpos` als fase-anker; normale Auto
+Show-pulsen zijn frame-onafhankelijk een functie van die actuele fase. N→N+2
+samples en rendererframeverlies verliezen geen toekomstige EVERY_BEAT;
+half-time, baraccenten, subdivisies en sparse ritmes zijn expliciete intentie.
+Read-only debug toont fase, bronleeftijd en classificatie. Physical DMX blijft
+ongewijzigd.
+
+De plugin publiceert als begrensde live-previewcorrectie alleen de
+deck-scoped pre-master `get_level`-waarde. De bridge bindt die uitsluitend bij
+exact actieve deck/path aan lifecycle-generation; BeatBeam accepteert alleen
+verse advancing samples en valt anders analyzed-only terug. Relatieve
+normalisatie, attack/release en ±0,06 blijven preview-only. Tests/build zijn
+PASS; deployment, veilige VirtualDJ-restart en human acceptance zijn HOLD.
+
 ## Werkwijze voor Codex / programmeersessies
 
 Bij iedere programmeertaak:
@@ -37,6 +127,39 @@ De PASS omvat phrase boundary, seek, normale NOW/Auto Show, rich current, energy
 De eerdere Python 3.14 `site-packages`-reproduceerbaarheidskwestie in `build_native_app.sh` is opgelost. De route ontdekt nu de werkelijke venv-dependencies, weigert ABI-onveilige native extensies bij een afwijkende Python-minorversie en bouwt de Beta-bundle zelfstandig inclusief backend-smoke en strict ad-hoc signing. Dit is geen M22A-productfailure.
 
 ---
+
+# VirtualDJ deck-prewarm + master authority sync
+
+`GEREED — LIVE RUNTIME + ACTIVATE-PATH LATENCY PASS`. De native
+VirtualDJ-plugin gebruikt `get_activedeck` als directe officiële sync-masterbron
+en leest die bij iedere lifecyclepoll naast filepath, playing en decknummer. De
+masterroute is fail-closed: bij ontbrekende/ongeldige direct signal ontstaat
+`master_signal_unavailable`; de voormalige one-playing/current/recent-loaded-
+heuristiek is verwijderd. Alleen een loaded én playing directe master mag via
+`activate` `active_track` en de transport-snapshot wijzigen. Een A→B-wissel is
+daardoor een normale deck-/trackdiscontinuity met nieuwe generation in plaats
+van een guessed handoff. De bounded native diagnostics tonen masterquery/raw/
+deck, candidates, selected deck/path/reason, IPC, generation en recovery.
+
+Een geladen niet-masterdeck gebruikt `prewarm`: een cache-hit schrijft alleen
+zijn track-entry in de handoff-index; een miss start één normale, gededupeerde
+analysejob en publiceert bij completion uitsluitend die entry. Prewarm schrijft
+nooit `active_track` en wijzigt daardoor NOW, BeatBeam-transport, Auto Show,
+Dynamic Composer, event envelopes, rendersemantiek of fysieke DMX niet. Een
+vervangen deck vervangt diens prewarm-status; hetzelfde bestand op twee decks
+blijft deck-identiteit behouden. Technische cache-hit/miss, deduplicatie,
+failure, replacement, master A→B, same-path en unavailable-mastertests zijn
+groen. De live run met beide decks ready bevestigde A→B en B→A met
+`get_activedeck` authority, exacte active track/generation, transport, handoff
+en Dynamic Composer-context. De activate-route verwijdert uitsluitend
+non-authoritative prewarm vóór activate/transport en promoveert een exact
+gevalideerde `(canonical_path, deck)` ready-prewarm zonder cache-herlezing.
+Gemeten: T1→T2 0 ms, handoff-current 176 ms, bridge-ready 224/236 ms; eerdere
+baseline was 627 ms intern. Physical DMX-semantiek bleef ongewijzigd.
+
+Na deze lifecycleacceptatie blijft de productprioriteit de preview-only,
+menselijke Musical Event Envelope-acceptatie; dit opent geen production-DMX-
+of Auto-Show-authority.
 
 # M23A — Rich Musical Events voor BeatBeam
 
@@ -2085,6 +2208,199 @@ De nieuwe geïsoleerde tests, alle regressies en de volledige suite (182/182)
 zijn PASS. Beta build/package, bron/bundlehashes, bundled imports,
 arm64/ad-hoc signing, fresh restart, health en preview-only runtime-smoke zijn
 PASS; observation accumuleert aantoonbaar zonder fysieke DMX.
+
+### M23B — RME-driven Auto Show Preview Experiment
+
+`SYNTHETIC VISUAL-DIFFERENTIAL PASS / LIVE-RME + HUMAN ACCEPTANCE OPEN` — De eerste RME-consumptie gebruikt
+uitsluitend de bestaande, gevalideerde `rich-musical-events`-handoff en werkt
+alleen in de Preview Map. De fysieke render en DMX-sink blijven de exacte
+baseline Auto Show-frame gebruiken. Een expliciete Preview Map A/B-keuze biedt
+`BASELINE` en `RME_ENHANCED`; geen productie-feature-gate, canonical authority
+of SongAnalyzer-semantic verandert.
+
+De pure preview-interpreter faalt gesloten bij een ontbrekende, stale of
+identity-mismatched handoff en herselecteert context direct op de actuele
+playbackpositie. BUILD/BREAK gebruiken intervalprogress; RELEASE/DROP/ARRIVAL/
+TRANSITION hebben een begrensde point-context. BUILD verhoogt bestaande energie
+en movement geleidelijk, BREAK verlaagt die, DROP krijgt een bestaande sterke
+pulse zonder strobe-wijziging, ARRIVAL is bewust geen DROP en TRANSITION wijzigt
+alleen bestaande movement. Manual overrides, strobe/movement/dimmer-bounds en
+fixture-programkeuze blijven downstream onveranderd leidend.
+
+De vervolgaudit reproduceerde een neutralisatie: een BUILD wijzigde wel de
+abstracte RME-showstate maar niet de fixturepreview door bestaande
+motion-dimmernormalisatie. De preview-interpreter projecteert daarom een
+begrensde, preview-only intensiteitsfactor pas ná die normalisatie; er is geen
+DMX-kanaal- of productionwijziging. `rme_preview_differential` rapporteert
+mode/context/event/progress/interpretatie, showstate- en fixturedelta en de
+bronroute (`preview_auto_show -> slot_previews`). De synthetische BUILD-guard
+bewijst `BASE_SHOW != ENHANCED_SHOW`, `BASE_PREVIEW_VALUES !=
+ENHANCED_PREVIEW_VALUES` en een ongewijzigde fysieke baselineframe; preview-
+projecties muteren geen rhythm-runtime-state. Alle 226 regressies, Beta
+build/package/signing, bron/bundle-hashes en een verse runtimerestart zijn PASS.
+
+De live handoff-lacune is onderzocht en opgelost zonder RME-semantiek of
+lighting-route te wijzigen: de geïnstalleerde VirtualDJ-bridge van 22 augustus
+accepteerde oude `phrase-analysis-v17`-cache zonder `rich-musical-events-v1`.
+De bestaande ontwikkelinstaller publiceerde en verifieerde de huidige
+self-contained arm64 bridge plus alleen de eigen plugin; een nieuwe bridge-
+activatie classificeerde de oude cache als stale en voerde de normale analyse
+uit. De echte actieve track `Mart Hoogkamer - Feest In De Tent.flac` publiceert
+nu 47 compacte events met exact gematchte analysis hash, waaronder BUILD,
+BREAK, RELEASE en ARRIVAL.
+
+`RME_LIVE_PREVIEW_DIFFERENTIAL_PASS` — Tijdens de echte BUILD
+138,716–148,108 s bij progress 0,35028 veranderde de gelijktijdig berekende
+Preview Map van energy 0,60537 naar 0,73441, head brightness 74 naar 81, par
+brightness 70 naar 76 en wall-wash brightness 38 naar 47. De backend hield de
+physical route expliciet op `auto_show -> current_values` en de previewroute op
+`preview_auto_show -> slot_previews`; er is geen enhanced fysieke renderroute.
+De runtime staat op `RME_ENHANCED` voor de eerste menselijke show-quality A/B.
+Production promotion blijft buiten scope.
+
+### M23C — Dynamic Show Composition Foundation
+
+`PREVIEW-ONLY TECHNICAL PASS / HUMAN A/B/C OPEN` — De Auto Show-effectpool is
+geaudit als bestaande veilige primitive-, capability- en fallback-library:
+motion-profielen begrenzen pan/tilt, rendererparameters begrenzen dimmer,
+ritme/pulse en kleurgedrag, en fixture-capabilities blijven downstream
+authoritair. De pool blijft beschikbaar; er is geen productionele rewrite of
+raw-DMX-generator.
+
+De nieuwe pure laag is `ShowIntent/context → FixtureGroupIntent → Dynamic
+Composer → bestaande fixture renderer`. `FixtureGroupIntent` is immutable en
+begrensd tot activity, intensity, movement amount/speed, color change rate,
+palette role, pulse amount en accent strength. `DYNAMIC_COMPOSER` is uitsluitend
+een derde Preview Map-route naast `BASELINE` en `RME_ENHANCED`. BUILD werkt met
+continue, monotone curves; BREAK verlaagt activity/movement/intensity; DROP is
+een begrensd, niet-gelatcht accent; RELEASE hervat een stabiele bestaande
+primitive. Keuzes zijn event/context-deterministisch, zonder per-frame random
+churn of track-specifieke regels.
+
+De Preview Map exporteert compact base show, dynamic intent, group-intents,
+selected primitives, changed dimensions en fixture differential. Missing/stale
+RME, ongeldige intenten of manual override vallen gesloten terug naar baseline.
+De fysieke route blijft `auto_show -> current_values`; de composerroute blijft
+`preview_auto_show -> slot_previews`. De gerichte composer-, RME-preview-,
+authoritative-frame- en packagingtests plus de volledige huidige BeatBeam-suite
+zijn groen. Beta build/deployment en menselijke vergelijking rond de bewezen
+BUILD op 2:19–2:28 staan nog open; production promotion blijft buiten scope.
+
+### M23C vervolg — Actual Preview Show Source / Visible Cue
+
+`DYNAMIC_COMPOSER_TECHNICAL_FOUNDATION = PASS`;
+`DYNAMIC_COMPOSER_HUMAN_VISUAL_ACCEPTANCE = HOLD`. De menselijke review rond
+2:22,84 in de echte BUILD bewees dat de Native Stage Map weliswaar exact
+`slot_previews` rendert, maar dat de eerste composer onvoldoende zichtbare
+compositie leverde. Root cause: `BASELINE_SCENE_DOMINATES_DYNAMIC_COMPOSITION`.
+De dynamic state kopieerde de production Auto Show en verving alleen moving
+motion/intensiteit; de oude scene bleef kleur/look/pulse/wash bepalen.
+
+De bounded correctie behoudt dezelfde renderer- en safetyroute maar maakt
+per-group primitives authoritair voor de preview: moving motion, PAR/moving
+palette en pulse, en wash palette/cue. Benoemde primitives worden pas in de
+bestaande fixture-renderer naar bestaande kleurprofielen, ritmemodi en
+wall-wash cues vertaald; de pure composer blijft DMX-vrij. De backend traceert
+production source, preview source, application/fallback, baseline-scene reuse,
+selected primitives én de daadwerkelijk aan de Native Map geleverde compacte
+slot-previewwaarden. De Native Auto Show UI toont bovendien een afzonderlijke
+`PREVIEW CUE`; de production CUE blijft production-only. Physical DMX blijft
+ongewijzigd `existing_autoshow -> current_values`.
+
+### M23C vervolg — Continuous Musical State Backbone / RME Modulation
+
+`CONTINUOUS_DYNAMIC_COMPOSER_TECHNICAL_PREVIEW = PASS`; live menselijke
+show-quality blijft HOLD. De architectuur is aangescherpt tot één showengine:
+`ContinuousMusicalState + optional RmeContext → FixtureGroupIntent`. De
+continuous state is de doorlopende composerbackbone; sparse Rich Musical Events
+zijn tijdelijke modifiers. Afwezigheid van een current RME is dus normale
+runtime-state en veroorzaakt geen baseline-fallback meer.
+
+Een read-only bron- en corpusaudit bewees dat de bestaande current/exact
+`shadow_analysis` al voldoende software-onafhankelijke evidence levert. De
+compacte BeatBeam-projectie gebruikt observation-id, sectietiming en afgeleide
+voortgang, `RelativeEnergy`, tekenbehoudend begrensde `energy_rise` en optionele
+recurrence/family salience. Er is geen nieuw audiofeature, Essentia-call,
+SongAnalyzer-persistence, handoffschema, RME-detectieregel of canonical authority
+toegevoegd. Semantische sectielabels, genre, artiest en titel zijn geen input.
+
+De backbone kiest stabiel geseede bestaande motion-, palette-, pulse- en
+washprimitives. BUILD/BREAK/DROP/RELEASE veranderen dezelfde group-intents;
+event exit retourneert naar de continuous composition. Baseline-fallback blijft
+fail-closed voor geen current track, stale/mismatch, ontbrekende essentiële
+state, invalid input/composerexception en manual override. De Native UI en
+backenddiagnostiek scheiden composerstatus, musical state, RME modifier en
+preview cue. De volledige route blijft Preview Map-only; physical production
+blijft `existing_autoshow -> current_values` met bestaande capability-, fixture-
+en strobe-safety.
+
+De echte 205-track handoff bevat 200 tracks met section-character state. Daarop
+is continuous coverage 99,51% van de geanalyseerde playbacktijd tegenover
+23,36% current-RME-coverage. `Mart Hoogkamer - Feest In De Tent` meet 98,97%
+continuous en 14,51% current RME; offline exact-handoff/rendererchecks op 130 s,
+BUILD 143 s en post-BUILD 150 s zijn compositorisch en physical-identity groen.
+De verse gesigneerde Beta is gedeployed; omdat VirtualDJ bij de eindcontrole
+geen spelende current track had, blijft de vereiste echte live/human A/B/C HOLD.
+
+### M23C vervolg — Musical Event Envelope Foundation
+
+`MUSICAL_EVENT_ENVELOPE_TECHNICAL_PREVIEW = PASS`; menselijke live acceptance
+blijft HOLD. Continuous Musical State blijft de permanente backbone. Een
+point-RME is voortaan uitsluitend trigger voor een aparte pure
+`MusicalEventEnvelope`, die na attack/impact gedurende een bounded settle weer
+exact verdwijnt. Daarmee wordt geen SongAnalyzer-eventduur aangepast en bestaat
+er geen latched showstate of baselinefallback.
+
+De envelope gebruikt primair bestaande VirtualDJ bar/beat-context uit
+`PlaybackClock`; ontbreekt die tijdelijk, dan zet alleen de bestaande BPM de al
+bekende elapsed boundarytijd om naar beats. ARRIVAL, RELEASE en TRANSITION
+hebben een twee-bar-envelope, DROP anderhalve bar en future-ready FILL twee
+beats. Bij gelijke boundary kiest één vaste semantische modifier
+`DROP > FILL > RELEASE > ARRIVAL > TRANSITION`; er is geen stacking of nieuwe
+ranking-engine. BUILD/BREAK blijven bestaande intervalmodifiers.
+
+De composer vertaalt envelope-strength uitsluitend naar bestaande, begrensde
+group-intents en primitives. ARRIVAL gebruikt een release/landing-accent en is
+geen DROP; DROP gebruikt een sterker maar bounded impactaccent; RELEASE blendt
+naar de destination continuous state. FILL is synthetisch getest als accent
+zonder directe strobe- of DMX-semantieken. Bestaande fixture capability,
+manual override en strobe-safety blijven downstream authoritair.
+
+Backend en Native Preview CUE tonen nu een afzonderlijke `EVENT ENVELOPE` met
+fase, progress en maatlengte. Exact-handoff/rendererchecks op echte tracks
+bewezen ARRIVAL `0:09.17`, RELEASE `0:38.48` en DROP `1:26.87` op boundary,
+halve maat, één maat en completion, inclusief previewdeltas en physical-frame-
+identity. De route blijft volledig Preview Map-only. Pas na positieve human
+review volgt een bounded production-promotionontwerp.
+
+### M23C vervolg — Generative Variation + Anti-Repetition Foundation
+
+`DYNAMIC_COMPOSER_VARIATION_TECHNICAL_PREVIEW = PASS`; live menselijke
+show-quality blijft HOLD. De bestaande benoemde primitivebibliotheek is bewust
+de kleine muzikale basis gebleven. De pure composer voegt uitsluitend
+begrensde, fixture-onafhankelijke parameters toe voor motion-range/snelheid/
+fase/spreiding/centrum, paletrelatie/-balans, pulse-amount/deelname en
+wash-fase. Er zijn geen RGB-randomizer, nieuwe raw-DMX- of productionroute en
+geen SongAnalyzer-, analyse-, cache- of handoffwijzigingen.
+
+`CompositionHistory` is niet persistent en scoped op track plus playback
+generation. Hij kiest deterministic uit vier parameterkandidaten, bewaart zes
+recente signatures, voorkomt exacte recente herhaling en reset bij een nieuwe
+track/generation/invalidation. Exacte replay blijft retained; aantoonbare
+recurrence mag gecontroleerd het vorige motief hernemen. De leesbare
+`CompositionSignature` en selection/history diagnostics staan in de Preview
+Cue en differential. In een representatieve 24-sectie shadowreeks steeg de
+volledige compositiediversiteit van 16 naar 20 unieke signatures; de vier
+overige herhalingen waren expliciete recurrence-reuse en de langste run was 2.
+
+De renderer realiseert die intent uitsluitend bovenop de bestaande motion-,
+kleur-, ritme- en wash-profielen en daarna de bestaande capability- en
+fixtureclamps. ARRIVAL is begrensd versterkt, maar technisch getoetst boven de
+backbone en onder DROP voor PAR-intensity, pulse en accent; de bestaande
+twee-bar settle en event-exit blijven intact. Physical output blijft exact
+`auto_show -> current_values`; variatie blijft `preview_auto_show ->
+slot_previews`. Volgende gate is menselijke vergelijking van minstens drie
+structureel vergelijkbare passages; production promotion blijft buiten scope.
 
 ### ShowIntent Representative Shadow Observation Run
 

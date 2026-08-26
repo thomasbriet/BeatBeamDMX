@@ -4,10 +4,35 @@
 
 ### Added
 - Start van de `1.2` ontwikkelcyclus.
+- De native macOS build bundelt nu een eigen app-local Python runtime en gebruikt die bij backendstart in plaats van direct te leunen op de lokale `.venv`-Python van de buildmachine.
+- Dynamic Composer gebruikt in de Preview Map nu een compacte, software-onafhankelijke continuous musical state met sectievoortgang, relatieve energie, energietraject en optionele structurele recurrence/salience.
+- Een pure, beat-/bar-gebaseerde Musical Event Envelope voor ARRIVAL, DROP, RELEASE, TRANSITION en future-ready FILL.
+- VirtualDJ deck-prewarm voor geladen niet-masterdecks, met cache-hit/miss-status, normale-prioriteit-deduplicatie en bounded bridge-diagnostics.
+- Preview-only Dynamic Composer-variatie met begrensde motion-, kleur-, pulse-
+  en washparameters, track-lokale anti-repeat history en leesbare
+  composition-signatures.
+- Volledige continuous-state shadowdekking voor 215/215 librarytracks na vijf
+  gerichte normale cache/lifecycle-heranalyses.
+- Een bounded production show-selector met fail-closed same-frame baseline en
+  een interne, niet-configureerbare `BASELINE_ONLY` runtime-default.
+
+### Changed
+- Rich Musical Events moduleren de continuous Dynamic Composer-state tijdelijk; zonder current RME blijft de composer actief en valt de Preview Map niet meer terug op de complete baseline-scène.
+- De Auto Show-observability toont Dynamic Composer-status, Musical State, RME Modifier en Preview Cue afzonderlijk.
+- Point-RME's moduleren de Preview Dynamic Composer nu tijdelijk via attack/impact/settle en keren daarna exact terug naar Continuous Musical State; SongAnalyzer-eventduur en physical DMX blijven ongewijzigd.
+- ARRIVAL heeft een sterker maar nog onder-DROP begrensd landing-accent; de
+  twee-bar settle blijft ongewijzigd.
+- Preview/runtime-observability exposeert continuous state, event envelope,
+  live intensity, composition signature en selectorbesluit zonder production-
+  of fysieke DMX-authority te wijzigen.
 
 ## [1.2.0-wishlist]
 
 ### Wishlist
+- Portable beta-distributie voor andere Macs, vervolgstappen:
+  - Rekordbox bridge intern bundelen met vooraf gebouwde `rkbx_link`, zodat testers geen Rust toolchain of losse BPM Trigger setup nodig hebben
+  - first-run setup wizard voor audio input, DMX, Rekordbox detectie en bridge-status
+  - signed/notarized distributie als `dmg` of `pkg`, met optionele advanced helper voor Rekordbox-fixes als dat echt nodig blijkt
 - Verbeterde Bee floor-to-beam projectie-overgang: een overtuigender overgang tussen luchtstraal en vloerprojectie, bij voorkeur met target/intersection-logica, fade/hysteresis rond de omslag en een zachtere morph van air glow naar floor pattern in plaats van een harde switch.
 - Uitgebreidere Bee Eye fixture-modi naast het huidige 15ch-profiel: echte 23/35/51ch-achtige ondersteuning met shape dimmer, background dimmer, shape fade/transition/offset, foreground/background strobe, zoom en rijkere pixel/ring macro’s zodra de hardware/mode dat echt toelaat.
 
@@ -66,6 +91,11 @@
 - Bee Eye Auto Show schakelt nu nadrukkelijker tussen `wash`, `beam` en `fx`, en de preview gebruikt die modus ook voor bredere wash-bodies, strakkere beam-looks, grotere kaleido-spreiding en zachtere shape-transitions in 2D en 3D.
 
 ### Fixed
+- De native Beta decodeert nested Dynamic Composer-primitives tolerant, zodat
+  parameterobservability geen volledige backendstatus-refresh meer blokkeert.
+- Loaded non-master VirtualDJ-decks verschijnen nu read-only met hun bestaande
+  prewarm-/analysestatus in de Deck UI, zonder master- of show-authority.
+- VirtualDJ-masterautoriteit volgt nu de directe `get_activedeck`-query en faalt gesloten wanneer dit signaal ontbreekt; loaded/prewarmdecks kunnen de actieve BeatBeam-track niet meer vervangen.
 - De preview gebruikt nu de backend-transportklok als animatiebasis, zodat strobe- en dimmerweergave strakker gelijk lopen met live-output.
 - Externe strobe-windows worden in de preview nu als beat-gebonden flash getoond in plaats van als vrije random flicker, en de stage-motion preview draait nu op 30 fps voor betere parity met live-output.
 - Auto-show rhythm-wissels worden nu per slot beat-gebonden vastgehouden; daarnaast zijn mover-varianten van `Soft Pulse` en `Alternate Whole` rustiger gemaakt zodat dimmer-FX niet meer te snel of sub-beat stotteren.
