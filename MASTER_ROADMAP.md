@@ -30,6 +30,7 @@ uitsluitend `LEGACY / HISTORICAL / RESEARCH CONTEXT`.
 | Continuous state, Event Envelope, variation en production selector | `COMPLETED_TECHNICAL / PRODUCTION_GATE_OFF`; runtime blijft `BASELINE_ONLY`, production promotion is alleen een toekomstige expliciete gated beslissing. |
 | VirtualDJ prewarm, master authority, observability en activate-path | `COMPLETED`: `VDJ_DECK_PREWARM_MASTER_SYNC = PASS` en `MASTER_SWITCH_ACTIVATE_LATENCY_OPTIMIZATION_PASS`. |
 | Analysis-worker operations en job lifecycle | `COMPLETED`: `ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`; bounded sequential queue, explicit states, cancellation/timeout, crash isolation, stale recovery en diagnostics. |
+| BeatBeam Live Show UX V2 | `TECHNICAL_PASS / HOLD_USER_REVIEW`: Live Show projecteert bestaande typed runtime-state; Preview, Manual en Advanced scheiden operatie, preview en raw diagnostics. Geen wijziging van `BASELINE_ONLY` of fysieke authority. |
 | FILL micro-evidence | `TECHNICAL_PASS / HOLD_HUMAN_LABELS`; het 36-item reviewpakket bepaalt of calibratie of shadow-eventpromotie ooit gerechtvaardigd is. Geen FILL → strobe-regel. |
 | Beat pulse, live intensity, Event Envelope en variation | `TECHNICAL_PASS / HUMAN_HOLD`; uitsluitend de actuele reviewgates in `MASTER_BACKLOG.md` zijn nog open. |
 

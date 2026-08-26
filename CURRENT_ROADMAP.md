@@ -28,6 +28,7 @@
 - Beat/dimmer: fase-locked `get_beatpos`-route is technisch pass; EVERY_BEAT, HALF_TIME en BAR_ACCENT zijn expliciete presentatie-intenties.
 - VirtualDJ lifecycle: active-deck/master-authority, prewarm, deck/path-generation identity, observability en fast activate-path zijn pass: `VDJ_DECK_PREWARM_MASTER_SYNC = PASS` en `MASTER_SWITCH_ACTIVATE_LATENCY_OPTIMIZATION_PASS`.
 - `ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`: de bestaande sequential bridgequeue is bounded (128 queued, 256 terminal history), heeft expliciete terminal states, cancellation, een 10-minutentimeout, child-process cleanup, failure isolation, content-/response-identitychecks, restart recovery en operationele diagnostics. De 215/215 current library en bestaande prewarm/master-authority zijn behouden.
+- `BEATBEAM_LIVE_SHOW_UX_V2_TECHNICAL_PASS`: de native standaardweergave is nu Live Show met compacte Live/Preview/Manual/Advanced-navigatie. Zij projecteert uitsluitend bestaande typed runtime-state: authoritative playback, decks/readiness, continuous state, intensity, event/envelope, composer/fixture-intent, manual safety en fysieke DMX-status. Raw diagnostics en de bestaande Preview Map zijn behouden; `is_playing` is alleen additief in de bestaande deck-state. Productie blijft `BASELINE_ONLY` en Preview blijft niet-authoritative.
 - FILL: pre-native micro-evidence, tooling en geblindeerd reviewpakket zijn gereed; 82 candidates in de 24-track diagnose. Geen FILL-promotie.
 
 ## Human Holds / thuisreview
@@ -37,6 +38,7 @@
 3. **Preview beat pulse:** beoordeel EVERY_BEAT timing/perceptie in de Preview Map.
 4. **Event Envelope:** beoordeel ARRIVAL, DROP, RELEASE en transities op muzikale timing, duration en settle.
 5. **Variatie:** beoordeel repeat, variation, recurrence en muzikale fit.
+6. **Live Show UX V2:** beoordeel de scanbaarheid, taal, compact/breed gedrag en de scheiding Live/Preview/Manual/Advanced tijdens echte bediening.
 
 ## Active / Next
 
@@ -48,7 +50,7 @@
 ## Later / Deferred
 
 - Evidence-first micro-events: andere short accents, risers/downlifters, impact- en vocal/percussion/bass entry/removal-signalen.
-- Reële UX-uitbreidingen: Live UI-polish, fixture/manual UX en moving-head-snelheidsbediening. Loaded deck/master/track-prewarm, Preview-state en Composerdiagnostics bestaan al.
+- Reële UX-uitbreidingen: fixture/manual UX-polish en moving-head-snelheidsbediening. Live Show UX V2 is technisch gereed en wacht uitsluitend op human review.
 - Show Simulator is **Later** en is onderscheiden van de bestaande Native Preview Map.
 - VirtualDJ workflow-/reanalyze-UX, Smart Hot Cues en resterende productization (installer, updates en release/distributie) zijn Deferred totdat er productprioriteit en een apart scoped plan is.
 
@@ -56,11 +58,11 @@
 
 - `CANONICAL_CANDIDATE_PRODUCTION_AUTHORITY = DISABLED_UNDER_CURRENT_EVIDENCE_CONTRACT`. `M24_CANONICAL_AUTHORITY_CLOSEOUT_PASS` blijft gesloten; `LEGACY_ONLY_PRODUCTION_CANDIDATE_SHADOW_RETAINED` is geen open TODO. Geen heropening via thresholds, whitelist, kleine sample, candidate==legacy of hetzelfde evidencepakket.
 - `FILL_EVIDENCE_PROMISING_MORE_REVIEW_REQUIRED` en `FILL_CALIBRATION = HOLD_HUMAN_LABELS`; FILL is nooit een directe “FILL → strobe”-productregel.
-- `MUSICAL_EVENT_ENVELOPE_HUMAN_VISUAL_ACCEPTANCE = HOLD`, `LIVE_INTENSITY_FEEDBACK = HOLD_HUMAN_RETEST` en `PREVIEW_BEAT_PULSE_RENDER_QUALITY = HOLD_HUMAN_RETEST`.
+- `MUSICAL_EVENT_ENVELOPE_HUMAN_VISUAL_ACCEPTANCE = HOLD`, `LIVE_INTENSITY_FEEDBACK = HOLD_HUMAN_RETEST`, `PREVIEW_BEAT_PULSE_RENDER_QUALITY = HOLD_HUMAN_RETEST` en `BEATBEAM_LIVE_SHOW_UX_V2 = HOLD_USER_REVIEW`.
 - Unknown, stale, mismatch, invalid state, lifecycle discontinuity, renderer failure en manual override vallen same-frame terug naar baseline.
 
 ## Git State
 
 - SongAnalyzer-checkpoints: `397e071` (FILL), `d3fd28f` (shadow handoff), `b982211` (VirtualDJ lifecycle), `f6025a1` (analysis-worker operational hardening); geen remote.
-- BeatBeam-checkpoints: `84c1779` (composer foundation), `c499a0c` (preview/runtime diagnostics), `ad3dd8a` (continuous coverage/checkpoint).
+- BeatBeam-checkpoints: `84c1779` (composer foundation), `c499a0c` (preview/runtime diagnostics), `ad3dd8a` (continuous coverage/checkpoint), `f7de492` (Live Show UX V2).
 - Generated review-/soakartifacts zijn geen source-dirty state. Lokale commits blijven de veilige werkwijze; geen automatische push.
