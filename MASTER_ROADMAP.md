@@ -4,6 +4,42 @@
 > Dit bestand moet tijdens programmeerwerk actief worden geraadpleegd en bijgewerkt.
 > Zie ook `CURRENT_ROADMAP.md` voor de compacte actuele status, prioriteiten en blockers.
 
+## Current reconciliation map — 2026-08-26
+
+`CURRENT_ROADMAP.md` is de compacte actuele status en `MASTER_BACKLOG.md` is
+de enige levende werkvoorraad. De chronologische delen onder deze kaart blijven
+bewust behouden als architectuur-, evidence- en besluitgeschiedenis. Hun oude
+`TODO`, `BEZIG` en `NOG NIET GESTART`-labels zijn **geen actieve opdracht**
+wanneer ze hieronder als completed, superseded, deferred of closed zijn
+geclassificeerd.
+
+De actuele keten is: **VirtualDJ** voor playback/live deck/master-authority,
+**SongAnalyzer** voor software-onafhankelijke diepe analyse en compact
+runtime-handoff, en **BeatBeam** voor veilige lighting/show-output. De actieve
+composertruth is `ContinuousMusicalState`: sectietiming/-voortgang, relatieve
+energie/traject, recurrence/material return, section character en structurele
+change. BUILD/BREAK/ARRIVAL/RELEASE/DROP/RETURN/DEPARTURE/TRANSITION zijn
+optionele bounded modifiers; RME is nooit de continuous backbone. Rekordbox is
+uitsluitend `LEGACY / HISTORICAL / RESEARCH CONTEXT`.
+
+| Historisch onderwerp | Gereconcilieerde status |
+| --- | --- |
+| M22A runtime, transport en rich-analysis handoff | `COMPLETED`; de oude open runtimepass is superseded door de actuele lifecycle- en coverage-passes. |
+| M23A RME-uitbreidingen | `COMPLETED_FOUNDATION`; RME is persisted, deterministic en fail-closed. Oude semantic-tuningregels zijn historische research, geen actieve backlog. |
+| M24/M24A canonical candidate-pad | `CLOSED`: `M24_CANONICAL_AUTHORITY_CLOSEOUT_PASS`; `LEGACY_ONLY_PRODUCTION_CANDIDATE_SHADOW_RETAINED`; `CANONICAL_CANDIDATE_PRODUCTION_AUTHORITY = DISABLED_UNDER_CURRENT_EVIDENCE_CONTRACT`. Niet heropenen via thresholds, whitelist, kleine samples, candidate==legacy of hetzelfde evidencepakket. |
+| Continuous state, Event Envelope, variation en production selector | `COMPLETED_TECHNICAL / PRODUCTION_GATE_OFF`; runtime blijft `BASELINE_ONLY`, production promotion is alleen een toekomstige expliciete gated beslissing. |
+| VirtualDJ prewarm, master authority, observability en activate-path | `COMPLETED`: `VDJ_DECK_PREWARM_MASTER_SYNC = PASS` en `MASTER_SWITCH_ACTIVATE_LATENCY_OPTIMIZATION_PASS`. |
+| FILL micro-evidence | `TECHNICAL_PASS / HOLD_HUMAN_LABELS`; het 36-item reviewpakket bepaalt of calibratie of shadow-eventpromotie ooit gerechtvaardigd is. Geen FILL → strobe-regel. |
+| Beat pulse, live intensity, Event Envelope en variation | `TECHNICAL_PASS / HUMAN_HOLD`; uitsluitend de actuele reviewgates in `MASTER_BACKLOG.md` zijn nog open. |
+
+## Historical planning snapshot — superseded as active backlog
+
+De secties `# 1` tot en met `# 11` hieronder zijn een behouden snapshot van
+eerdere productverkenning. Zij blijven nuttig voor rationale en afbakening,
+maar zijn geen huidige planning. Alleen items die expliciet in
+`MASTER_BACKLOG.md` staan, zijn actief; alles anders is `COMPLETED`,
+`SUPERSEDED`, `DEFERRED`, `LEGACY` of `STATUS_REQUIRES_CONFIRMATION`.
+
 ## Full continuous-state coverage en protected-worktree checkpoint
 
 `PASS / PRODUCTION GATE OFF`. Vijf tracks met een actuele analysis-container
@@ -1443,10 +1479,12 @@ en live-integratielaag. Dit is nu passend omdat de low-level analyse-infrastruct
 en shadow-calibratie bestaan, terwijl canonical authority onder het huidige
 evidencecontract gesloten is. De authority-afhankelijkheid is `NO`.
 
-`NEXT_MAJOR_MILESTONE = M23A — Rich Musical Events voor BeatBeam`.
-`NEXT_MAJOR_MILESTONE_STATUS = NOG NIET GESTART`.
+`HISTORICAL_NEXT_MAJOR_MILESTONE = M23A — Rich Musical Events voor BeatBeam`.
+`HISTORICAL_NEXT_MAJOR_MILESTONE_STATUS = NOG NIET GESTART`.
+Deze overgangsnotitie is superseded: de RME-foundation is completed; actuele
+human holds en vervolgwerk staan uitsluitend in `MASTER_BACKLOG.md`.
 
-## M24A — Show-readiness als eerstvolgende hoofdprioriteit
+## Historical M24A — Show-readiness framing (SUPERSEDED AS ACTIVE PRIORITY)
 
 De volledige relevante VirtualDJ-playlist moet worden geanalyseerd en current
 en ready zijn, zonder runner/analyzer-failures of stale relevante analyses.
@@ -1538,7 +1576,7 @@ Essentia-optimalisatie zonder meting, een volledig nieuwe hiërarchische analyze
 
 ---
 
-# 1. Productrichting
+# 1. Historische productrichting (SUPERSEDED AS ACTIVE BACKLOG)
 
 ## 1.1 SongAnalyzer
 
@@ -2636,7 +2674,7 @@ Deze punten zijn bewust geschrapt en mogen niet zonder expliciete productbesliss
 
 ---
 
-# 11. Eerstvolgende prioriteiten
+# 11. Historische eerstvolgende prioriteiten (SUPERSEDED AS ACTIVE BACKLOG)
 
 Aanbevolen volgorde vanaf de huidige productrichting:
 
