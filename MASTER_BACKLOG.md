@@ -15,6 +15,7 @@
 | Smart Cue V1 placementreview | `HOLD_HUMAN_REVIEW` | Beoordeel 24 diverse tracks op MIX IN, MAIN, BREAK, MIX OUT en exacte 16/12/8/4-bar aftellingen. | Technische planner/writer-foundation is pass; muzikale plaatsing is niet menselijk geaccepteerd en auto-apply blijft hard uit. |
 | Show Simulator V1 review | `HOLD_USER_REVIEW` | Beoordeel timeline, cue/event/section-jumps en de gesimuleerde 2D/3D Preview Map. | Technische pass is gereed; Simulator heeft hard nul fysieke authority. |
 | VirtualDJ-native SongAnalyzer V1 review | `HOLD_USER_REVIEW` | Beoordeel SongAnalyzer-kolom en Analyze/Reanalyze/Retry als dagelijkse workflow. | Technische live/headless pass is gereed; bredere usabilityreview ontbreekt. |
+| Dynamic Composer advanced effects V2 review | `HOLD_USER_REVIEW` | Beoordeel dimmermotieven, verzadigde paletten, kleur-/participatievariatie en gecontroleerde RETURN-herkenning in Simulator/Preview. | Technische foundation is corpus-, determinisme- en runtime-safe; fysieke output blijft `BASELINE_ONLY`. |
 
 ## NEXT
 
@@ -54,6 +55,7 @@
 - `BEATBEAM_LIVE_SHOW_UX_V2_TECHNICAL_PASS`: Live Show als standaard, aparte Preview/Manual/Advanced, bestaande Preview Map/raw diagnostics behouden en geen wijziging van production authority.
 - `SMART_CUE_PLANNER_V1_TECHNICAL_PASS` en `SMART_CUE_VDJ_WRITER_GATE_OFF_PASS`: deterministic 215-track planning, corpus/reviewpackage, read-only native cue-preflight en exact-identity writer/ownership/verify/rollback foundation; `SMART_CUE_AUTO_APPLY_OFF` live bewezen.
 - `BEATBEAM_SHOW_SIMULATOR_V1_TECHNICAL_PASS`: musical timeline, cue/event/section navigation, isolated previewframes en native 2D/3D Preview Map datasource; 215-track deterministic corpusprojectie en packaged runtime-smoke groen.
+- `DYNAMIC_COMPOSER_ADVANCED_EFFECT_VARIATION_V2_TECHNICAL_PASS`: first-class dimmermotieven, saturated discrete color animation, fixture-participatie en component-aware anti-repeat in Preview/Simulator; 222-track/2.284-section corpus 0 invalid/renderer failures, packaged Beta-smoke groen, production authority onveranderd `BASELINE_ONLY`.
 - FILL micro-evidence/tooling en het 36-item blinded reviewpakket.
 
 ## LEGACY / CLOSED

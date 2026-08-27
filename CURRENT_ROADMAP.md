@@ -34,6 +34,7 @@
 - `BEATBEAM_LIVE_SHOW_UX_V2_TECHNICAL_PASS`: de native standaardweergave is nu Live Show met compacte Live/Preview/Manual/Advanced-navigatie. Zij projecteert uitsluitend bestaande typed runtime-state: authoritative playback, decks/readiness, continuous state, intensity, event/envelope, composer/fixture-intent, manual safety en fysieke DMX-status. Raw diagnostics en de bestaande Preview Map zijn behouden; `is_playing` is alleen additief in de bestaande deck-state. Productie blijft `BASELINE_ONLY` en Preview blijft niet-authoritative.
 - `SMART_CUE_PLANNER_V1_TECHNICAL_PASS` en `SMART_CUE_VDJ_WRITER_GATE_OFF_PASS`: 215/215 current analyses leveren deterministisch `smart-cue-plan-v1` zonder audioheranalyse; MIX IN/MAIN/BREAK/MIX OUT en MAIN-countdowns zijn provenance-clean en fail-closed. De bestaande VirtualDJ plugin/bridge exposeert plan-, cue-preflight- en conflictstatus read-only. De writer heeft exact deck/file/content/generation-preflight, managed ownership, verify/rollback en transportguards, maar production apply is hard `SMART_CUE_AUTO_APPLY_OFF`.
 - `BEATBEAM_SHOW_SIMULATOR_V1_TECHNICAL_PASS`: 215 offline tracks, één simulation playhead met section/RME/event/Smart Cue-timeline, deterministic scrub/jumps en geïsoleerde Dynamic Composer previewframes. De bestaande 2D/3D Preview Map consumeert bij Simulator de afzonderlijke `simulation_slot_previews`; fysieke output blijft hard `NONE`.
+- `DYNAMIC_COMPOSER_ADVANCED_EFFECT_VARIATION_V2_TECHNICAL_PASS`: preview/simulator-only V2 voegt een bounded, beat-/bar-gequantiseerde dimmermotiefbank, heldere verzadigde profielpaletten met discrete kleuranimatie, fixture-participatie en component-aware `CompositionHistory` toe. Corpus: 222/222 current tracks, 2.284 secties, 0 invalid candidates/renderer failures; mediane trackdiversiteit is 4 dimmermotieven en 4 participatiepatronen. Productie blijft hard `BASELINE_ONLY`.
 - FILL: pre-native micro-evidence, tooling en geblindeerd reviewpakket zijn gereed; 82 candidates in de 24-track diagnose. Geen FILL-promotie.
 
 ## Human Holds / thuisreview
@@ -47,6 +48,7 @@
 7. **Smart Cues V1:** beoordeel de 24-track thuisreview op praktische MIX IN-runway, juiste MAIN, bruikbare BREAK/MIX OUT en muzikale 16/12/8/4-bar aftellingen. `SMART_CUE_PLACEMENT = HOLD_HUMAN_REVIEW`.
 8. **Show Simulator V1:** beoordeel timeline, navigatie en gesimuleerde 2D/3D Preview Map in de native app. `BEATBEAM_SHOW_SIMULATOR_V1 = HOLD_USER_REVIEW`; dit heeft geen live- of DMX-authority.
 9. **VirtualDJ-native SongAnalyzer V1:** beoordeel dagelijks gebruik van SongAnalyzer-kolom, Analyze/Reanalyze/Retry en lazy browsed/loaded status. De technische live flow is pass; bredere usability blijft `HOLD_USER_REVIEW`.
+10. **Dynamic Composer effects V2:** beoordeel opeenvolgende secties op muzikale dimmervariatie, felle/verzadigde kleuren, gecontroleerde RETURN-herkenning en visuele rust. `DYNAMIC_COMPOSER_ADVANCED_EFFECT_VARIATION_V2 = HOLD_USER_REVIEW`; Simulator/Preview hebben geen fysieke authority.
 
 ## Active / Next
 
