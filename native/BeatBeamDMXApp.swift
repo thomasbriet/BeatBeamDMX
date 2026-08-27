@@ -819,6 +819,20 @@ struct PreviewCompositionState: Decodable {
     let physicalOutputSource: String?
 }
 
+struct SimulatorTrack: Decodable, Identifiable {
+    let path: String; let title: String; let durationSeconds: Double; let bpm: Double?; let analysisVersion: String?
+    var id: String { path }
+}
+struct SimulatorTracksResponse: Decodable { let tracks: [SimulatorTrack] }
+struct SimulatorTrackIdentity: Decodable { let path: String; let analysisIdentity: String?; let availability: String? }
+struct SimulatorTransportState: Decodable { let playing: Bool; let positionMilliseconds: Int; let durationMilliseconds: Int; let bpm: Double?; let beat: Int?; let bar: Int?; let generation: Int }
+struct SimulatorCue: Decodable, Identifiable { let role: String?; let positionMilliseconds: Int?; let planned: Bool?; var id: String { role ?? UUID().uuidString } }
+struct SimulatorState: Decodable {
+    let mode: String; let physicalOutput: String; let track: SimulatorTrackIdentity?; let transport: SimulatorTransportState
+    let continuousMusicalState: PreviewContinuousMusicalState?; let rme: PreviewCompositionEvent?; let eventEnvelope: PreviewMusicalEventEnvelope?
+    let composition: PreviewCompositionState?; let smartCues: [SimulatorCue]
+}
+
 struct VirtualDjBeatPulsePreviewState: Decodable {
     let enabled: Bool
     let pending: Bool
@@ -2657,6 +2671,8 @@ final class AppModel: ObservableObject {
     @Published var previewRmeMode = "BASELINE"
     @Published var previewPulseTestMode = "OFF"
     @Published var previewComposition: PreviewCompositionState?
+    @Published var simulatorTracks: [SimulatorTrack] = []
+    @Published var simulatorState: SimulatorState?
     @Published var autoShowCueText = "Auto Show uit"
     @Published var autoShowDetailText = "Zet Auto Show aan om phrase- en beat-gestuurde output te laten spelen."
     @Published var autoShowAudiencePanFocusEnabled = true
@@ -2767,6 +2783,23 @@ final class AppModel: ObservableObject {
 
     func refreshDebugState() {
         Task { try? await refreshState() }
+    }
+
+    func loadSimulator() {
+        Task { do {
+            let response: SimulatorTracksResponse = try await get("/api/simulator/tracks", as: SimulatorTracksResponse.self)
+            simulatorTracks = response.tracks
+            simulatorState = try await get("/api/simulator/state", as: SimulatorState.self)
+        } catch { errorText = "Simulator kon analyses niet laden: \(error.localizedDescription)" } }
+    }
+    func simulatorSelect(_ path: String) { simulatorPost("/api/simulator/select", body: ["path": path]) }
+    func simulatorPlay() { simulatorPost("/api/simulator/play", body: EmptyRequest()) }
+    func simulatorPause() { simulatorPost("/api/simulator/pause", body: EmptyRequest()) }
+    func simulatorRestart() { simulatorPost("/api/simulator/restart", body: EmptyRequest()) }
+    func simulatorSeek(milliseconds: Int) { simulatorPost("/api/simulator/seek", body: ["seconds": Double(milliseconds) / 1000.0]) }
+    private func simulatorPost<Body: Encodable>(_ path: String, body: Body) {
+        Task { do { simulatorState = try await post(path, body: body, as: SimulatorState.self) }
+               catch { errorText = "Simulatoractie mislukt: \(error.localizedDescription)" } }
     }
 
     func forceReanalyzeActiveTrack() async throws -> DebugForceReanalysisResponse {
@@ -5640,6 +5673,7 @@ struct ContentView: View {
     private enum WorkspaceMode: String, CaseIterable, Identifiable {
         case live = "Live Show"
         case preview = "Preview"
+        case simulator = "Simulator"
         case manual = "Manual"
         case advanced = "Advanced"
 
@@ -5846,6 +5880,12 @@ struct ContentView: View {
             } else if workspaceMode == .preview {
                 ScrollView {
                     PreviewComposerWorkspaceView()
+                        .padding(.trailing, 4)
+                        .padding(.bottom, 32)
+                }
+            } else if workspaceMode == .simulator {
+                ScrollView {
+                    SimulatorWorkspaceView()
                         .padding(.trailing, 4)
                         .padding(.bottom, 32)
                 }

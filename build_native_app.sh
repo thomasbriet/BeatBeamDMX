@@ -111,6 +111,7 @@ swiftc \
   -framework SwiftUI \
   native/BeatBeamDMXApp.swift \
   native/LiveShowUX.swift \
+  native/SimulatorUX.swift \
   -o "${MACOS}/${APP_NAME}"
 
 cat > "${CONTENTS}/Info.plist" <<PLIST
@@ -170,6 +171,7 @@ BACKEND_PYTHON_SOURCES=(
   rich_musical_events.py
   rme_preview.py
   dynamic_composer.py
+  show_simulator.py
   production_show_selector.py
   live_intensity.py
   musical_event_envelope.py

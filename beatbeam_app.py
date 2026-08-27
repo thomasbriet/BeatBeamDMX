@@ -55,6 +55,7 @@ from production_show_selector import (
     BASELINE_ONLY,
     select_production_show_source,
 )
+from show_simulator import ShowSimulationSession
 
 
 ROOT = Path(__file__).resolve().parent
@@ -123,6 +124,27 @@ SERVER_HOST = "127.0.0.1"
 SERVER_PORT = DEFAULT_HTTP_PORT
 REMOTE_ACCESS_CONFIG = None
 REMOTE_ADDRESS_CACHE = {"updated_at": 0.0, "state": None}
+SIMULATOR_SMART_CUE_DATA_PATH = ROOT / "artifacts" / "smart-cue-review" / "SMART_CUE_REVIEW_DATA.json"
+_SIMULATOR_SMART_CUE_CACHE = None
+
+
+def simulator_smart_cues(track_path):
+    """Read only the existing review overlay; never read or alter human labels."""
+    global _SIMULATOR_SMART_CUE_CACHE
+    if _SIMULATOR_SMART_CUE_CACHE is None:
+        try:
+            payload = json.loads(SIMULATOR_SMART_CUE_DATA_PATH.read_text(encoding="utf-8"))
+            _SIMULATOR_SMART_CUE_CACHE = {
+                item.get("path"): [
+                    {"role": role.get("role"), "position_milliseconds": role.get("positionMs"),
+                     "planned": role.get("planned")}
+                    for role in item.get("roles", []) if isinstance(role, dict)
+                ]
+                for item in payload.get("tracks", []) if isinstance(item, dict) and item.get("path")
+            }
+        except (OSError, ValueError, TypeError):
+            _SIMULATOR_SMART_CUE_CACHE = {}
+    return list(_SIMULATOR_SMART_CUE_CACHE.get(track_path, ()))
 
 
 def canonical_song_analyzer_track_path(value):
@@ -943,6 +965,29 @@ class SongAnalyzerStructureHandoff:
             "bars_to_next": None,
         }
 
+    def catalog(self):
+        """Return only current, read-only analysis identities for the simulator."""
+        with self._lock:
+            self._refresh()
+            result = []
+            for path, track in sorted(self._tracks.items()):
+                if track.availability != "current" or not track.segments:
+                    continue
+                duration = max(segment.end_seconds for segment in track.segments)
+                bpm = None
+                bars = [(segment.start_bar, segment.end_bar, segment.start_seconds, segment.end_seconds)
+                        for segment in track.segments
+                        if segment.start_bar is not None and segment.end_bar is not None]
+                if bars:
+                    start_bar, end_bar, start, end = bars[-1]
+                    seconds = end - start
+                    if seconds > 0 and end_bar >= start_bar:
+                        bpm = round(((end_bar - start_bar + 1) * 4 * 60) / seconds, 3)
+                result.append({"path": path, "title": Path(path).stem, "duration_seconds": duration,
+                               "bpm": bpm, "analysis_version": track.analysis_version,
+                               "analysis_hash": track.analysis_hash})
+            return result
+
     def project(self, playback, include_shadow=False, include_rich_events=False):
         # The renderer and developer endpoint use this same cache concurrently.
         # Serialize refresh/projection so a reload cannot expose a half-updated
@@ -958,13 +1003,13 @@ class SongAnalyzerStructureHandoff:
                 self._metrics["track_switches"] += 1
             self._refresh(force=track_changed)
             result = {
-                "source": "song_analyzer" if source == "virtualdj" else "none",
+                "source": "song_analyzer" if source in {"virtualdj", "simulator"} else "none",
                 "contract_path": str(self.path),
                 "schema_version": self._schema_version,
                 "load_status": self._load_status,
                 "load_error": self._load_error,
                 "track_match": "none",
-                "availability": "inactive" if source != "virtualdj" else "unavailable",
+                "availability": "inactive" if source not in {"virtualdj", "simulator"} else "unavailable",
                 "projection_status": "unknown",
                 "canonical_track_path": canonical_path,
                 "analysis_version": None,
@@ -983,7 +1028,7 @@ class SongAnalyzerStructureHandoff:
                 "next": None,
                 "metrics": dict(self._metrics),
             }
-            if source != "virtualdj":
+            if source not in {"virtualdj", "simulator"}:
                 return result
             if self._load_status != "ready":
                 return result
@@ -16070,6 +16115,8 @@ SONG_ANALYZER_STRUCTURE = SongAnalyzerStructureHandoff()
 STRUCTURE_BEHAVIOR = StructureBehaviorBridge(SONG_ANALYZER_STRUCTURE)
 SONG_ANALYZER_BRIDGE_DIAGNOSTICS = SongAnalyzerBridgeDiagnostics()
 DMX = DmxController(TRANSPORT, STRUCTURE_BEHAVIOR)
+SIMULATOR = ShowSimulationSession(SONG_ANALYZER_STRUCTURE, smart_cues=simulator_smart_cues)
+SIMULATOR_LOCK = threading.RLock()
 
 
 def serial_ports():
@@ -16560,7 +16607,14 @@ def full_state():
         "developer_structure_behavior": structure_behavior_state(osc_state),
         "live_ui": live_ui_state(osc_state, bridge_diagnostics),
         "debug": beatbeam_debug_state(osc_state),
+        "simulator": simulator_state(),
     }
+
+
+def simulator_state():
+    """Read-only simulator projection; it deliberately never calls DMX render/send."""
+    with SIMULATOR_LOCK:
+        return SIMULATOR.state()
 
 
 def shadow_boundary_payload(boundary):
@@ -16874,6 +16928,13 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/state":
             self.send_json(full_state())
             return
+        if path == "/api/simulator/state":
+            self.send_json(simulator_state())
+            return
+        if path == "/api/simulator/tracks":
+            with SIMULATOR_LOCK:
+                self.send_json({"tracks": SIMULATOR.tracks()})
+            return
         if path == "/api/show-intent-observation/history":
             self.send_json(DMX.show_intent_observation_history())
             return
@@ -16953,6 +17014,26 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/transport/reset":
                 TRANSPORT.reset_manual_clock()
                 self.send_json(full_state())
+                return
+            if path == "/api/simulator/select":
+                with SIMULATOR_LOCK:
+                    self.send_json(SIMULATOR.select(payload.get("path")))
+                return
+            if path == "/api/simulator/play":
+                with SIMULATOR_LOCK:
+                    self.send_json(SIMULATOR.play())
+                return
+            if path == "/api/simulator/pause":
+                with SIMULATOR_LOCK:
+                    self.send_json(SIMULATOR.pause())
+                return
+            if path == "/api/simulator/restart":
+                with SIMULATOR_LOCK:
+                    self.send_json(SIMULATOR.restart())
+                return
+            if path == "/api/simulator/seek":
+                with SIMULATOR_LOCK:
+                    self.send_json(SIMULATOR.seek(payload.get("seconds")))
                 return
             if path == "/api/developer/playback/update":
                 TRANSPORT.update_developer_playback(payload)
