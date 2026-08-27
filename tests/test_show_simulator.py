@@ -53,3 +53,21 @@ class ShowSimulatorTests(unittest.TestCase):
         self.assertEqual(120000, self.session.seek(999.0)["transport"]["position_milliseconds"])
         self.assertEqual(0, self.session.restart()["transport"]["position_milliseconds"])
         self.assertFalse(self.session.state()["transport"]["playing"])
+
+    def test_timeline_and_navigation_share_one_seek_authority(self):
+        self.session.select(self.handoff.path)
+        state = self.session.seek(20.0)
+        self.assertEqual(20.0, state["timeline"]["playhead_seconds"])
+        self.assertEqual(1, len(state["timeline"]["sections"]))
+        self.assertEqual(1, len(state["timeline"]["events"]))
+        self.assertEqual(30000, self.session.next_event()["transport"]["position_milliseconds"])
+        self.assertEqual(0, self.session.previous_section()["transport"]["position_milliseconds"])
+
+    def test_preview_frame_is_separate_payload(self):
+        session = ShowSimulationSession(self.handoff, preview_frame_builder=lambda _: {
+            "slot_previews": {"moving_1": {"brightness": 120}},
+            "preview_source": "simulation_slot_previews",
+        })
+        state = session.select(self.handoff.path)
+        self.assertEqual("simulation_slot_previews", state["preview_source"])
+        self.assertEqual({"moving_1": {"brightness": 120}}, state["simulation_slot_previews"])

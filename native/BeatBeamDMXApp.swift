@@ -831,7 +831,12 @@ struct SimulatorState: Decodable {
     let mode: String; let physicalOutput: String; let track: SimulatorTrackIdentity?; let transport: SimulatorTransportState
     let continuousMusicalState: PreviewContinuousMusicalState?; let rme: PreviewCompositionEvent?; let eventEnvelope: PreviewMusicalEventEnvelope?
     let composition: PreviewCompositionState?; let smartCues: [SimulatorCue]
+    let timeline: SimulatorTimeline; let simulationSlotPreviews: [String: SlotPreview]
 }
+struct SimulatorTimeline: Decodable { let durationSeconds: Double; let playheadSeconds: Double; let sections: [SimulatorSection]; let events: [SimulatorEvent]; let smartCues: [SimulatorTimelineCue]; let envelope: PreviewMusicalEventEnvelope? }
+struct SimulatorSection: Decodable, Identifiable { let id: String?; let startSeconds: Double; let endSeconds: Double; let relativeEnergy: Double?; let recurrenceStrength: Double?; let familySalience: Double?; var stableID: String { id ?? "\(startSeconds)-\(endSeconds)" } }
+struct SimulatorEvent: Decodable, Identifiable { let type: String?; let startSeconds: Double; let endSeconds: Double?; let temporalKind: String?; var id: String { "\(type ?? "event")-\(startSeconds)" } }
+struct SimulatorTimelineCue: Decodable, Identifiable { let role: String?; let startSeconds: Double; let planned: Bool; var id: String { "\(role ?? "cue")-\(startSeconds)" } }
 
 struct VirtualDjBeatPulsePreviewState: Decodable {
     let enabled: Bool
@@ -2673,6 +2678,7 @@ final class AppModel: ObservableObject {
     @Published var previewComposition: PreviewCompositionState?
     @Published var simulatorTracks: [SimulatorTrack] = []
     @Published var simulatorState: SimulatorState?
+    @Published var simulatorSlotPreviews: [String: SlotPreview] = [:]
     @Published var autoShowCueText = "Auto Show uit"
     @Published var autoShowDetailText = "Zet Auto Show aan om phrase- en beat-gestuurde output te laten spelen."
     @Published var autoShowAudiencePanFocusEnabled = true
@@ -2789,7 +2795,7 @@ final class AppModel: ObservableObject {
         Task { do {
             let response: SimulatorTracksResponse = try await get("/api/simulator/tracks", as: SimulatorTracksResponse.self)
             simulatorTracks = response.tracks
-            simulatorState = try await get("/api/simulator/state", as: SimulatorState.self)
+            applySimulator(try await get("/api/simulator/state", as: SimulatorState.self))
         } catch { errorText = "Simulator kon analyses niet laden: \(error.localizedDescription)" } }
     }
     func simulatorSelect(_ path: String) { simulatorPost("/api/simulator/select", body: ["path": path]) }
@@ -2797,10 +2803,13 @@ final class AppModel: ObservableObject {
     func simulatorPause() { simulatorPost("/api/simulator/pause", body: EmptyRequest()) }
     func simulatorRestart() { simulatorPost("/api/simulator/restart", body: EmptyRequest()) }
     func simulatorSeek(milliseconds: Int) { simulatorPost("/api/simulator/seek", body: ["seconds": Double(milliseconds) / 1000.0]) }
+    func simulatorJumpCue(_ role: String) { simulatorPost("/api/simulator/jump-cue", body: ["role": role]) }
+    func simulatorNavigate(_ path: String) { simulatorPost(path, body: EmptyRequest()) }
     private func simulatorPost<Body: Encodable>(_ path: String, body: Body) {
-        Task { do { simulatorState = try await post(path, body: body, as: SimulatorState.self) }
+        Task { do { applySimulator(try await post(path, body: body, as: SimulatorState.self)) }
                catch { errorText = "Simulatoractie mislukt: \(error.localizedDescription)" } }
     }
+    private func applySimulator(_ state: SimulatorState) { simulatorState = state; simulatorSlotPreviews = state.simulationSlotPreviews }
 
     func forceReanalyzeActiveTrack() async throws -> DebugForceReanalysisResponse {
         try await post("/api/developer/force-reanalyze-active-track", body: EmptyRequest(), as: DebugForceReanalysisResponse.self)

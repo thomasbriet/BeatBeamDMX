@@ -16115,7 +16115,32 @@ SONG_ANALYZER_STRUCTURE = SongAnalyzerStructureHandoff()
 STRUCTURE_BEHAVIOR = StructureBehaviorBridge(SONG_ANALYZER_STRUCTURE)
 SONG_ANALYZER_BRIDGE_DIAGNOSTICS = SongAnalyzerBridgeDiagnostics()
 DMX = DmxController(TRANSPORT, STRUCTURE_BEHAVIOR)
-SIMULATOR = ShowSimulationSession(SONG_ANALYZER_STRUCTURE, smart_cues=simulator_smart_cues)
+# A separate renderer instance may use the existing Preview Map functions, but
+# has no DMX connection or mutable aliases to the live controller.
+SIMULATION_PREVIEW_RENDERER = DmxController(OSC, STRUCTURE_BEHAVIOR)
+
+
+def simulation_preview_frame(playback):
+    """Build existing slot preview primitives for simulation only; never render/send DMX."""
+    with DMX.lock:
+        config = DMX._clean_full_config(dict(DMX.config))
+    config["blackout_active"] = False
+    config["auto_show"] = dict(config.get("auto_show") or {})
+    config["auto_show"]["preview_rme_mode"] = "DYNAMIC_COMPOSER"
+    renderer = SIMULATION_PREVIEW_RENDERER
+    baseline = renderer._auto_show_state(playback, config["auto_show"])
+    preview, slots, differential = renderer._preview_auto_show_frame(
+        config, playback, time.time(), baseline
+    )
+    return {"slot_previews": slots, "preview_source": "simulation_slot_previews",
+            "composition": dict(differential.get("dynamic_show_intent") or {}),
+            "preview_auto_show": preview}
+
+
+SIMULATOR = ShowSimulationSession(
+    SONG_ANALYZER_STRUCTURE, smart_cues=simulator_smart_cues,
+    preview_frame_builder=simulation_preview_frame,
+)
 SIMULATOR_LOCK = threading.RLock()
 
 
@@ -17034,6 +17059,26 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/simulator/seek":
                 with SIMULATOR_LOCK:
                     self.send_json(SIMULATOR.seek(payload.get("seconds")))
+                return
+            if path == "/api/simulator/jump-cue":
+                with SIMULATOR_LOCK:
+                    self.send_json(SIMULATOR.jump_smart_cue(payload.get("role")))
+                return
+            if path == "/api/simulator/previous-section":
+                with SIMULATOR_LOCK:
+                    self.send_json(SIMULATOR.previous_section())
+                return
+            if path == "/api/simulator/next-section":
+                with SIMULATOR_LOCK:
+                    self.send_json(SIMULATOR.next_section())
+                return
+            if path == "/api/simulator/previous-event":
+                with SIMULATOR_LOCK:
+                    self.send_json(SIMULATOR.previous_event())
+                return
+            if path == "/api/simulator/next-event":
+                with SIMULATOR_LOCK:
+                    self.send_json(SIMULATOR.next_event())
                 return
             if path == "/api/developer/playback/update":
                 TRANSPORT.update_developer_playback(payload)
