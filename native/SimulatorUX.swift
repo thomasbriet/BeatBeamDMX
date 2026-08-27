@@ -43,7 +43,27 @@ struct SimulatorWorkspaceView: View {
         }
     }
     private func musical(_ state: SimulatorState) -> some View { PanelSurface(title: "Musical State", compact: true) { VStack(alignment: .leading, spacing: 6) { Text("ANALYZED ONLY").foregroundStyle(BeatBeamPalette.brandCyan); Text("Energy \(state.continuousMusicalState?.relativeEnergy.map { String(format: "%.2f", $0) } ?? "—")"); Text("RME \(state.rme?.type ?? "none")"); Text("Envelope \(state.eventEnvelope?.phase ?? "inactive")") } } }
-    private func composer(_ state: SimulatorState) -> some View { PanelSurface(title: "Dynamic Composer", compact: true) { VStack(alignment: .leading, spacing: 6) { Text(state.composition?.dynamicComposerActive == true ? "Preview composition active" : "No composition"); Text("Fixture intents + primitives are from this timeline position").foregroundStyle(BeatBeamPalette.secondaryText); Text("Physical output: NONE").foregroundStyle(BeatBeamPalette.brandAmber) } } }
+    private func composer(_ state: SimulatorState) -> some View {
+        let moving = state.composition?.selectedPrimitives?["moving"]
+        let par = state.composition?.selectedPrimitives?["par"]
+        let signature = state.composition?.compositionSignature
+        let variation = state.composition?.variation
+        return PanelSurface(title: "Dynamic Composer", compact: true) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(state.composition?.selectedPrimitives != nil ? "Preview composition active" : "No composition")
+                Text("Move \(primitive(moving, "movement_pattern")) · Dimmer \(primitive(moving, "dimmer_motif"))")
+                Text("Palette \(primitive(par, "palette")) · Color \(primitive(par, "color_animation"))")
+                Text("Participation \(primitive(moving, "fixture_partition")) · Pulse \(primitive(par, "pulse"))")
+                Text("Relation \(primitiveValue(signature, "palette_relationship")) · \(primitiveValue(variation, "repeat_classification"))")
+                    .foregroundStyle(BeatBeamPalette.secondaryText)
+                Text("Fixture intents + primitives are from this timeline position").foregroundStyle(BeatBeamPalette.secondaryText)
+                Text("Physical output: NONE").foregroundStyle(BeatBeamPalette.brandAmber)
+            }
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+        }
+    }
+    private func primitive(_ values: [String: PreviewPrimitiveValue]?, _ key: String) -> String { primitiveValue(values, key) }
+    private func primitiveValue(_ values: [String: PreviewPrimitiveValue]?, _ key: String) -> String { values?[key]?.displayText ?? "—" }
     private var fixturePreview: some View { PanelSurface(title: "Simulated Preview Map", compact: true) { ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 8) { ForEach(model.slotEditors) { editor in let preview = model.simulatorSlotPreviews[editor.id]; VStack(alignment: .leading, spacing: 5) { RoundedRectangle(cornerRadius: 5).fill(simulatorColor(preview)).frame(width: 72, height: 34); Text(editor.label).font(.caption2); Text(preview?.motionActive == true ? "moving" : "steady").font(.caption2).foregroundStyle(BeatBeamPalette.secondaryText) } } } } } }
     private func simulatorColor(_ preview: SlotPreview?) -> Color { guard let preview else { return .black.opacity(0.4) }; return Color(red: Double(preview.red) / 255, green: Double(preview.green) / 255, blue: Double(preview.blue) / 255).opacity(max(0.15, Double(preview.brightness) / 255)) }
     private func time(_ milliseconds: Int) -> String { String(format: "%d:%02d", milliseconds / 60000, (milliseconds / 1000) % 60) }

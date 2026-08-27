@@ -47,10 +47,25 @@ KNOWN_MOTIONS = frozenset({
 })
 KNOWN_PALETTES = frozenset({
     "deep_blue_white", "cobalt_amber", "amber_teal", "rose_mint", "teal_orange",
-    "magenta_cyan", "ice_fire",
+    "magenta_cyan", "ice_fire", "violet_lime", "ruby_lime", "purple_gold",
+    "pink_blue", "blue_amber",
 })
 KNOWN_PULSES = frozenset({"breathe", "soft_pulse", "strong_pulse", "lift", "hit"})
 KNOWN_WASHES = frozenset({"center_glow_blue", "blue_white_split", "center_out_build", "white_pixel_hits"})
+KNOWN_DIMMER_MOTIFS = frozenset({
+    "static_full", "static_reduced", "beat_pulse", "half_bar_gate", "bar_gate",
+    "alternate_a_b", "alternate_left_right", "chase_forward", "chase_reverse",
+    "out_to_in", "in_to_out", "wave_forward", "wave_reverse", "stair_up",
+    "stair_down", "burst_all", "burst_alternate", "syncopated_pulse",
+})
+KNOWN_COLOR_ANIMATIONS = frozenset({
+    "all_same", "group_split", "alternate", "chase_color", "swap_on_bar",
+    "swap_on_2_bars", "event_accent", "return_palette_recall",
+})
+KNOWN_PARTITIONS = frozenset({
+    "all_groups", "moving_lead", "par_lead", "wash_foundation", "moving_par",
+    "par_wash", "alternating_groups", "call_response",
+})
 
 
 class _NullTransport:
@@ -271,7 +286,8 @@ def corpus_soak(document):
         bpm = _bpm(track)
         section_records = []
         prior_signature = None
-        repeats = consecutive = recurrence_reuse = alternatives = 0
+        repeats = consecutive = recurrence_reuse = alternatives = near_repeats = 0
+        same_components = Counter()
         track_rme = Counter()
         positions = _frame_positions(track)
         for position in positions:
@@ -369,19 +385,31 @@ def corpus_soak(document):
             )
             signature = _signature_key(candidate)
             variation = (candidate.get("variation") or {}).get("selection")
+            repeat_classification = (candidate.get("variation") or {}).get("repeat_classification")
             repeats += int(signature in {record["signature"] for record in section_records})
             consecutive += int(prior_signature == signature)
             recurrence_reuse += int(variation == "recurrence_reuse")
             alternatives += int(variation == "anti_repeat_alternative")
+            near_repeats += int(repeat_classification == "NEAR_REPEAT")
+            signature_payload = candidate.get("composition_signature") or {}
             section_records.append({
                 "observation_id": section.get("observation_id"),
                 "signature": signature,
-                "motion": (candidate.get("composition_signature") or {}).get("motion_family"),
-                "palette": (candidate.get("composition_signature") or {}).get("palette_family"),
-                "pulse": (candidate.get("composition_signature") or {}).get("pulse"),
-                "wash": (candidate.get("composition_signature") or {}).get("wash"),
+                "motion": signature_payload.get("motion_family"),
+                "palette": signature_payload.get("palette_family"),
+                "pulse": signature_payload.get("pulse"),
+                "wash": signature_payload.get("wash"),
+                "dimmer": signature_payload.get("dimmer_motif"),
+                "color_animation": signature_payload.get("color_animation"),
+                "fixture_partition": signature_payload.get("fixture_partition"),
                 "variation": variation,
+                "repeat_classification": repeat_classification,
             })
+            if len(section_records) > 1:
+                previous = section_records[-2]
+                current = section_records[-1]
+                for component in ("motion", "palette", "pulse", "wash", "dimmer", "color_animation", "fixture_partition"):
+                    same_components[component] += int(previous.get(component) == current.get(component))
             prior_signature = signature
         max_history_recent = max(max_history_recent, len(diversity_history._recent))
         max_history_observations = max(max_history_observations, len(diversity_history._by_observation))
@@ -395,12 +423,21 @@ def corpus_soak(document):
             "unique_palette_signatures": len({record["palette"] for record in section_records}),
             "unique_pulse_signatures": len({record["pulse"] for record in section_records}),
             "unique_wash_signatures": len({record["wash"] for record in section_records}),
+            "unique_dimmer_motifs": len({record["dimmer"] for record in section_records}),
+            "unique_color_animations": len({record["color_animation"] for record in section_records}),
+            "unique_fixture_partitions": len({record["fixture_partition"] for record in section_records}),
             "exact_repeat_count": repeats,
             "consecutive_repeat_count": consecutive,
             "exact_repeat_rate": repeats / max(1, len(section_records)),
             "consecutive_repeat_rate": consecutive / max(1, len(section_records) - 1),
             "recurrence_reuse_count": recurrence_reuse,
             "anti_repeat_alternative_count": alternatives,
+            "near_repeat_count": near_repeats,
+            "consecutive_same_component_rates": {
+                component: value / max(1, len(section_records) - 1)
+                for component, value in same_components.items()
+            },
+            "section_progression": section_records,
             "current_rme_frames": dict(track_rme),
         })
 
@@ -431,6 +468,13 @@ def corpus_soak(document):
     unique_counts = [item["unique_full_signatures"] for item in track_metrics]
     repeat_rates = [item["exact_repeat_rate"] for item in track_metrics]
     consecutive_rates = [item["consecutive_repeat_rate"] for item in track_metrics]
+    component_rates = {
+        component: _distribution([
+            item["consecutive_same_component_rates"].get(component, 0.0)
+            for item in track_metrics
+        ])
+        for component in ("motion", "palette", "pulse", "wash", "dimmer", "color_animation", "fixture_partition")
+    }
     result = {
         "contract": "dynamic-composer-full-corpus-shadow-soak-v1",
         "source_handoff_generated_at_unix_milliseconds": document.get("generated_at_unix_milliseconds"),
@@ -465,6 +509,11 @@ def corpus_soak(document):
             "total_consecutive_repeats": sum(item["consecutive_repeat_count"] for item in track_metrics),
             "total_recurrence_reuse": sum(item["recurrence_reuse_count"] for item in track_metrics),
             "total_anti_repeat_alternatives": sum(item["anti_repeat_alternative_count"] for item in track_metrics),
+            "total_near_repeats": sum(item["near_repeat_count"] for item in track_metrics),
+            "consecutive_same_component_rate": component_rates,
+            "unique_dimmer_motifs": _distribution([item["unique_dimmer_motifs"] for item in track_metrics]),
+            "unique_palette_families": _distribution([item["unique_palette_signatures"] for item in track_metrics]),
+            "unique_fixture_partitions": _distribution([item["unique_fixture_partitions"] for item in track_metrics]),
         },
         "repetition_outliers_exact": sorted(
             track_metrics, key=lambda item: (item["exact_repeat_rate"], item["sections"]), reverse=True
@@ -510,6 +559,12 @@ def _candidate_invalid_reason(candidate):
         if "pulse" in primitive and primitive["pulse"] not in KNOWN_PULSES:
             return "unknown_primitive"
         if "wash_cue" in primitive and primitive["wash_cue"] not in KNOWN_WASHES:
+            return "unknown_primitive"
+        if "dimmer_motif" in primitive and primitive["dimmer_motif"] not in KNOWN_DIMMER_MOTIFS:
+            return "unknown_primitive"
+        if "color_animation" in primitive and primitive["color_animation"] not in KNOWN_COLOR_ANIMATIONS:
+            return "unknown_primitive"
+        if "fixture_partition" in primitive and primitive["fixture_partition"] not in KNOWN_PARTITIONS:
             return "unknown_primitive"
     if not isinstance(candidate.get("composition_signature"), dict):
         return "incomplete_signature"

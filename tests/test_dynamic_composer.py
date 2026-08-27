@@ -4,6 +4,7 @@ import unittest
 from dynamic_composer import (
     CompositionHistory,
     ContinuousMusicalState,
+    DIMMER_ANIMATION_MOTIFS,
     DYNAMIC_COMPOSER_MODE,
     FixtureGroupIntent,
     compose_dynamic_preview,
@@ -200,6 +201,35 @@ class DynamicComposerTests(unittest.TestCase):
         self.assertEqual("new", reset["variation"]["selection"])
         self.assertEqual(1, reset["variation"]["history_size"])
 
+    def test_v2_component_history_avoids_immediate_perceptual_repeats(self):
+        history = CompositionHistory(capacity=6)
+        compositions = []
+        for index in range(6):
+            state = ContinuousMusicalState(
+                f"v2-{index}", index * 30, (index + 1) * 30, .50, .62, .35, .20, .75,
+            )
+            compositions.append(compose_dynamic_preview(
+                base_show(), state, self.context(), composition_history=history,
+                lifecycle_context=("simulation", "track-v2", 1),
+            ))
+        for previous, current in zip(compositions, compositions[1:]):
+            left, right = previous["composition_signature"], current["composition_signature"]
+            self.assertNotEqual(
+                (left["dimmer_motif"], left["palette_family"], left["fixture_partition"]),
+                (right["dimmer_motif"], right["palette_family"], right["fixture_partition"]),
+            )
+            self.assertIn(current["variation"]["repeat_classification"], {
+                "NEW_MATERIAL", "COMPONENT_VARIATION", "NEAR_REPEAT", "CAPABILITY_LIMITED",
+            })
+
+    def test_track_identity_changes_opening_material_but_replay_is_stable(self):
+        state = ContinuousMusicalState("same-section", 0, 30, .5, .72, .35, .2, .7)
+        first = compose_dynamic_preview(base_show(), state, self.context(), lifecycle_context=("simulation", "track-a", 1))
+        second = compose_dynamic_preview(base_show(), state, self.context(), lifecycle_context=("simulation", "track-b", 1))
+        replay = compose_dynamic_preview(base_show(), state, self.context(), lifecycle_context=("simulation", "track-a", 2))
+        self.assertNotEqual(first["selected_primitives"], second["selected_primitives"])
+        self.assertEqual(first["selected_primitives"], replay["selected_primitives"])
+
     def test_parameters_are_bounded_and_fixture_independent(self):
         composition = compose_dynamic_preview(base_show(), self.state(), self.context())
         primitive = composition["selected_primitives"]["moving"]
@@ -211,7 +241,13 @@ class DynamicComposerTests(unittest.TestCase):
         self.assertTrue(-12 <= params["horizontal_center_offset"] <= 12)
         self.assertTrue(-9 <= params["vertical_center_offset"] <= 9)
         self.assertIn(primitive["palette_parameters"]["relationship"],
-                      {"analogous", "complementary", "split_complementary", "monochromatic"})
+                      {"mono", "adjacent_hue", "two_color_split", "complementary_bright",
+                       "triad_bright", "warm_pair", "cool_pair", "warm_cool_contrast"})
+        self.assertIn(primitive["dimmer_motif"], {motif.name for motif in DIMMER_ANIMATION_MOTIFS})
+        self.assertIn(primitive["color_animation"], {
+            "all_same", "group_split", "alternate", "chase_color", "swap_on_bar",
+            "swap_on_2_bars", "event_accent", "return_palette_recall",
+        })
         self.assertIn("motion_parameters", composition["composition_signature"])
 
     def test_track_switch_seek_and_stale_projection_fail_closed_or_reproject(self):
@@ -237,7 +273,7 @@ class DynamicComposerTests(unittest.TestCase):
         rendered = apply_dynamic_composer_preview(base_show(), self.context(15.0, "BUILD"), composition)
         self.assertEqual("build", rendered["rme_preview"]["rme_modifier"])
         self.assertTrue(rendered["dynamic_composition_applied"])
-        self.assertIn("PAR amber_teal / lift", rendered["preview_cue"])
+        self.assertIn("PAR amber_teal /", rendered["preview_cue"])
 
 
 if __name__ == "__main__":

@@ -201,13 +201,15 @@ def _dynamic_preview_cue(context, composition):
     if isinstance(signature, dict):
         variation_text = (
             f" • Variation {variation.get('selection', 'new')}: "
+            f"{variation.get('repeat_classification', 'NEW_MATERIAL')} / "
             f"{signature.get('palette_relationship', 'complementary')}"
         )
     return (
         f"Dynamic Composer • RME {modifier}{envelope_text}{variation_text} • "
-        f"Moving {moving.get('movement_pattern', 'neutral')} / {moving.get('pulse', 'neutral')} • "
-        f"PAR {par.get('palette', 'neutral')} / {par.get('pulse', 'neutral')} • "
-        f"Wash {wash.get('wash_cue', wash.get('palette', 'neutral'))}"
+        f"Moving {moving.get('movement_pattern', 'neutral')} / {moving.get('dimmer_motif', 'static_full')} • "
+        f"PAR {par.get('palette', 'neutral')} / {par.get('color_animation', 'all_same')} • "
+        f"Wash {wash.get('wash_cue', wash.get('palette', 'neutral'))} / "
+        f"{moving.get('fixture_partition', 'all_groups')}"
     )
 
 

@@ -26,14 +26,32 @@ KNOWN_MOTIONS = frozenset({
 })
 KNOWN_PALETTES = frozenset({
     "deep_blue_white", "cobalt_amber", "amber_teal", "rose_mint", "teal_orange",
-    "magenta_cyan", "ice_fire",
+    "magenta_cyan", "ice_fire", "violet_lime", "ruby_lime", "purple_gold",
+    "pink_blue", "blue_amber",
 })
 KNOWN_PULSES = frozenset({"breathe", "soft_pulse", "strong_pulse", "lift", "hit"})
 KNOWN_WASHES = frozenset({"center_glow_blue", "blue_white_split", "center_out_build", "white_pixel_hits"})
 PALETTE_RELATIONSHIPS = frozenset({
     "analogous", "complementary", "split_complementary", "monochromatic",
+    "mono", "adjacent_hue", "two_color_split", "complementary_bright",
+    "triad_bright", "warm_pair", "cool_pair", "warm_cool_contrast",
 })
 FIXTURE_ROLE_PATTERNS = frozenset({"all", "alternating"})
+DIMMER_MOTIFS = frozenset({
+    "static_full", "static_reduced", "beat_pulse", "half_bar_gate", "bar_gate",
+    "alternate_a_b", "alternate_left_right", "chase_forward", "chase_reverse",
+    "out_to_in", "in_to_out", "wave_forward", "wave_reverse", "stair_up",
+    "stair_down", "burst_all", "burst_alternate", "syncopated_pulse",
+})
+COLOR_ANIMATIONS = frozenset({
+    "all_same", "group_split", "alternate", "chase_color", "swap_on_bar",
+    "swap_on_2_bars", "event_accent", "return_palette_recall",
+})
+FIXTURE_PARTITIONS = frozenset({
+    "all_groups", "moving_lead", "par_lead", "wash_foundation", "moving_par",
+    "par_wash", "alternating_groups", "call_response",
+})
+COMPLEXITY_LEVELS = frozenset({"low", "medium", "high"})
 MOTION_PARAMETER_RANGES = {
     "range_scale": (.72, 1.0),
     "speed_scale": (.82, 1.16),
@@ -44,7 +62,8 @@ MOTION_PARAMETER_RANGES = {
 }
 COMPOSITION_SIGNATURE_FIELDS = frozenset({
     "motion_family", "motion_parameters", "palette_family", "palette_relationship",
-    "pulse", "wash", "fixture_roles",
+    "pulse", "wash", "fixture_roles", "dimmer_motif", "color_animation",
+    "fixture_partition", "complexity",
 })
 
 
@@ -169,6 +188,10 @@ def validate_dynamic_composer_candidate(candidate):
         and signature.get("pulse") in KNOWN_PULSES \
         and signature.get("wash") in KNOWN_WASHES \
         and signature.get("fixture_roles") in FIXTURE_ROLE_PATTERNS \
+        and signature.get("dimmer_motif") in DIMMER_MOTIFS \
+        and signature.get("color_animation") in COLOR_ANIMATIONS \
+        and signature.get("fixture_partition") in FIXTURE_PARTITIONS \
+        and signature.get("complexity") in COMPLEXITY_LEVELS \
         and _bounded_mapping(signature_motion_parameters, MOTION_PARAMETER_RANGES) \
         and _finite_tree(signature)
 
@@ -253,9 +276,14 @@ def _valid_continuous_state(value):
 def _primitive_valid(name, primitive):
     allowed = {
         "moving": {"movement_pattern", "pulse", "palette", "motion_parameters",
-                   "palette_parameters", "pulse_parameters"},
-        "par": {"pulse", "palette", "palette_parameters", "pulse_parameters"},
-        "wash": {"palette", "wash_cue", "palette_parameters", "wash_parameters"},
+                   "palette_parameters", "pulse_parameters", "dimmer_motif",
+                   "color_animation", "fixture_partition", "complexity"},
+        "par": {"pulse", "palette", "palette_parameters", "pulse_parameters",
+                "dimmer_motif", "color_animation", "fixture_partition", "complexity"},
+        "wash": {"palette", "wash_cue", "palette_parameters", "wash_parameters",
+                 "dimmer_motif", "color_animation", "fixture_partition", "complexity"},
+        "static": {"palette", "palette_parameters", "pulse_parameters", "dimmer_motif",
+                   "color_animation", "fixture_partition", "complexity"},
     }.get(name, set())
     if not set(primitive).issubset(allowed):
         return False
@@ -277,7 +305,7 @@ def _primitive_valid(name, primitive):
         or set(palette) != {"relationship", "balance", "phase_offset"}
         or palette.get("relationship") not in PALETTE_RELATIONSHIPS
         or not _range(palette.get("balance"), .32, .68)
-        or not _bounded_int(palette.get("phase_offset"), 0, 2)
+        or not _bounded_int(palette.get("phase_offset"), 0, 3)
     ):
         return False
     pulse = primitive.get("pulse_parameters")
@@ -295,6 +323,14 @@ def _primitive_valid(name, primitive):
         or not _bounded_int(wash.get("phase_offset"), 0, 2)
     ):
         return False
+    for field, allowed_values in (
+        ("dimmer_motif", DIMMER_MOTIFS),
+        ("color_animation", COLOR_ANIMATIONS),
+        ("fixture_partition", FIXTURE_PARTITIONS),
+        ("complexity", COMPLEXITY_LEVELS),
+    ):
+        if field in primitive and primitive.get(field) not in allowed_values:
+            return False
     return bool(checks) and all(checks) and _finite_tree(primitive)
 
 

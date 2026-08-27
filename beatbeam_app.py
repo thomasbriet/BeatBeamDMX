@@ -12731,34 +12731,51 @@ class DmxController:
         parameters = primitive.get("palette_parameters") if isinstance(primitive, dict) else None
         parameters = parameters if isinstance(parameters, dict) else {}
         relationship = str(parameters.get("relationship", "complementary"))
-        if relationship == "analogous":
+        if relationship in {"analogous", "adjacent_hue"}:
             palette = (profile["primary"], profile["accent"], profile["primary"])
-        elif relationship == "split_complementary":
+        elif relationship in {"split_complementary", "two_color_split"}:
             palette = (profile["primary"], profile["accent"], profile["secondary"])
-        elif relationship == "monochromatic":
+        elif relationship in {"monochromatic", "mono"}:
             palette = (profile["primary"], profile["primary"], profile["accent"])
+        elif relationship == "warm_pair":
+            palette = (profile["primary"], profile["accent"], profile["secondary"])
+        elif relationship == "cool_pair":
+            palette = (profile["secondary"], profile["primary"], profile["accent"])
+        elif relationship == "triad_bright":
+            palette = (profile["primary"], profile["secondary"], profile["accent"])
+        elif relationship in {"complementary", "complementary_bright", "warm_cool_contrast"}:
+            palette = (profile["primary"], profile["secondary"], profile["primary"])
         try:
-            palette_phase_offset = max(0, min(2, int(parameters.get("phase_offset", 0))))
+            palette_phase_offset = max(0, min(3, int(parameters.get("phase_offset", 0))))
             balance = max(.32, min(.68, float(parameters.get("balance", .50))))
         except (TypeError, ValueError):
             palette_phase_offset, balance = 0, .50
         # Een bounded beat-index maakt de expliciet geselecteerde paletprimitive
-        # zichtbaar zonder een oude look/theme/scene te raadplegen.
+        # zichtbaar zonder een oude look/theme/scene te raadplegen.  Er wordt
+        # bewust niet tussen RGB-kleuren geïnterpoleerd: alle wissels blijven
+        # discrete, verzadigde profielkleuren.
         beat_step = int(auto_show.get("beat_step", 1) or 1)
-        phase = int(math.floor(beat_step * (1.0 + rate * 2.0))) + palette_phase_offset
-        if role == "moving":
-            color = palette[(phase + group_index + member_index) % len(palette)]
-        elif role == "par":
-            color = palette[(phase + member_index // 2) % len(palette)]
-        elif role == "wash":
-            color = palette[(phase + group_index) % len(palette)]
-        else:
-            color = profile["primary"]
-        # Meng uitsluitend benoemde profielkleuren; er is geen RGB-randomizer.
-        if role == "moving":
-            color = mix_rgbw(color, profile["primary"], 1.0 - balance)
-        elif role == "wash":
-            color = mix_rgbw(color, profile["secondary"], 1.0 - balance)
+        beat_value = float(auto_show.get("beat_value", beat_step) or beat_step)
+        phase = int(math.floor(beat_value * (1.0 + rate * 2.0))) + palette_phase_offset
+        color_animation = str(primitive.get("color_animation") or "group_split")
+        role_bias = {"moving": 0, "par": 1, "wash": 2, "static": 0}.get(role, 0)
+        if color_animation == "all_same":
+            index = 0
+        elif color_animation == "alternate":
+            index = (int(math.floor(beat_value)) + member_index + role_bias) % len(palette)
+        elif color_animation == "chase_color":
+            index = (int(math.floor(beat_value)) + group_index + member_index + role_bias) % len(palette)
+        elif color_animation == "swap_on_bar":
+            index = (int(math.floor(beat_value / 4.0)) + group_index + role_bias) % len(palette)
+        elif color_animation == "swap_on_2_bars":
+            index = (int(math.floor(beat_value / 8.0)) + group_index + role_bias) % len(palette)
+        elif color_animation == "event_accent":
+            index = 2 if (auto_show.get("rme_preview") or {}).get("current_rme") else (group_index + role_bias) % 2
+        elif color_animation == "return_palette_recall":
+            index = (group_index + role_bias) % 2
+        else:  # group_split and a malformed value both remain a safe group split.
+            index = (group_index + role_bias) % len(palette)
+        color = palette[index]
         return normalize_rgbw_peak(color, peak_target=255, white_cap=0, minimum_peak=96)
 
     def _wall_wash_zone_rgb_for_slot(self, slot_context, auto_show, osc):
@@ -14145,6 +14162,7 @@ class DmxController:
             "live_behavior_bucket": live_behavior_section,
             "outro_activity": outro_activity if section == "outro" else None,
             "beat_step": beat_step,
+            "beat_value": beat_value,
             "cue_label": cue_label,
             "color_source": color_source,
             "energy": energy,
@@ -15054,6 +15072,12 @@ class DmxController:
                 effective["_dynamic_motion_parameters"] = dict(dynamic_primitives["motion_parameters"])
             if isinstance(dynamic_primitives.get("pulse_parameters"), dict):
                 effective["_dynamic_pulse_parameters"] = dict(dynamic_primitives["pulse_parameters"])
+            dimmer_motif = dynamic_primitives.get("dimmer_motif")
+            if isinstance(dimmer_motif, str):
+                effective["_dynamic_dimmer_motif"] = dimmer_motif
+            partition = dynamic_primitives.get("fixture_partition")
+            if isinstance(partition, str):
+                effective["_dynamic_fixture_partition"] = partition
         effective["_auto_show_motion_name"] = motion_name
         motion_profile = auto_show_motion_profile(motion_name)
         effective["_auto_show_member_mirror"] = bool(
@@ -15757,7 +15781,7 @@ class DmxController:
             par_pair_index = min(par_member_index, par_member_count - 1 - par_member_index)
 
         if mode in ("none", "full_on") or not config["beat_pulse_enabled"]:
-            return clamp_dmx(round(dimmer * texture_multiplier))
+            return self._dynamic_dimmer_brightness(config, osc, dimmer, texture_multiplier)
 
         beat_value = float(osc.get("beat_value") or 0.0)
         cycle_16 = (beat_value % 16.0) / 16.0
@@ -15848,7 +15872,7 @@ class DmxController:
             multiplier = max(0.0, min(1.08, direct_multiplier))
             multiplier *= (1.0 - texture_blend) + texture_multiplier * texture_blend
             multiplier = max(0.0, min(1.08, multiplier))
-            return clamp_dmx(round(dimmer * multiplier))
+            return self._dynamic_dimmer_brightness(config, osc, dimmer, multiplier)
 
         decay = config["beat_decay_ms"] / 1000.0
         movement_scale = float(config.get("_auto_show_movement", 0.0) or 0.0)
@@ -15907,7 +15931,68 @@ class DmxController:
 
         multiplier *= (1.0 - texture_blend) + texture_multiplier * texture_blend
         multiplier = max(0.0, min(1.08, multiplier))
-        return clamp_dmx(round(dimmer * multiplier))
+        return self._dynamic_dimmer_brightness(config, osc, dimmer, multiplier)
+
+    def _dynamic_dimmer_brightness(self, config, osc, dimmer, base_multiplier):
+        """Interpret the first-class preview motif through existing slot topology.
+
+        This is deliberately a brightness multiplier only. It has no strobe or
+        channel semantics, and production never selects a composer candidate.
+        """
+        motif = str(config.get("_dynamic_dimmer_motif") or "")
+        if not motif:
+            return clamp_dmx(round(dimmer * base_multiplier))
+        context = config.get("_slot_context") or {}
+        beat_value = float((osc or {}).get("beat_value") or 0.0)
+        count = max(1, int(context.get("member_count", context.get("group_count", 1))))
+        index = int(context.get("member_index", context.get("group_index", 0)))
+        normalized = float(context.get("member_normalized", context.get("group_normalized", .5)))
+        centered = float(context.get("member_centered", context.get("group_centered", 0.0)))
+        phase = beat_value % 1.0
+        beat = int(math.floor(beat_value))
+        topology = count > 1
+        low, high = .38, 1.0
+        if motif == "static_full":
+            multiplier = high
+        elif motif == "static_reduced":
+            multiplier = .68
+        elif motif == "beat_pulse":
+            multiplier = .62 + .38 * max(0.0, 1.0 - phase / .24)
+        elif motif == "half_bar_gate":
+            multiplier = .98 if beat % 4 in (0, 1) else .58
+        elif motif == "bar_gate":
+            multiplier = .98 if beat % 4 == 0 else .64
+        elif motif in {"alternate_a_b", "alternate_left_right", "burst_alternate"} and topology:
+            active = (beat if motif != "alternate_left_right" else beat // 4) % 2
+            side = index % 2 if count <= 2 else int(centered > 0)
+            burst = motif == "burst_alternate" and phase < .20
+            multiplier = .98 if side == active and (not burst or phase < .20) else (.56 if motif != "burst_alternate" else .44)
+        elif motif in {"chase_forward", "chase_reverse"} and topology:
+            step = beat % count
+            if motif == "chase_reverse":
+                step = count - 1 - step
+            multiplier = .98 if index == step else .44
+        elif motif in {"out_to_in", "in_to_out"} and topology:
+            order = int(round(abs(centered) * (count - 1)))
+            if motif == "in_to_out":
+                order = (count - 1) - order
+            multiplier = .98 if order == beat % count else .46
+        elif motif in {"wave_forward", "wave_reverse"} and topology:
+            direction = 1.0 if motif == "wave_forward" else -1.0
+            multiplier = .54 + .42 * (0.5 + 0.5 * wave_sine((beat_value / 2.0) + direction * normalized * .75))
+        elif motif in {"stair_up", "stair_down"} and topology:
+            step = (index + beat // 2) % count
+            if motif == "stair_down":
+                step = count - 1 - step
+            multiplier = .50 + .46 * (step / max(1, count - 1))
+        elif motif == "burst_all":
+            multiplier = .98 if beat % 4 == 0 and phase < .22 else .64
+        elif motif == "syncopated_pulse":
+            multiplier = .96 if phase < .18 or .48 <= phase < .66 else .58
+        else:  # capability/topology fallback: a bright, deterministic beat pulse.
+            multiplier = .62 + .32 * max(0.0, 1.0 - phase / .24)
+        multiplier = max(low, min(high, multiplier))
+        return clamp_dmx(round(dimmer * base_multiplier * multiplier))
 
     def _motion_for_config(self, slot_id, config, osc):
         if not config["sync_enabled"]:

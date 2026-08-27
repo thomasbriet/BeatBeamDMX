@@ -815,6 +815,8 @@ struct PreviewCompositionState: Decodable {
     let previewCue: String?
     let fixtureGroupIntents: [String: PreviewFixtureGroupIntent]?
     let selectedPrimitives: [String: [String: PreviewPrimitiveValue]]?
+    let compositionSignature: [String: PreviewPrimitiveValue]?
+    let variation: [String: PreviewPrimitiveValue]?
     let changedDimensions: [String]?
     let physicalOutputSource: String?
 }

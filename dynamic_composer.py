@@ -21,6 +21,51 @@ INTERVAL_EVENT_TYPES = frozenset({"BUILD", "BREAK"})
 COMPOSITION_HISTORY_CAPACITY = 6
 
 
+@dataclass(frozen=True)
+class DimmerAnimationMotif:
+    """A bounded musical brightness pattern, not a fixture/channel instruction."""
+
+    name: str
+    timing_unit: str
+    complexity: str
+    topology_required: bool = False
+
+
+DIMMER_ANIMATION_MOTIFS = (
+    DimmerAnimationMotif("static_full", "bar", "low"),
+    DimmerAnimationMotif("static_reduced", "bar", "low"),
+    DimmerAnimationMotif("beat_pulse", "beat", "low"),
+    DimmerAnimationMotif("half_bar_gate", "half_bar", "low"),
+    DimmerAnimationMotif("bar_gate", "bar", "low"),
+    DimmerAnimationMotif("alternate_a_b", "beat", "medium", True),
+    DimmerAnimationMotif("alternate_left_right", "bar", "medium", True),
+    DimmerAnimationMotif("chase_forward", "beat", "medium", True),
+    DimmerAnimationMotif("chase_reverse", "beat", "medium", True),
+    DimmerAnimationMotif("out_to_in", "beat", "medium", True),
+    DimmerAnimationMotif("in_to_out", "beat", "medium", True),
+    DimmerAnimationMotif("wave_forward", "bar", "medium", True),
+    DimmerAnimationMotif("wave_reverse", "bar", "medium", True),
+    DimmerAnimationMotif("stair_up", "half_bar", "medium", True),
+    DimmerAnimationMotif("stair_down", "half_bar", "medium", True),
+    DimmerAnimationMotif("burst_all", "bar", "high"),
+    DimmerAnimationMotif("burst_alternate", "bar", "high", True),
+    DimmerAnimationMotif("syncopated_pulse", "half_bar", "medium"),
+)
+DIMMER_MOTIF_BY_NAME = {motif.name: motif for motif in DIMMER_ANIMATION_MOTIFS}
+COLOR_ANIMATION_MOTIFS = (
+    "all_same", "group_split", "alternate", "chase_color", "swap_on_bar",
+    "swap_on_2_bars", "event_accent", "return_palette_recall",
+)
+FIXTURE_PARTICIPATION_MOTIFS = (
+    "all_groups", "moving_lead", "par_lead", "wash_foundation", "moving_par",
+    "par_wash", "alternating_groups", "call_response",
+)
+PALETTE_RELATIONSHIPS_V2 = (
+    "mono", "adjacent_hue", "two_color_split", "complementary_bright",
+    "triad_bright", "warm_pair", "cool_pair", "warm_cool_contrast",
+)
+
+
 def _number(value):
     if isinstance(value, bool) or not isinstance(value, numbers.Real):
         return None
@@ -114,13 +159,32 @@ class CompositionSignature:
     pulse: str
     wash: str
     fixture_roles: str
+    dimmer_motif: str
+    color_animation: str
+    fixture_partition: str
+    complexity: str
 
     def as_dict(self):
         return asdict(self)
 
     def key(self):
         return (self.motion_family, self.motion_parameters, self.palette_family,
-                self.palette_relationship, self.pulse, self.wash, self.fixture_roles)
+                self.palette_relationship, self.pulse, self.wash, self.fixture_roles,
+                self.dimmer_motif, self.color_animation, self.fixture_partition,
+                self.complexity)
+
+    def components(self):
+        return {
+            "movement": self.motion_family,
+            "palette": self.palette_family,
+            "palette_relation": self.palette_relationship,
+            "pulse": self.pulse,
+            "wash": self.wash,
+            "dimmer": self.dimmer_motif,
+            "color_animation": self.color_animation,
+            "fixture_partition": self.fixture_partition,
+            "complexity": self.complexity,
+        }
 
 
 class CompositionHistory:
@@ -144,11 +208,15 @@ class CompositionHistory:
         if cached is not None:
             return cached["primitives"], cached["signature"], {
                 "selection": "retained", "history_size": len(self._recent),
+                "repeat_classification": "RETAINED_SEEK_REPLAY",
+                "avoided_components": [],
             }
         # Een terugkerende sectie mag een leesbare eerdere identiteit hernemen.
         if not self._recent:
             selected = min(candidates, key=lambda candidate: candidate["order"])
             selection = "new"
+            repeat_classification = "NEW_MATERIAL"
+            avoided_components = []
         else:
             recent_keys = {entry["signature"].key() for entry in self._recent}
             last_key = self._recent[-1]["signature"].key()
@@ -160,17 +228,21 @@ class CompositionHistory:
             if reusable is not None:
                 selected = reusable
                 selection = "recurrence_reuse"
+                repeat_classification = "ACCEPTABLE_RECURRENCE_REUSE"
+                avoided_components = []
             else:
                 fresh = [candidate for candidate in candidates if candidate["signature"].key() not in recent_keys]
                 pool = fresh or candidates
-                selected = min(pool, key=lambda candidate: (
-                    sum(candidate["signature"].motion_family == item["signature"].motion_family
-                        for item in self._recent),
-                    sum(candidate["signature"].palette_family == item["signature"].palette_family
-                        for item in self._recent),
-                    candidate["order"],
-                ))
+                selected = min(pool, key=self._recency_score)
                 selection = "anti_repeat_alternative" if fresh else "continuity_reuse"
+                repeated = self._same_components(selected["signature"], self._recent[-1]["signature"])
+                avoided_components = self._avoidable_components(pool, selected)
+                if len(repeated) >= 6:
+                    repeat_classification = "NEAR_REPEAT" if fresh else "CAPABILITY_LIMITED"
+                elif repeated:
+                    repeat_classification = "COMPONENT_VARIATION"
+                else:
+                    repeat_classification = "NEW_MATERIAL"
         entry = {"primitives": selected["primitives"], "signature": selected["signature"]}
         self._by_observation[state.observation_id] = entry
         self._recent.append(entry)
@@ -178,7 +250,38 @@ class CompositionHistory:
             self._recent.pop(0)
         return entry["primitives"], entry["signature"], {
             "selection": selection, "history_size": len(self._recent),
+            "repeat_classification": repeat_classification,
+            "avoided_components": avoided_components,
         }
+
+    def _recency_score(self, candidate):
+        """Prefer changes in the perceptually dominant dimensions, newest first."""
+        weights = {
+            "dimmer": 7.0, "palette": 6.0, "fixture_partition": 5.0,
+            "movement": 4.0, "color_animation": 4.0, "palette_relation": 3.0,
+            "pulse": 2.0, "wash": 1.5, "complexity": 1.0,
+        }
+        score = 0.0
+        components = candidate["signature"].components()
+        for age, entry in enumerate(reversed(self._recent), start=1):
+            recency = (self.capacity - min(self.capacity - 1, age - 1)) / self.capacity
+            previous = entry["signature"].components()
+            score += sum(weights[key] * recency for key, value in components.items()
+                         if previous.get(key) == value)
+        return score, candidate["order"]
+
+    @staticmethod
+    def _same_components(left, right):
+        left_values, right_values = left.components(), right.components()
+        return [key for key, value in left_values.items() if right_values.get(key) == value]
+
+    def _avoidable_components(self, pool, selected):
+        if not self._recent:
+            return []
+        last = self._recent[-1]["signature"]
+        selected_same = set(self._same_components(selected["signature"], last))
+        alternatives = [set(self._same_components(candidate["signature"], last)) for candidate in pool]
+        return sorted(key for key in selected_same if any(key not in same for same in alternatives))
 
 
 def project_continuous_musical_state(projection, position_seconds):
@@ -300,6 +403,15 @@ def _stable_unit(state, namespace, offset=0):
     return int.from_bytes(hashlib.sha256(payload).digest()[:4], "big") / 0xFFFFFFFF
 
 
+def _track_namespace(lifecycle_context):
+    """Keep opening material track-specific without importing runtime identity."""
+    if not isinstance(lifecycle_context, tuple):
+        return "preview"
+    # Generation/deck are deliberately excluded: same analysis at the same
+    # timestamp must stay identical through restart or deck handoff.
+    return "|".join(str(value) for value in lifecycle_context[:2]) or "preview"
+
+
 def _continuous_composition(state, composition_history=None, lifecycle_context=None):
     energy = state.relative_energy
     trajectory = state.energy_trajectory if state.energy_trajectory is not None else 0.0
@@ -332,59 +444,87 @@ def _continuous_composition(state, composition_history=None, lifecycle_context=N
     )
     static = FixtureGroupIntent(.28 + .44 * energy, .18 + .62 * energy, 0, 0, 0, "base", .08 + .24 * energy, .04 + .20 * energy)
 
+    track_namespace = _track_namespace(lifecycle_context)
     if energy < .34:
         motions = ("break_soft_blue_center", "break_slow_pulse_circle")
-        palettes = ("deep_blue_white", "cobalt_amber")
+        palettes = ("cobalt_amber", "purple_gold", "blue_amber")
         pulses = ("breathe", "soft_pulse")
         washes = ("center_glow_blue", "blue_white_split")
+        dimmers = ("static_reduced", "beat_pulse", "half_bar_gate", "alternate_a_b")
+        color_animations = ("all_same", "group_split", "swap_on_2_bars")
+        partitions = ("wash_foundation", "par_wash", "alternating_groups", "all_groups")
+        complexity = "low"
     elif energy < .68:
         motions = ("sweep_narrow", "sweep_mid", "sweep_arc")
-        palettes = ("cobalt_amber", "amber_teal", "rose_mint")
+        palettes = ("cobalt_amber", "amber_teal", "rose_mint", "ruby_lime", "purple_gold")
         pulses = ("soft_pulse", "breathe")
         washes = ("blue_white_split", "center_glow_blue")
+        dimmers = ("beat_pulse", "half_bar_gate", "bar_gate", "alternate_a_b",
+                   "chase_forward", "chase_reverse", "wave_forward", "stair_up")
+        color_animations = ("group_split", "alternate", "swap_on_bar", "chase_color")
+        partitions = ("all_groups", "moving_lead", "par_lead", "moving_par", "par_wash", "call_response")
+        complexity = "medium"
     else:
         motions = ("sweep_mid", "sweep_wide", "fast_audience_circle")
-        palettes = ("amber_teal", "teal_orange", "magenta_cyan")
+        palettes = ("amber_teal", "teal_orange", "magenta_cyan", "violet_lime", "pink_blue", "ruby_lime")
         pulses = ("soft_pulse", "strong_pulse")
         washes = ("blue_white_split", "center_out_build")
+        dimmers = ("bar_gate", "alternate_left_right", "chase_forward", "chase_reverse",
+                   "out_to_in", "in_to_out", "wave_forward", "wave_reverse", "stair_up",
+                   "stair_down", "burst_all", "burst_alternate", "syncopated_pulse")
+        color_animations = ("group_split", "alternate", "chase_color", "swap_on_bar", "event_accent")
+        partitions = ("all_groups", "moving_lead", "par_lead", "moving_par", "alternating_groups", "call_response")
+        complexity = "high"
     candidates = []
-    relationships = ("analogous", "complementary", "split_complementary", "monochromatic")
-    for order in range(4):
-        motion = motions[(_stable_index(state, "motion", len(motions)) + order) % len(motions)]
-        palette = palettes[(_stable_index(state, "palette", len(palettes)) + order) % len(palettes)]
-        pulse = pulses[(_stable_index(state, "pulse", len(pulses)) + order) % len(pulses)]
-        wash_cue = washes[(_stable_index(state, "wash", len(washes)) + order) % len(washes)]
+    for order in range(16):
+        motion = motions[(_stable_index(state, f"motion|{track_namespace}", len(motions)) + order) % len(motions)]
+        palette = palettes[(_stable_index(state, f"palette|{track_namespace}", len(palettes)) + order) % len(palettes)]
+        pulse = pulses[(_stable_index(state, f"pulse|{track_namespace}", len(pulses)) + order) % len(pulses)]
+        wash_cue = washes[(_stable_index(state, f"wash|{track_namespace}", len(washes)) + order) % len(washes)]
+        dimmer_motif = dimmers[(_stable_index(state, f"dimmer|{track_namespace}", len(dimmers)) + order) % len(dimmers)]
+        color_animation = color_animations[(_stable_index(state, f"color-animation|{track_namespace}", len(color_animations)) + order) % len(color_animations)]
+        partition = partitions[(_stable_index(state, f"partition|{track_namespace}", len(partitions)) + order) % len(partitions)]
+        relation = PALETTE_RELATIONSHIPS_V2[(_stable_index(state, f"palette-relation|{track_namespace}", len(PALETTE_RELATIONSHIPS_V2)) + order) % len(PALETTE_RELATIONSHIPS_V2)]
         motion_parameters = {
-            "range_scale": round(.72 + .28 * _stable_unit(state, "motion-range", order), 3),
-            "speed_scale": round(.82 + .34 * _stable_unit(state, "motion-speed", order), 3),
-            "phase_offset": round(-.34 + .68 * _stable_unit(state, "motion-phase", order), 3),
-            "phase_spread": round(.12 + .42 * _stable_unit(state, "motion-spread", order), 3),
-            "horizontal_center_offset": round(-12 + 24 * _stable_unit(state, "motion-horizontal", order), 2),
-            "vertical_center_offset": round(-9 + 18 * _stable_unit(state, "motion-vertical", order), 2),
+            "range_scale": round(.72 + .28 * _stable_unit(state, f"motion-range|{track_namespace}", order), 3),
+            "speed_scale": round(.82 + .34 * _stable_unit(state, f"motion-speed|{track_namespace}", order), 3),
+            "phase_offset": round(-.34 + .68 * _stable_unit(state, f"motion-phase|{track_namespace}", order), 3),
+            "phase_spread": round(.12 + .42 * _stable_unit(state, f"motion-spread|{track_namespace}", order), 3),
+            "horizontal_center_offset": round(-12 + 24 * _stable_unit(state, f"motion-horizontal|{track_namespace}", order), 2),
+            "vertical_center_offset": round(-9 + 18 * _stable_unit(state, f"motion-vertical|{track_namespace}", order), 2),
         }
         palette_parameters = {
-            "relationship": relationships[(_stable_index(state, "palette-relation", len(relationships)) + order) % len(relationships)],
-            "balance": round(.32 + .36 * _stable_unit(state, "palette-balance", order), 3),
-            "phase_offset": int(_stable_unit(state, "palette-phase", order) * 3),
+            "relationship": relation,
+            "balance": round(.44 + .22 * _stable_unit(state, f"palette-balance|{track_namespace}", order), 3),
+            "phase_offset": int(_stable_unit(state, f"palette-phase|{track_namespace}", order) * 4),
         }
         pulse_parameters = {
-            "amount": round(.42 + .46 * _stable_unit(state, "pulse-amount", order), 3),
-            "participation": "alternating" if _stable_unit(state, "pulse-participation", order) > .58 else "all",
+            "amount": round(.42 + .46 * _stable_unit(state, f"pulse-amount|{track_namespace}", order), 3),
+            "participation": "alternating" if _stable_unit(state, f"pulse-participation|{track_namespace}", order) > .58 else "all",
         }
-        wash_parameters = {"phase_offset": int(_stable_unit(state, "wash-phase", order) * 3)}
+        wash_parameters = {"phase_offset": int(_stable_unit(state, f"wash-phase|{track_namespace}", order) * 3)}
+        effect = {
+            "dimmer_motif": dimmer_motif,
+            "color_animation": color_animation,
+            "fixture_partition": partition,
+            "complexity": complexity,
+        }
         primitives = {
             "moving": {"movement_pattern": motion, "pulse": pulse, "palette": palette,
                        "motion_parameters": motion_parameters, "palette_parameters": palette_parameters,
-                       "pulse_parameters": pulse_parameters},
+                       "pulse_parameters": pulse_parameters, **effect},
             "par": {"pulse": pulse, "palette": palette, "palette_parameters": palette_parameters,
-                    "pulse_parameters": pulse_parameters},
+                    "pulse_parameters": pulse_parameters, **effect},
             "wash": {"palette": palette, "wash_cue": wash_cue, "palette_parameters": palette_parameters,
-                     "wash_parameters": wash_parameters},
+                     "wash_parameters": wash_parameters, **effect},
+            "static": {"palette": palette, "palette_parameters": palette_parameters,
+                       "pulse_parameters": pulse_parameters, **effect},
         }
         signature = CompositionSignature(
             motion, tuple(sorted(motion_parameters.items())),
             palette, palette_parameters["relationship"], pulse, wash_cue,
-            pulse_parameters["participation"],
+            pulse_parameters["participation"], dimmer_motif, color_animation,
+            partition, complexity,
         )
         candidates.append({"order": order, "primitives": primitives, "signature": signature})
     if isinstance(composition_history, CompositionHistory):
@@ -393,7 +533,29 @@ def _continuous_composition(state, composition_history=None, lifecycle_context=N
         selected = candidates[0]
         primitives, signature = selected["primitives"], selected["signature"]
         variation = {"selection": "new", "history_size": 0}
-    return {"moving": moving, "par": par, "wash": wash_intent, "static": static}, primitives, signature, variation
+    groups = {"moving": moving, "par": par, "wash": wash_intent, "static": static}
+    partition = signature.fixture_partition
+    groups = _apply_fixture_partition(groups, partition)
+    return groups, primitives, signature, variation
+
+
+def _apply_fixture_partition(groups, partition):
+    """Bounded role participation; topology within a role stays renderer-owned."""
+    adjustments = {
+        "all_groups": {},
+        "moving_lead": {"moving": .12, "par": -.08, "wash": -.12, "static": -.08},
+        "par_lead": {"moving": -.06, "par": .12, "wash": -.10, "static": -.08},
+        "wash_foundation": {"moving": -.08, "par": -.08, "wash": .10, "static": -.04},
+        "moving_par": {"moving": .08, "par": .08, "wash": -.08, "static": -.10},
+        "par_wash": {"moving": -.08, "par": .08, "wash": .08, "static": -.08},
+        "alternating_groups": {"moving": .04, "par": -.03, "wash": .04, "static": -.08},
+        "call_response": {"moving": .06, "par": .06, "wash": -.06, "static": -.10},
+    }
+    result = dict(groups)
+    for role, delta in adjustments.get(partition, {}).items():
+        result[role] = _adjust(result[role], activity=delta, intensity=delta * .72,
+                               pulse=delta * .45)
+    return result
 
 
 def _adjust(intent, *, activity=0, intensity=0, movement=0, speed=0, color=0, pulse=0, accent=0, palette=None):
@@ -432,6 +594,19 @@ def _live_intensity_modulation(groups, live_intensity):
     return adjusted
 
 
+def _event_primitive_set(base_primitives, overrides):
+    """Retain V2 effect choices while an existing RME modifier swaps its look."""
+    result = {}
+    for role, values in overrides.items():
+        inherited = dict((base_primitives.get(role) or {}))
+        inherited.update(values)
+        result[role] = inherited
+    static = dict(base_primitives.get("static") or {})
+    if static:
+        result["static"] = static
+    return result
+
+
 def _event_modulation(groups, base_primitives, event_type, progress):
     groups = dict(groups)
     primitives = {name: dict(value) for name, value in base_primitives.items()}
@@ -440,20 +615,20 @@ def _event_modulation(groups, base_primitives, event_type, progress):
         groups["moving"] = _adjust(groups["moving"], activity=.12*ramp, intensity=.22*ramp, movement=.24*ramp, speed=.34*ramp, color=.25*ramp, pulse=.24*ramp, accent=.30*ramp, palette="tension")
         groups["par"] = _adjust(groups["par"], activity=.14*ramp, intensity=.18*ramp, color=.22*ramp, pulse=.24*ramp, accent=.24*ramp, palette="tension")
         groups["wash"] = _adjust(groups["wash"], activity=.12*ramp, intensity=.14*ramp, color=.16*ramp, pulse=.12*ramp, accent=.18*ramp, palette="tension")
-        primitives = {
+        primitives = _event_primitive_set(base_primitives, {
             "moving": {"movement_pattern": "build_fastening_circle", "pulse": "lift", "palette": "amber_teal"},
             "par": {"pulse": "lift", "palette": "amber_teal"},
             "wash": {"palette": "amber_teal", "wash_cue": "center_out_build"},
-        }
+        })
     elif event_type == "BREAK":
         groups["moving"] = _adjust(groups["moving"], activity=-.24, intensity=-.28, movement=-.34, speed=-.30, color=-.22, pulse=-.22, accent=-.20, palette="space")
         groups["par"] = _adjust(groups["par"], activity=-.20, intensity=-.24, color=-.20, pulse=-.22, accent=-.18, palette="space")
         groups["wash"] = _adjust(groups["wash"], activity=-.10, intensity=-.18, color=-.14, pulse=-.14, accent=-.12, palette="space")
-        primitives = {
+        primitives = _event_primitive_set(base_primitives, {
             "moving": {"movement_pattern": "break_soft_blue_center", "pulse": "breathe", "palette": "deep_blue_white"},
             "par": {"pulse": "breathe", "palette": "deep_blue_white"},
             "wash": {"palette": "deep_blue_white", "wash_cue": "center_glow_blue"},
-        }
+        })
     return groups, primitives
 
 
@@ -467,47 +642,47 @@ def _event_envelope_modulation(groups, base_primitives, envelope):
         groups["moving"] = _adjust(groups["moving"], activity=.20*strength, intensity=.18*strength, movement=.18*strength, speed=.16*strength, color=.26*strength, pulse=.28*strength, accent=.36*strength, palette="release")
         groups["par"] = _adjust(groups["par"], activity=.22*strength, intensity=.20*strength, color=.28*strength, pulse=.30*strength, accent=.38*strength, palette="release")
         groups["wash"] = _adjust(groups["wash"], activity=.14*strength, intensity=.13*strength, color=.20*strength, pulse=.14*strength, accent=.22*strength, palette="release")
-        primitives = {
+        primitives = _event_primitive_set(base_primitives, {
             "moving": {"movement_pattern": "sweep_mid", "pulse": "soft_pulse", "palette": "cobalt_amber"},
             "par": {"pulse": "soft_pulse", "palette": "cobalt_amber"},
             "wash": {"palette": "cobalt_amber", "wash_cue": "blue_white_split"},
-        }
+        })
     elif envelope.event_type == "DROP":
         groups["moving"] = _adjust(groups["moving"], activity=.28*strength, intensity=.28*strength, movement=.26*strength, speed=.34*strength, color=.28*strength, pulse=.36*strength, accent=.52*strength, palette="impact")
         groups["par"] = _adjust(groups["par"], activity=.30*strength, intensity=.30*strength, color=.28*strength, pulse=.40*strength, accent=.56*strength, palette="impact")
         groups["wash"] = _adjust(groups["wash"], activity=.22*strength, intensity=.22*strength, color=.20*strength, pulse=.24*strength, accent=.40*strength, palette="impact")
-        primitives = {
+        primitives = _event_primitive_set(base_primitives, {
             "moving": {"movement_pattern": "drop_fast_circle_white", "pulse": "hit", "palette": "ice_fire"},
             "par": {"pulse": "hit", "palette": "ice_fire"},
             "wash": {"palette": "ice_fire", "wash_cue": "white_pixel_hits"},
-        }
+        })
     elif envelope.event_type == "RELEASE":
         groups["moving"] = _adjust(groups["moving"], activity=.10*strength, intensity=.10*strength, movement=.12*strength, speed=.12*strength, color=.10*strength, pulse=.12*strength, accent=.16*strength, palette="release")
         groups["par"] = _adjust(groups["par"], activity=.10*strength, intensity=.10*strength, color=.08*strength, pulse=.10*strength, accent=.14*strength, palette="release")
         groups["wash"] = _adjust(groups["wash"], activity=.08*strength, intensity=.08*strength, color=.06*strength, pulse=.08*strength, accent=.10*strength, palette="release")
-        primitives = {
+        primitives = _event_primitive_set(base_primitives, {
             "moving": {"movement_pattern": "sweep_mid", "pulse": "soft_pulse", "palette": "cobalt_amber"},
             "par": {"pulse": "soft_pulse", "palette": "cobalt_amber"},
             "wash": {"palette": "cobalt_amber", "wash_cue": "blue_white_split"},
-        }
+        })
     elif envelope.event_type == "TRANSITION":
         groups["moving"] = _adjust(groups["moving"], activity=.12*strength, intensity=.08*strength, movement=.16*strength, speed=.12*strength, color=.18*strength, pulse=.10*strength, accent=.14*strength, palette="release")
         groups["par"] = _adjust(groups["par"], activity=.12*strength, intensity=.08*strength, color=.18*strength, pulse=.10*strength, accent=.14*strength, palette="release")
         groups["wash"] = _adjust(groups["wash"], activity=.10*strength, intensity=.08*strength, color=.16*strength, pulse=.08*strength, accent=.12*strength, palette="release")
-        primitives = {
+        primitives = _event_primitive_set(base_primitives, {
             "moving": {"movement_pattern": "sweep_arc", "pulse": "soft_pulse", "palette": "teal_orange"},
             "par": {"pulse": "soft_pulse", "palette": "teal_orange"},
             "wash": {"palette": "teal_orange", "wash_cue": "blue_white_split"},
-        }
+        })
     else:  # Future-ready FILL: accent only; no direct strobe semantics or DMX path.
         groups["moving"] = _adjust(groups["moving"], activity=.16*strength, intensity=.12*strength, movement=.12*strength, speed=.18*strength, color=.20*strength, pulse=.28*strength, accent=.30*strength, palette="tension")
         groups["par"] = _adjust(groups["par"], activity=.18*strength, intensity=.14*strength, color=.20*strength, pulse=.30*strength, accent=.32*strength, palette="tension")
         groups["wash"] = _adjust(groups["wash"], activity=.10*strength, intensity=.08*strength, color=.12*strength, pulse=.12*strength, accent=.14*strength, palette="tension")
-        primitives = {
+        primitives = _event_primitive_set(base_primitives, {
             "moving": {"movement_pattern": "sweep_mid", "pulse": "strong_pulse", "palette": "amber_teal"},
             "par": {"pulse": "strong_pulse", "palette": "amber_teal"},
             "wash": {"palette": "amber_teal", "wash_cue": "blue_white_split"},
-        }
+        })
     return groups, primitives
 
 
