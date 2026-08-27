@@ -4,7 +4,7 @@
 > Dit bestand moet tijdens programmeerwerk actief worden geraadpleegd en bijgewerkt.
 > Zie ook `CURRENT_ROADMAP.md` voor de compacte actuele status, prioriteiten en blockers.
 
-## Current reconciliation map — 2026-08-26
+## Current reconciliation map — 2026-08-27
 
 `CURRENT_ROADMAP.md` is de compacte actuele status en `MASTER_BACKLOG.md` is
 de enige levende werkvoorraad. De chronologische delen onder deze kaart blijven
@@ -30,6 +30,7 @@ uitsluitend `LEGACY / HISTORICAL / RESEARCH CONTEXT`.
 | Continuous state, Event Envelope, variation en production selector | `COMPLETED_TECHNICAL / PRODUCTION_GATE_OFF`; runtime blijft `BASELINE_ONLY`, production promotion is alleen een toekomstige expliciete gated beslissing. |
 | VirtualDJ prewarm, master authority, observability en activate-path | `COMPLETED`: `VDJ_DECK_PREWARM_MASTER_SYNC = PASS` en `MASTER_SWITCH_ACTIVATE_LATENCY_OPTIMIZATION_PASS`. |
 | Analysis-worker operations en job lifecycle | `COMPLETED`: `ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`; bounded sequential queue, explicit states, cancellation/timeout, crash isolation, stale recovery en diagnostics. |
+| VirtualDJ-native analysisworkflow en headless service | `TECHNICAL_PASS / HOLD_USER_REVIEW`: `VIRTUALDJ_NATIVE_SONGANALYZER_WORKFLOW_V1_TECHNICAL_PASS`, `SONGANALYZER_HEADLESS_SERVICE_FOUNDATION_PASS` en `VIRTUALDJ_SONGANALYZER_STATUS_COLUMN_PASS`. VirtualDJ is de dagelijkse UI; MusicAnalyzer daily UI is deprecated. Statussync is officieel ondersteund maar bewust lazy voor browsed/loaded tracks. |
 | BeatBeam Live Show UX V2 | `TECHNICAL_PASS / HOLD_USER_REVIEW`: Live Show projecteert bestaande typed runtime-state; Preview, Manual en Advanced scheiden operatie, preview en raw diagnostics. Geen wijziging van `BASELINE_ONLY` of fysieke authority. |
 | FILL micro-evidence | `TECHNICAL_PASS / HOLD_HUMAN_LABELS`; het 36-item reviewpakket bepaalt of calibratie of shadow-eventpromotie ooit gerechtvaardigd is. Geen FILL → strobe-regel. |
 | Beat pulse, live intensity, Event Envelope en variation | `TECHNICAL_PASS / HUMAN_HOLD`; uitsluitend de actuele reviewgates in `MASTER_BACKLOG.md` zijn nog open. |
@@ -55,6 +56,43 @@ failure-storm-, shutdown-, restart- en echte runtimeacceptatie eindigden idle
 met nul orphan workers. Analysis-, phrase-, RME- en continuous-stateversies zijn
 ongewijzigd; de current library bleef 215/215 en BeatBeam bleef
 `BASELINE_ONLY`.
+
+## VirtualDJ-native SongAnalyzer workflow en headless service
+
+`TECHNICAL PASS / HUMAN USABILITY HOLD`. De officiële VirtualDJ SDK en
+VDJScript-route ondersteunt User1/User2-renaming en hashtagwrites voor de exact
+browsed of loaded track, maar geen arbitrary librarytrack-write of custom
+column provider. V1 is daarom `SUPPORTED_ONLY_FOR_BROWSED_OR_LOADED_TRACK` en
+`LAZY_STATUS_SYNC_BROWSED_LOADED_ONLY`; er is geen database.xml-mutatie,
+browserfocus-/zoekautomatisering, skin hack of audio-tagwrite.
+
+Een lokale expliciete ownershiprecord reserveert uitsluitend een leeg default
+User1/User2-field en bewaart de vorige naam. De `SongAnalyzer`-kolom is een
+presentation mirror met `#SA_READY`, `#SA_ANALYZING`, `#SA_QUEUED`,
+`#SA_STALE`, `#SA_FAILED` en `#SA_UNAVAILABLE`; SongAnalyzer blijft de enige
+status/currentnessauthority. Writes zijn per exact filepath gededupliceerd,
+bounded en path-revalidated. Rollback stopt syncing direct, herstelt de
+fieldnaam en verwijdert uitsluitend eigen tokens lazy wanneer een track
+browsed/loaded is.
+
+De native Phrase Lane exposeert Analyze, Reanalyze en Retry voor de exact
+browsed track. Muterende V1-requests bevatten canonical path, size en mtime;
+de bridge valideert identiteit opnieuw en hergebruikt de bestaande bounded
+queue/worker/cache/handoff. De plugin start en herstelt de self-contained
+bridge met VirtualDJ als owner; MusicAnalyzer.app hoeft niet te draaien.
+Live acceptance bewees zichtbare `#SA_READY`, een echte Reanalyze
+`QUEUED/RUNNING/COMPLETED → READY`, SmartCuePlan beschikbaar met auto-apply
+off, service kill/recovery, idle/orphan-vrije eindstate en 215/215 current.
+Master, transport, BeatBeam production mode en analyseversies bleven
+ongewijzigd.
+
+Productrichting: VirtualDJ-native workflow `ACTIVE`; SongAnalyzer headless
+service `ACTIVE / FOUNDATION PASS`; MusicAnalyzer dagelijkse UI
+`DEPRECATED / REMOVE ONLY AFTER PARITY`. De desktopapp blijft voorlopig voor
+installation/recovery/advanced diagnostics; Rekordbox-UI is legacy. Volgende
+productstappen zijn human usabilityreview en later expliciete installer/update/
+service-productization. Library-wide status/batch blijft HOLD totdat VirtualDJ
+een officiële veilige arbitrary-trackroute biedt.
 
 ## Historical planning snapshot — superseded as active backlog
 

@@ -1,6 +1,6 @@
 # BeatBeam + SongAnalyzer — Master Backlog
 
-> Levende werkvoorraad per 2026-08-26. Voor historische besluiten en implementatiedetails: `MASTER_ROADMAP.md`. Voor de compacte status: `CURRENT_ROADMAP.md`.
+> Levende werkvoorraad per 2026-08-27. Voor historische besluiten en implementatiedetails: `MASTER_ROADMAP.md`. Voor de compacte status: `CURRENT_ROADMAP.md`.
 
 ## NOW / HUMAN GATE
 
@@ -14,6 +14,7 @@
 | Live Show UX V2 review | `HOLD_USER_REVIEW` | Beoordeel scanbaarheid, taal, responsive gedrag en Live/Preview/Manual/Advanced-scheiding in echte bediening. | Technische pass is gereed; uitsluitend menselijke UX-acceptatie ontbreekt. |
 | Smart Cue V1 placementreview | `HOLD_HUMAN_REVIEW` | Beoordeel 24 diverse tracks op MIX IN, MAIN, BREAK, MIX OUT en exacte 16/12/8/4-bar aftellingen. | Technische planner/writer-foundation is pass; muzikale plaatsing is niet menselijk geaccepteerd en auto-apply blijft hard uit. |
 | Show Simulator V1 review | `HOLD_USER_REVIEW` | Beoordeel timeline, cue/event/section-jumps en de gesimuleerde 2D/3D Preview Map. | Technische pass is gereed; Simulator heeft hard nul fysieke authority. |
+| VirtualDJ-native SongAnalyzer V1 review | `HOLD_USER_REVIEW` | Beoordeel SongAnalyzer-kolom en Analyze/Reanalyze/Retry als dagelijkse workflow. | Technische live/headless pass is gereed; bredere usabilityreview ontbreekt. |
 
 ## NEXT
 
@@ -37,8 +38,8 @@
 
 | Item | Status | Doel | Blokker |
 | --- | --- | --- | --- |
-| VirtualDJ workflow / reanalysis UX | `DEFERRED` | Voorbereidings-, batch-, retry- en statuservaring verfijnen. | Productprioriteit en scoped workflow. |
 | Productization | `DEFERRED` | Installer/update en release-/distributiediscipline verder productiseren. | Expliciete release-milestone; worker lifecycle, diagnostics en resource bounds zijn technisch pass. |
+| VirtualDJ library-wide status/batch | `UNSUPPORTED_OR_DEFERRED` | Alleen via een later officieel ondersteunde arbitrary-track/batchroute. | Huidige officiële API ondersteunt uitsluitend browsed/loaded metadatawrite; geen browserautomatisering of databasehack. |
 
 ## DONE RECENTLY
 
@@ -48,6 +49,7 @@
 - `LIVE_INTENSITY_STRUCTURED_TECHNICAL_PASS` en beat/dimmer phase-sync pass.
 - `VDJ_DECK_PREWARM_MASTER_SYNC = PASS` en `MASTER_SWITCH_ACTIVATE_LATENCY_OPTIMIZATION_PASS`.
 - `ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`: expliciete bounded joblifecycle, cancellation/timeout, worker crash isolation en cleanup, stale-pending recovery, atomic cache/handoff publication en operationele diagnostics; 215/215 current bleef behouden.
+- `VIRTUALDJ_NATIVE_SONGANALYZER_WORKFLOW_V1_TECHNICAL_PASS`, `SONGANALYZER_HEADLESS_SERVICE_FOUNDATION_PASS` en `VIRTUALDJ_SONGANALYZER_STATUS_COLUMN_PASS`: ownership-safe lazy browsed/loaded statusmirror, exacte Analyze/Reanalyze/Retry, plugin-owned service recovery en live worker/cache/handoff zonder MusicAnalyzer GUI. MusicAnalyzer daily UI is deprecated product direction; human usability blijft HOLD.
 - `BEATBEAM_LIVE_SHOW_UX_V2_TECHNICAL_PASS`: Live Show als standaard, aparte Preview/Manual/Advanced, bestaande Preview Map/raw diagnostics behouden en geen wijziging van production authority.
 - `SMART_CUE_PLANNER_V1_TECHNICAL_PASS` en `SMART_CUE_VDJ_WRITER_GATE_OFF_PASS`: deterministic 215-track planning, corpus/reviewpackage, read-only native cue-preflight en exact-identity writer/ownership/verify/rollback foundation; `SMART_CUE_AUTO_APPLY_OFF` live bewezen.
 - `BEATBEAM_SHOW_SIMULATOR_V1_TECHNICAL_PASS`: musical timeline, cue/event/section navigation, isolated previewframes en native 2D/3D Preview Map datasource; 215-track deterministic corpusprojectie en packaged runtime-smoke groen.
