@@ -38,7 +38,7 @@
 
 | Item | Status | Doel | Blokker |
 | --- | --- | --- | --- |
-| Productization | `DEFERRED` | Installer/update en release-/distributiediscipline verder productiseren. | Expliciete release-milestone; worker lifecycle, diagnostics en resource bounds zijn technisch pass. |
+| Release/distributie | `DEFERRED` | Ondertekende distributie, updatekanaal en eventuele release-automation. | Geen remote/releasekanaal bestaat. |
 | VirtualDJ library-wide status/batch | `UNSUPPORTED_OR_DEFERRED` | Alleen via een later officieel ondersteunde arbitrary-track/batchroute. | Huidige officiële API ondersteunt uitsluitend browsed/loaded metadatawrite; geen browserautomatisering of databasehack. |
 
 ## DONE RECENTLY
@@ -50,6 +50,7 @@
 - `VDJ_DECK_PREWARM_MASTER_SYNC = PASS` en `MASTER_SWITCH_ACTIVATE_LATENCY_OPTIMIZATION_PASS`.
 - `ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`: expliciete bounded joblifecycle, cancellation/timeout, worker crash isolation en cleanup, stale-pending recovery, atomic cache/handoff publication en operationele diagnostics; 215/215 current bleef behouden.
 - `VIRTUALDJ_NATIVE_SONGANALYZER_WORKFLOW_V1_TECHNICAL_PASS`, `SONGANALYZER_HEADLESS_SERVICE_FOUNDATION_PASS` en `VIRTUALDJ_SONGANALYZER_STATUS_COLUMN_PASS`: ownership-safe lazy browsed/loaded statusmirror, exacte Analyze/Reanalyze/Retry, plugin-owned service recovery en live worker/cache/handoff zonder MusicAnalyzer GUI. MusicAnalyzer daily UI is deprecated product direction; human usability blijft HOLD.
+- `SONGANALYZER_HEADLESS_PRODUCTIZATION_V1_TECHNICAL_PASS`: reproduceerbare package/install/verify/repair/rollback/status-flow met installatie-manifest, staged ARM64/signing/hashvalidatie, één owned previous installatie, protocolidentity fail-closed en live headless VDJ-smoke. Release/distributie blijft deferred.
 - `BEATBEAM_LIVE_SHOW_UX_V2_TECHNICAL_PASS`: Live Show als standaard, aparte Preview/Manual/Advanced, bestaande Preview Map/raw diagnostics behouden en geen wijziging van production authority.
 - `SMART_CUE_PLANNER_V1_TECHNICAL_PASS` en `SMART_CUE_VDJ_WRITER_GATE_OFF_PASS`: deterministic 215-track planning, corpus/reviewpackage, read-only native cue-preflight en exact-identity writer/ownership/verify/rollback foundation; `SMART_CUE_AUTO_APPLY_OFF` live bewezen.
 - `BEATBEAM_SHOW_SIMULATOR_V1_TECHNICAL_PASS`: musical timeline, cue/event/section navigation, isolated previewframes en native 2D/3D Preview Map datasource; 215-track deterministic corpusprojectie en packaged runtime-smoke groen.
