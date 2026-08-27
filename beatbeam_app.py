@@ -124,7 +124,10 @@ SERVER_HOST = "127.0.0.1"
 SERVER_PORT = DEFAULT_HTTP_PORT
 REMOTE_ACCESS_CONFIG = None
 REMOTE_ADDRESS_CACHE = {"updated_at": 0.0, "state": None}
-SIMULATOR_SMART_CUE_DATA_PATH = ROOT / "artifacts" / "smart-cue-review" / "SMART_CUE_REVIEW_DATA.json"
+SIMULATOR_SMART_CUE_DATA_PATHS = (
+    ROOT / "smart-cue-review" / "SMART_CUE_REVIEW_DATA.json",
+    ROOT / "artifacts" / "smart-cue-review" / "SMART_CUE_REVIEW_DATA.json",
+)
 _SIMULATOR_SMART_CUE_CACHE = None
 
 
@@ -133,7 +136,8 @@ def simulator_smart_cues(track_path):
     global _SIMULATOR_SMART_CUE_CACHE
     if _SIMULATOR_SMART_CUE_CACHE is None:
         try:
-            payload = json.loads(SIMULATOR_SMART_CUE_DATA_PATH.read_text(encoding="utf-8"))
+            data_path = next(path for path in SIMULATOR_SMART_CUE_DATA_PATHS if path.is_file())
+            payload = json.loads(data_path.read_text(encoding="utf-8"))
             _SIMULATOR_SMART_CUE_CACHE = {
                 item.get("path"): [
                     {"role": role.get("role"), "position_milliseconds": role.get("positionMs"),

@@ -181,6 +181,12 @@ for backend_source in "${BACKEND_PYTHON_SOURCES[@]}"; do
 done
 cp fixtures.json "${BACKEND_RESOURCES}/"
 cp beatbeam_config.json "${BACKEND_RESOURCES}/"
+# The simulator consumes only this generated, read-only cue plan.  Human review
+# labels deliberately remain in the local review artifacts and are never bundled.
+if [[ -f artifacts/smart-cue-review/SMART_CUE_REVIEW_DATA.json ]]; then
+  mkdir -p "${BACKEND_RESOURCES}/smart-cue-review"
+  cp artifacts/smart-cue-review/SMART_CUE_REVIEW_DATA.json "${BACKEND_RESOURCES}/smart-cue-review/"
+fi
 cp "${ICON_MASTER}" "${RESOURCES}/BrandMark.png"
 cp -R assets "${RESOURCES}/"
 cp -R static "${BACKEND_RESOURCES}/"

@@ -2679,6 +2679,19 @@ final class AppModel: ObservableObject {
     @Published var simulatorTracks: [SimulatorTrack] = []
     @Published var simulatorState: SimulatorState?
     @Published var simulatorSlotPreviews: [String: SlotPreview] = [:]
+
+    /// The stage maps are read-only consumers.  When the simulator is active,
+    /// they deliberately render its isolated preview frame instead of live DMX.
+    var presentedSlotPreviews: [String: SlotPreview] {
+        guard simulatorState?.mode == "SIMULATION", !simulatorSlotPreviews.isEmpty else {
+            return slotPreviews
+        }
+        return simulatorSlotPreviews
+    }
+
+    var presentedStageMotionStates: [String: StageMotionState] {
+        simulatorState?.mode == "SIMULATION" ? [:] : stageMotionStates
+    }
     @Published var autoShowCueText = "Auto Show uit"
     @Published var autoShowDetailText = "Zet Auto Show aan om phrase- en beat-gestuurde output te laten spelen."
     @Published var autoShowAudiencePanFocusEnabled = true
@@ -8289,7 +8302,7 @@ struct FixtureMapAssignmentPanel: View {
     }
 
     private func previewColor(for slotID: String) -> Color {
-        guard let preview = model.slotPreviews[slotID], preview.enabled else {
+        guard let preview = model.presentedSlotPreviews[slotID], preview.enabled else {
             return Color.white.opacity(0.12)
         }
         return slotPreviewColor(preview)
@@ -8738,8 +8751,8 @@ struct StageMapCanvas: View {
                         let worldOrigin = model.worldPosition(for: editor.id)
                         let normalizedOrigin = model.projectionPoint(for: editor.id, projection: projection)
                         let origin = absolutePoint(normalizedOrigin, in: geometry.size)
-                        let preview = model.slotPreviews[editor.id]
-                        let stageMotion = model.stageMotionStates[editor.id]
+                        let preview = model.presentedSlotPreviews[editor.id]
+                        let stageMotion = model.presentedStageMotionStates[editor.id]
                         let beamKind = beamKind(for: editor)
                         let previewTime = model.previewAnimationTime(for: timeline.date)
 
@@ -8801,7 +8814,7 @@ struct StageMapCanvas: View {
     }
 
     private var hasAnimatedStrobe: Bool {
-        model.slotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
+        model.presentedSlotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
     }
 
     private func absolutePoint(_ normalized: CGPoint, in size: CGSize) -> CGPoint {
@@ -8836,8 +8849,8 @@ struct StageFrontCanvas: View {
                         let worldOrigin = model.worldPosition(for: editor.id)
                         let normalizedOrigin = model.projectionPoint(for: editor.id, projection: projection)
                         let origin = absolutePoint(normalizedOrigin, in: geometry.size)
-                        let preview = model.slotPreviews[editor.id]
-                        let stageMotion = model.stageMotionStates[editor.id]
+                        let preview = model.presentedSlotPreviews[editor.id]
+                        let stageMotion = model.presentedStageMotionStates[editor.id]
                         let beamKind = beamKind(for: editor)
                         let previewTime = model.previewAnimationTime(for: timeline.date)
 
@@ -8899,7 +8912,7 @@ struct StageFrontCanvas: View {
     }
 
     private var hasAnimatedStrobe: Bool {
-        model.slotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
+        model.presentedSlotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
     }
 
     private func absolutePoint(_ normalized: CGPoint, in size: CGSize) -> CGPoint {
@@ -8932,8 +8945,8 @@ struct StageSideCanvas: View {
                         let worldOrigin = model.worldPosition(for: editor.id)
                         let normalizedOrigin = model.projectionPoint(for: editor.id, projection: .side)
                         let origin = absolutePoint(normalizedOrigin, in: geometry.size)
-                        let preview = model.slotPreviews[editor.id]
-                        let stageMotion = model.stageMotionStates[editor.id]
+                        let preview = model.presentedSlotPreviews[editor.id]
+                        let stageMotion = model.presentedStageMotionStates[editor.id]
                         let beamKind = beamKind(for: editor)
                         let previewTime = model.previewAnimationTime(for: timeline.date)
 
@@ -8995,7 +9008,7 @@ struct StageSideCanvas: View {
     }
 
     private var hasAnimatedStrobe: Bool {
-        model.slotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
+        model.presentedSlotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
     }
 
     private func absolutePoint(_ normalized: CGPoint, in size: CGSize) -> CGPoint {
@@ -11139,8 +11152,8 @@ final class Stage3DSceneController: ObservableObject {
 
         for editor in model.slotEditors.sorted(by: { $0.id < $1.id }) {
             let world = model.worldPosition(for: editor.id)
-            let preview = model.slotPreviews[editor.id]
-            let stageMotion = model.stageMotionStates[editor.id]
+            let preview = model.presentedSlotPreviews[editor.id]
+            let stageMotion = model.presentedStageMotionStates[editor.id]
             let wallWashEmitters = stageBeamKindFor3D(editor) == .wallWash
                 ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: animationTime)
                 : []
@@ -13424,8 +13437,8 @@ private final class StageMetalPreviewRenderer: NSObject, MTKViewDelegate {
 
         for editor in model.slotEditors.sorted(by: { $0.id < $1.id }) {
             let world = model.worldPosition(for: editor.id)
-            let preview = model.slotPreviews[editor.id]
-            let stageMotion = model.stageMotionStates[editor.id]
+            let preview = model.presentedSlotPreviews[editor.id]
+            let stageMotion = model.presentedStageMotionStates[editor.id]
             let beamKind = stageBeamKindFor3D(editor)
             let wallWashEmitters = beamKind == .wallWash
                 ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: time)
