@@ -97,6 +97,10 @@ struct LiveShowWorkspaceView: View {
 private struct LiveAuthorityCard: View {
     @EnvironmentObject private var model: AppModel
     let activeDeck: LiveDeckState?
+    @State private var confirmEnable = false
+    @State private var confirmRevert = false
+
+    private var dynamicMode: Bool { model.productionShowMode == "DYNAMIC_COMPOSER_ENABLED" }
 
     private var deckNumber: String {
         activeDeck?.deckNumber.map { "DECK \($0)" } ?? "NO MASTER"
@@ -150,7 +154,8 @@ private struct LiveAuthorityCard: View {
                 Divider()
 
                 HStack(spacing: 10) {
-                    LiveSourceBadge(title: "PRODUCTION", value: productionDisplay(model.productionShowSource), tone: .neutral)
+                    LiveSourceBadge(title: "PRODUCTION", value: productionModeDisplay(model.productionShowMode), tone: dynamicMode ? .active : .neutral)
+                    LiveSourceBadge(title: "FRAME", value: productionDisplay(model.productionShowSource), tone: model.productionFallbackActive ? .warning : .neutral)
                     LiveSourceBadge(title: "PREVIEW", value: previewDisplay(model.previewComposition?.mode), tone: .active)
                     Spacer(minLength: 0)
                     Text("Physical: \(model.physicalOutputSource)")
@@ -158,7 +163,40 @@ private struct LiveAuthorityCard: View {
                         .foregroundStyle(BeatBeamPalette.secondaryText)
                         .lineLimit(1)
                 }
+
+                if dynamicMode, model.productionFallbackActive {
+                    Text("DYNAMIC COMPOSER · Fallback: BASELINE · \(model.productionFallbackReason ?? "unknown")")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(BeatBeamPalette.brandAmber)
+                }
+
+                HStack(spacing: 10) {
+                    if dynamicMode {
+                        Button("REVERT TO BASELINE") { confirmRevert = true }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.orange)
+                    } else {
+                        Button("ENABLE DYNAMIC COMPOSER") { confirmEnable = true }
+                            .buttonStyle(.borderedProminent)
+                            .tint(BeatBeamPalette.brandCyan)
+                    }
+                    Text("Fallback available · Manual and blackout always win")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(BeatBeamPalette.secondaryText)
+                }
             }
+        }
+        .confirmationDialog("Enable Dynamic Composer for physical production?", isPresented: $confirmEnable, titleVisibility: .visible) {
+            Button("ENABLE DYNAMIC COMPOSER", role: .destructive) { model.enableDynamicComposerProduction() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Baseline remains available for immediate revert.")
+        }
+        .confirmationDialog("Revert physical production to baseline Auto Show?", isPresented: $confirmRevert, titleVisibility: .visible) {
+            Button("REVERT TO BASELINE", role: .destructive) { model.revertProductionToBaseline() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This takes effect immediately and will not auto-enable again.")
         }
         .accessibilityLabel("Authoritative playback: \(deckNumber), \(title), \(readiness.title)")
     }
@@ -807,6 +845,10 @@ private func trajectoryDisplay(_ value: Double?) -> String {
 
 private func productionDisplay(_ value: String) -> String {
     value == "existing_autoshow" ? "BASELINE" : value.replacingOccurrences(of: "_", with: " ").uppercased()
+}
+
+private func productionModeDisplay(_ value: String) -> String {
+    value == "DYNAMIC_COMPOSER_ENABLED" ? "DYNAMIC COMPOSER" : "BASELINE AUTO SHOW"
 }
 
 private func previewDisplay(_ value: String?) -> String {

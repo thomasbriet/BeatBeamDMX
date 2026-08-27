@@ -1,6 +1,8 @@
 import json
 import threading
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from beatbeam_app import DmxController
@@ -303,24 +305,103 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertEqual("mode_baseline", decision["fallback_reason"])
         self.assertEqual(expected, controller.current_values)
 
-    def test_new_controller_restart_cannot_persist_or_configure_enabled_mode(self):
+    def test_new_controller_restart_defaults_to_persisted_baseline_mode(self):
         first, _ = self.controller()
         second, _ = self.controller()
         self.tick(first)
         self.tick(second)
 
-        self.assertNotIn("production_show_mode", first.default_config())
+        self.assertEqual("BASELINE_ONLY", first.default_config()["production_show_mode"])
         self.assertEqual("BASELINE_ONLY", first.state()["production_show_selector"]["production_mode"])
         self.assertEqual("BASELINE_ONLY", second.state()["production_show_selector"]["production_mode"])
 
-    def test_shadow_mode_observes_eligible_candidate_but_keeps_baseline_frame(self):
+    def test_operator_mode_is_explicit_persistent_and_invalid_settings_fail_to_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "beatbeam_config.json"
+            with patch("beatbeam_app.CONFIG_PATH", config_path):
+                controller, _ = self.controller()
+                self.assertEqual("BASELINE_ONLY", controller.config["production_show_mode"])
+                self.assertEqual(
+                    "BASELINE_ONLY",
+                    controller._clean_full_config({"production_show_mode": "broken"})["production_show_mode"],
+                )
+                controller.set_production_show_mode("DYNAMIC_COMPOSER_ENABLED")
+                controller.flush_config()
+                restarted = DmxController(PreviewTransport(), PreviewBridge())
+                self.assertEqual("DYNAMIC_COMPOSER_ENABLED", restarted.config["production_show_mode"])
+
+                config_path.write_text("{ invalid", encoding="utf-8")
+                corrupt_restart = DmxController(PreviewTransport(), PreviewBridge())
+                self.assertEqual("BASELINE_ONLY", corrupt_restart.config["production_show_mode"])
+
+    def test_runtime_revert_is_immediate_and_never_auto_reenables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "beatbeam_config.json"
+            with patch("beatbeam_app.CONFIG_PATH", config_path):
+                transport = PreviewTransport()
+                controller = DmxController(transport, ProductionAuthorityBridge())
+                controller.config = controller._clean_full_config(controller.default_config())
+                controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+                controller.config["production_show_mode"] = "DYNAMIC_COMPOSER_ENABLED"
+                controller.render_active = True
+                with patch("beatbeam_app.time.time", return_value=300.0):
+                    self.tick(controller)
+                    self.assertEqual("dynamic_composer", controller.state()["production_show_selector"]["production_show_source"])
+                    controller.set_production_show_mode("BASELINE_ONLY")
+                    self.tick(controller)
+
+                decision = controller.state()["production_show_selector"]
+                self.assertEqual("BASELINE_ONLY", controller.config["production_show_mode"])
+                self.assertEqual("existing_autoshow", decision["production_show_source"])
+                self.assertEqual("mode_baseline", decision["fallback_reason"])
+                self.tick(controller)
+                self.assertEqual(
+                    "existing_autoshow",
+                    controller.state()["production_show_selector"]["production_show_source"],
+                )
+                controller.set_production_show_mode("DYNAMIC_COMPOSER_ENABLED")
+                self.tick(controller)
+                self.assertEqual(
+                    "dynamic_composer",
+                    controller.state()["production_show_selector"]["production_show_source"],
+                )
+                controller.flush_config()
+
+    def test_renderer_exception_after_candidate_selection_retries_same_frame_with_baseline(self):
+        transport = PreviewTransport()
+        controller = DmxController(transport, ProductionAuthorityBridge())
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.config["production_show_mode"] = "DYNAMIC_COMPOSER_ENABLED"
+        controller.render_active = True
+        original_render = controller._render_values
+
+        def render_or_fault(now, *, config, osc, auto_show):
+            if auto_show.get("dynamic_composer_active"):
+                raise RuntimeError("candidate renderer fault")
+            return original_render(now, config=config, osc=osc, auto_show=auto_show)
+
+        with patch.object(controller, "_render_values", side_effect=render_or_fault), \
+                patch("beatbeam_app.time.time", return_value=300.0):
+            self.tick(controller)
+
+        decision = controller.state()["production_show_selector"]
+        self.assertEqual("existing_autoshow", decision["production_show_source"])
+        self.assertEqual("renderer_exception", decision["fallback_reason"])
+        self.assertTrue(controller.current_values)
+        observation = controller.state()["production_show_observation"]
+        self.assertEqual(0, observation["dynamic_frames"])
+        self.assertEqual(1, observation["baseline_fallback_frames"])
+        self.assertEqual(1, observation["candidate_faults"])
+
+    def test_shadow_mode_cannot_be_selected_through_operator_settings(self):
         transport = PreviewTransport()
         controller = DmxController(transport, ProductionAuthorityBridge())
         controller.config = controller._clean_full_config(controller.default_config())
         controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
         controller.render_active = True
-        with patch("beatbeam_app.PRODUCTION_DYNAMIC_COMPOSER_RUNTIME_MODE", "DYNAMIC_COMPOSER_SHADOW"), \
-                patch("beatbeam_app.time.time", return_value=300.0):
+        controller.config["production_show_mode"] = "DYNAMIC_COMPOSER_SHADOW"
+        with patch("beatbeam_app.time.time", return_value=300.0):
             baseline = controller._auto_show_state(transport.snapshot_for_render(), controller.config["auto_show"])
             expected = controller._render_values(
                 300.0, config=controller.config, osc=transport.snapshot_for_render(), auto_show=baseline
@@ -328,15 +409,10 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
             self.tick(controller)
 
         decision = controller.state()["production_show_selector"]
-        self.assertTrue(decision["dynamic_composer_eligible"])
+        self.assertEqual("BASELINE_ONLY", decision["production_show_mode"])
         self.assertFalse(decision["dynamic_composer_active"])
-        self.assertEqual("mode_shadow", decision["fallback_reason"])
+        self.assertEqual("mode_baseline", decision["fallback_reason"])
         self.assertEqual(expected, controller.current_values)
-        observation = controller.state()["production_show_shadow_observation"]
-        self.assertEqual(1, observation["frames"])
-        self.assertEqual(1, observation["candidate_available_frames"])
-        self.assertEqual(1, observation["eligible_frames"])
-        self.assertEqual(1, observation["different_signature_frames"])
 
     def test_composer_exception_is_observed_and_fails_back_to_same_frame_baseline(self):
         transport = PreviewTransport()
@@ -344,8 +420,8 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         controller.config = controller._clean_full_config(controller.default_config())
         controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
         controller.render_active = True
-        with patch("beatbeam_app.PRODUCTION_DYNAMIC_COMPOSER_RUNTIME_MODE", "DYNAMIC_COMPOSER_SHADOW"), \
-                patch("beatbeam_app.compose_dynamic_preview", side_effect=RuntimeError("synthetic")):
+        controller.config["production_show_mode"] = "DYNAMIC_COMPOSER_ENABLED"
+        with patch("beatbeam_app.compose_dynamic_preview", side_effect=RuntimeError("synthetic")):
             self.tick(controller)
 
         decision = controller.state()["production_show_selector"]

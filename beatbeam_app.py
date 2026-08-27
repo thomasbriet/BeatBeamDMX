@@ -53,6 +53,8 @@ from musical_event_envelope import project_musical_event_envelope
 from live_intensity import LiveIntensityFeedback
 from production_show_selector import (
     BASELINE_ONLY,
+    DYNAMIC_COMPOSER_ENABLED,
+    normalize_production_show_mode,
     select_production_show_source,
 )
 from show_simulator import ShowSimulationSession
@@ -83,9 +85,6 @@ SHOW_INTENT_SEMANTIC_HISTORY_MAX_FRAMES = 120000
 # Fase 1 van de bounded promotion: uitsluitend parity-diagnostiek. Deze private
 # gate heeft geen UI, persistence of runtime-endpoint en blijft default uit.
 SHOWINTENT_BOUNDED_PARITY_SOURCE_ENABLED = False
-# Internal-only production source gate. There is deliberately no config, UI,
-# environment, endpoint, or automatic promotion path for this value.
-PRODUCTION_DYNAMIC_COMPOSER_RUNTIME_MODE = BASELINE_ONLY
 API_SCHEMA_VERSION = 4
 DEFAULT_MANUAL_BPM = 124.0
 DEFAULT_MANUAL_PHRASE = "verse"
@@ -10012,6 +10011,14 @@ class DmxController:
         self.preview_pulse_test_mode = "OFF"
         self.rme_preview_differential = {}
         self.production_show_decision = {}
+        self.production_show_observation = {
+            "dynamic_frames": 0,
+            "baseline_fallback_frames": 0,
+            "candidate_faults": 0,
+            "fallback_reason_counts": {},
+            "source_switches": 0,
+            "last_source": "existing_autoshow",
+        }
         self.production_show_shadow_observation = {
             "frames": 0,
             "candidate_available_frames": 0,
@@ -10119,6 +10126,7 @@ class DmxController:
         return {
             "active_slot": "head",
             "blackout_active": False,
+            "production_show_mode": BASELINE_ONLY,
             "auto_show": DmxController.default_auto_show_config(),
             "slot_order": ["head", "par"],
             "slots": {
@@ -11273,6 +11281,9 @@ class DmxController:
             auto_show, candidate_auto_show, production_decision = self._select_production_auto_show(
                 config, osc, baseline_auto_show
             )
+            auto_show, production_decision, values = self._render_selected_production_values(
+                now, config, osc, baseline_auto_show, auto_show, production_decision
+            )
             preview_auto_show, slot_previews, differential = self._preview_auto_show_frame(
                 config, osc, now, baseline_auto_show,
                 preview_auto_show=candidate_auto_show,
@@ -11282,12 +11293,6 @@ class DmxController:
             self.current_preview_auto_show = preview_auto_show
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
-            values = self._render_values(
-                now,
-                config=config,
-                osc=osc,
-                auto_show=auto_show,
-            )
             self.current_values = values
             self.current_slot_previews = slot_previews
             self._schedule_save_locked()
@@ -11298,9 +11303,19 @@ class DmxController:
                 blackout=self.config.get("blackout_active"),
                 auto_show_enabled=(self.config.get("auto_show") or {}).get("enabled"),
                 auto_show_style=(self.config.get("auto_show") or {}).get("style"),
+                production_show_mode=self.config.get("production_show_mode"),
             )
         if stop_beat_pulse_test:
             self.virtualdj_beat_pulse_scheduler.stop("blackout")
+        return values
+
+    def set_production_show_mode(self, value):
+        requested = self._operator_production_show_mode(value)
+        raw = str(value or "").strip().upper()
+        if raw not in {BASELINE_ONLY, DYNAMIC_COMPOSER_ENABLED}:
+            raise ValueError("production_show_mode must be BASELINE_ONLY or DYNAMIC_COMPOSER_ENABLED")
+        values = self.update_config({"production_show_mode": requested})
+        self.debug_log.log("PRODUCTION_SHOW_MODE_SET", mode=requested)
         return values
 
     def trigger_one_shot_cue(self, cue_id):
@@ -11332,6 +11347,9 @@ class DmxController:
             auto_show, candidate_auto_show, production_decision = self._select_production_auto_show(
                 config, osc, baseline_auto_show
             )
+            auto_show, production_decision, values = self._render_selected_production_values(
+                now, config, osc, baseline_auto_show, auto_show, production_decision
+            )
             preview_auto_show, slot_previews, differential = self._preview_auto_show_frame(
                 config, osc, now, baseline_auto_show,
                 preview_auto_show=candidate_auto_show,
@@ -11341,12 +11359,7 @@ class DmxController:
             self.current_preview_auto_show = preview_auto_show
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
-            self.current_values = self._render_values(
-                now,
-                config=config,
-                osc=osc,
-                auto_show=auto_show,
-            )
+            self.current_values = values
             self.current_slot_previews = slot_previews
             self.debug_log.log("ONE_SHOT_TRIGGER", cue=cue_name)
             return dict(self.current_values)
@@ -11427,9 +11440,16 @@ class DmxController:
                 "last_rendered": self.last_rendered,
                 "active_slot": config["active_slot"],
                 "blackout_active": config["blackout_active"],
+                "production_show_mode": config["production_show_mode"],
                 "auto_show": auto_show,
                 "preview_auto_show": preview_auto_show,
                 "production_show_selector": dict(self.production_show_decision),
+                "production_show_observation": {
+                    **self.production_show_observation,
+                    "fallback_reason_counts": dict(
+                        self.production_show_observation.get("fallback_reason_counts") or {}
+                    ),
+                },
                 "production_show_shadow_observation": {
                     **self.production_show_shadow_observation,
                     "ineligible_reasons": dict(
@@ -11502,6 +11522,9 @@ class DmxController:
             auto_show, candidate_auto_show, production_decision = self._select_production_auto_show(
                 full_config, osc, baseline_auto_show
             )
+            auto_show, production_decision, values = self._render_selected_production_values(
+                now, full_config, osc, baseline_auto_show, auto_show, production_decision
+            )
             preview_auto_show, slot_previews, differential = self._preview_auto_show_frame(
                 full_config, osc, now, baseline_auto_show,
                 preview_auto_show=candidate_auto_show,
@@ -11511,12 +11534,7 @@ class DmxController:
             self.current_preview_auto_show = preview_auto_show
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
-            self.current_values = self._render_values(
-                now,
-                config=full_config,
-                osc=osc,
-                auto_show=auto_show,
-            )
+            self.current_values = values
             self.current_slot_previews = slot_previews
             self._schedule_save_locked()
             self.debug_log.log(
@@ -11556,6 +11574,9 @@ class DmxController:
             auto_show, candidate_auto_show, production_decision = self._select_production_auto_show(
                 full_config, osc, baseline_auto_show
             )
+            auto_show, production_decision, values = self._render_selected_production_values(
+                now, full_config, osc, baseline_auto_show, auto_show, production_decision
+            )
             preview_auto_show, slot_previews, differential = self._preview_auto_show_frame(
                 full_config, osc, now, baseline_auto_show,
                 preview_auto_show=candidate_auto_show,
@@ -11565,12 +11586,7 @@ class DmxController:
             self.current_preview_auto_show = preview_auto_show
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
-            self.current_values = self._render_values(
-                now,
-                config=full_config,
-                osc=osc,
-                auto_show=auto_show,
-            )
+            self.current_values = values
             self.current_slot_previews = slot_previews
             self._schedule_save_locked()
             self.debug_log.log(
@@ -11600,6 +11616,11 @@ class DmxController:
 
         if "blackout_active" in payload:
             config["blackout_active"] = bool(payload["blackout_active"])
+
+        if "production_show_mode" in payload:
+            config["production_show_mode"] = self._operator_production_show_mode(
+                payload["production_show_mode"]
+            )
 
         if "auto_show" in payload and isinstance(payload["auto_show"], dict):
             merged_auto_show = {**config["auto_show"], **payload["auto_show"]}
@@ -11864,6 +11885,9 @@ class DmxController:
         cleaned = {
             "active_slot": str(config.get("active_slot", defaults["active_slot"])),
             "blackout_active": bool(config.get("blackout_active", False)),
+            "production_show_mode": self._operator_production_show_mode(
+                config.get("production_show_mode", defaults["production_show_mode"])
+            ),
             "auto_show": self._clean_auto_show_config(config.get("auto_show")),
             "slot_order": [],
             "slots": {},
@@ -11889,6 +11913,12 @@ class DmxController:
         if cleaned["active_slot"] not in cleaned["slots"]:
             cleaned["active_slot"] = cleaned["slot_order"][0]
         return cleaned
+
+    @staticmethod
+    def _operator_production_show_mode(value):
+        """Persist only operator-safe production authority choices, never shadow."""
+        mode = normalize_production_show_mode(value)
+        return mode if mode in {BASELINE_ONLY, DYNAMIC_COMPOSER_ENABLED} else BASELINE_ONLY
 
     def _capabilities_for_slot(self, config):
         fixture = find_fixture(FIXTURE_LIBRARY, config["fixture"])
@@ -14320,7 +14350,7 @@ class DmxController:
             osc, config.get("auto_show", {}), baseline_auto_show
         )
         selected, decision = select_production_show_source(
-            PRODUCTION_DYNAMIC_COMPOSER_RUNTIME_MODE,
+            config.get("production_show_mode", BASELINE_ONLY),
             baseline_auto_show,
             candidate,
             projection,
@@ -14345,6 +14375,54 @@ class DmxController:
                 reasons = observation["ineligible_reasons"]
                 reasons[reason] = reasons.get(reason, 0) + 1
         return selected, candidate, decision
+
+    def _render_selected_production_values(
+        self, now, config, osc, baseline_auto_show, selected_auto_show, decision
+    ):
+        """Render one atomic physical frame, with a same-cycle baseline retry."""
+        try:
+            values = self._render_values(
+                now, config=config, osc=osc, auto_show=selected_auto_show
+            )
+            self._observe_production_show_decision(decision)
+            return selected_auto_show, decision, values
+        except Exception:
+            if decision.get("production_show_source") != "dynamic_composer":
+                raise
+            fallback = {
+                **decision,
+                "production_source": "existing_autoshow",
+                "production_show_source": "existing_autoshow",
+                "composer_active": False,
+                "dynamic_composer_active": False,
+                "fallback_active": True,
+                "fallback_reason": "renderer_exception",
+            }
+            values = self._render_values(
+                now, config=config, osc=osc, auto_show=baseline_auto_show
+            )
+            self._observe_production_show_decision(fallback)
+            return baseline_auto_show, fallback, values
+
+    def _observe_production_show_decision(self, decision):
+        """Keep bounded operational counters; selection itself remains pure."""
+        observation = self.production_show_observation
+        limit = 1_000_000
+        source = decision.get("production_show_source", "existing_autoshow")
+        if source == "dynamic_composer":
+            observation["dynamic_frames"] = min(limit, observation["dynamic_frames"] + 1)
+        elif decision.get("production_show_mode") == DYNAMIC_COMPOSER_ENABLED:
+            observation["baseline_fallback_frames"] = min(
+                limit, observation["baseline_fallback_frames"] + 1
+            )
+            reason = str(decision.get("fallback_reason") or "unknown")
+            reasons = observation["fallback_reason_counts"]
+            reasons[reason] = min(limit, reasons.get(reason, 0) + 1)
+            if reason not in {"mode_baseline", "mode_shadow"}:
+                observation["candidate_faults"] = min(limit, observation["candidate_faults"] + 1)
+        if source != observation.get("last_source"):
+            observation["source_switches"] = min(limit, observation["source_switches"] + 1)
+            observation["last_source"] = source
 
     @staticmethod
     def _preview_changed_values(baseline, enhanced):
@@ -16119,16 +16197,13 @@ class DmxController:
                 auto_show, candidate_auto_show, production_decision = self._select_production_auto_show(
                     config, osc, baseline_auto_show
                 )
+                auto_show, production_decision, values = self._render_selected_production_values(
+                    render_now, config, osc, baseline_auto_show, auto_show, production_decision
+                )
                 preview_auto_show, slot_previews, differential = self._preview_auto_show_frame(
                     config, osc, render_now, baseline_auto_show,
                     preview_auto_show=candidate_auto_show,
                     production_decision=production_decision,
-                )
-                values = self._render_values(
-                    render_now,
-                    config=config,
-                    osc=osc,
-                    auto_show=auto_show,
                 )
                 self.current_auto_show = auto_show
                 self.current_preview_auto_show = preview_auto_show
@@ -17099,6 +17174,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/dmx/update":
                 DMX.update_config(payload)
+                self.send_json(full_state())
+                return
+            if path == "/api/dmx/production-mode":
+                DMX.set_production_show_mode(payload.get("production_show_mode"))
                 self.send_json(full_state())
                 return
             if path == "/api/dmx/trigger-cue":

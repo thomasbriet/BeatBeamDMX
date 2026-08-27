@@ -1,6 +1,7 @@
 {
   "active_slot": "head",
   "blackout_active": false,
+  "production_show_mode": "BASELINE_ONLY",
   "auto_show": {
     "enabled": true,
     "style": "adaptive",

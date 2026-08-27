@@ -675,6 +675,8 @@ struct DmxState: Decodable {
     let values: [String: Int]
     let developerVirtualdjBeatPulsePreview: VirtualDjBeatPulsePreviewState?
     let rmePreviewDifferential: PreviewCompositionState?
+    let productionShowSelector: ProductionShowSelectorState?
+    let productionShowObservation: ProductionShowObservationState?
     let previewPulseTest: PreviewPulseTestState?
 
     private enum CodingKeys: String, CodingKey {
@@ -695,6 +697,8 @@ struct DmxState: Decodable {
         case values
         case developerVirtualdjBeatPulsePreview
         case rmePreviewDifferential
+        case productionShowSelector
+        case productionShowObservation
         case previewPulseTest
     }
 
@@ -723,8 +727,33 @@ struct DmxState: Decodable {
             PreviewCompositionState.self,
             forKey: .rmePreviewDifferential
         )
+        productionShowSelector = try container.decodeIfPresent(
+            ProductionShowSelectorState.self,
+            forKey: .productionShowSelector
+        )
+        productionShowObservation = try container.decodeIfPresent(
+            ProductionShowObservationState.self,
+            forKey: .productionShowObservation
+        )
         previewPulseTest = try container.decodeIfPresent(PreviewPulseTestState.self, forKey: .previewPulseTest)
     }
+}
+
+struct ProductionShowSelectorState: Decodable {
+    let productionMode: String?
+    let productionSource: String?
+    let fallbackActive: Bool?
+    let fallbackReason: String?
+    let dynamicComposerEligible: Bool?
+    let manualOverrideActive: Bool?
+    let blackoutActive: Bool?
+}
+
+struct ProductionShowObservationState: Decodable {
+    let dynamicFrames: Int?
+    let baselineFallbackFrames: Int?
+    let candidateFaults: Int?
+    let sourceSwitches: Int?
 }
 
 struct PreviewPulseTestState: Decodable { let mode: String; let active: Bool; let pattern: String? }
@@ -2192,6 +2221,10 @@ struct AutoShowUpdateRequest: Encodable {
     let autoShow: AutoShowUpdateBody
 }
 
+struct ProductionShowModeRequest: Encodable {
+    let productionShowMode: String
+}
+
 struct TriggerCueRequest: Encodable {
     let cueID: String
 }
@@ -2723,6 +2756,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var blackoutActive = false
     @Published private(set) var physicalOutputSource = "auto_show -> current_values"
     @Published private(set) var productionShowSource = "existing_autoshow"
+    @Published private(set) var productionShowMode = "BASELINE_ONLY"
+    @Published private(set) var productionFallbackActive = false
+    @Published private(set) var productionFallbackReason: String?
 
     private var baseURL: URL {
         URL(string: "http://127.0.0.1:\(beatBeamBackendPort)")!
@@ -3206,6 +3242,31 @@ final class AppModel: ObservableObject {
         let request = currentAutoShowUpdateBody(enabled: autoShowEnabled, style: style)
         setPendingAutoShowRequest(request)
         postAutoShow(request)
+    }
+
+    func enableDynamicComposerProduction() {
+        setProductionShowMode("DYNAMIC_COMPOSER_ENABLED")
+    }
+
+    func revertProductionToBaseline() {
+        setProductionShowMode("BASELINE_ONLY")
+    }
+
+    private func setProductionShowMode(_ mode: String) {
+        let normalized = mode == "DYNAMIC_COMPOSER_ENABLED" ? mode : "BASELINE_ONLY"
+        Task {
+            do {
+                let state: AppState = try await post(
+                    "/api/dmx/production-mode",
+                    body: ProductionShowModeRequest(productionShowMode: normalized),
+                    as: AppState.self
+                )
+                apply(state, source: .action)
+                errorText = ""
+            } catch {
+                errorText = "Production source wijzigen mislukt: \(error.localizedDescription)"
+            }
+        }
     }
 
     func setPreviewRmeMode(_ mode: String) {
@@ -4317,6 +4378,9 @@ final class AppModel: ObservableObject {
         previewComposition = state.dmx.rmePreviewDifferential
         physicalOutputSource = state.dmx.rmePreviewDifferential?.physicalOutputSource ?? "auto_show -> current_values"
         productionShowSource = state.dmx.rmePreviewDifferential?.productionSource ?? "existing_autoshow"
+        productionShowMode = state.dmx.productionShowSelector?.productionMode ?? "BASELINE_ONLY"
+        productionFallbackActive = state.dmx.productionShowSelector?.fallbackActive ?? false
+        productionFallbackReason = state.dmx.productionShowSelector?.fallbackReason
         previewPulseTestMode = state.dmx.previewPulseTest?.mode ?? "OFF"
         dmxSlotOrder = state.dmx.slotOrder
         dmxSlotRanges = state.dmx.slotRanges

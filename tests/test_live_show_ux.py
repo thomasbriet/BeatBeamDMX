@@ -41,7 +41,7 @@ class LiveShowUxTests(unittest.TestCase):
     def test_normal_baseline_and_no_rme_are_not_presented_as_errors(self):
         self.assertIn('value == "existing_autoshow" ? "BASELINE"', self.live)
         self.assertIn('"No current musical event. Continuous state remains active."', self.live)
-        self.assertNotIn('fallback_reason', self.live)
+        self.assertIn('productionFallbackReason', self.live)
 
     def test_preview_remains_explicit_and_non_authoritative(self):
         self.assertIn('"Preview controls and the fixture map are non-authoritative.', self.live)
@@ -59,7 +59,9 @@ class LiveShowUxTests(unittest.TestCase):
     def test_live_presentation_does_not_introduce_a_second_backend_or_production_selector(self):
         self.assertNotIn('URLSession', self.live)
         self.assertNotIn('select_production_show_source', self.live)
-        self.assertNotIn('DYNAMIC_COMPOSER_ENABLED', self.live)
+        self.assertIn('ENABLE DYNAMIC COMPOSER', self.live)
+        self.assertIn('REVERT TO BASELINE', self.live)
+        self.assertIn('productionShowMode', self.live)
 
 
 if __name__ == "__main__":
