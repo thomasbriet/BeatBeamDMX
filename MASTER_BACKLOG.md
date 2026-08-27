@@ -13,6 +13,7 @@
 | Variation review | `HOLD_HUMAN_VISUAL_ACCEPTANCE` | Beoordeel repeat, variation, recurrence en muzikale fit. | Technisch geen directe repeats; visuele/muzikale acceptatie ontbreekt. |
 | Live Show UX V2 review | `HOLD_USER_REVIEW` | Beoordeel scanbaarheid, taal, responsive gedrag en Live/Preview/Manual/Advanced-scheiding in echte bediening. | Technische pass is gereed; uitsluitend menselijke UX-acceptatie ontbreekt. |
 | Smart Cue V1 placementreview | `HOLD_HUMAN_REVIEW` | Beoordeel 24 diverse tracks op MIX IN, MAIN, BREAK, MIX OUT en exacte 16/12/8/4-bar aftellingen. | Technische planner/writer-foundation is pass; muzikale plaatsing is niet menselijk geaccepteerd en auto-apply blijft hard uit. |
+| Show Simulator V1 review | `HOLD_USER_REVIEW` | Beoordeel timeline, cue/event/section-jumps en de gesimuleerde 2D/3D Preview Map. | Technische pass is gereed; Simulator heeft hard nul fysieke authority. |
 
 ## NEXT
 
@@ -31,7 +32,6 @@
 | Risers, downlifters, impacts | `EVIDENCE_FIRST` | Alleen toevoegen wanneer de gewenste showreactie is bewezen. | Corpus- en human evidence. |
 | Vocal/percussion/bass entry-removal | `EVIDENCE_FIRST` | Onderzoek alleen als het een bruikbare showbeslissing oplevert. | Productvraag en betrouwbare analyse-evidence. |
 | Moving-head speed control | `LATER` | Bounded handmatige snelheidsmodifier boven Auto Show. | UX- en safety-specificatie. |
-| Show Simulator | `LATER` | Virtuele fixture-weergave voor analyse/showcontrole. | Apart ontwerp; niet verwarren met Native Preview Map. |
 
 ## DEFERRED
 
@@ -50,6 +50,7 @@
 - `ANALYSIS_WORKER_OPERATIONAL_HARDENING_PASS`: expliciete bounded joblifecycle, cancellation/timeout, worker crash isolation en cleanup, stale-pending recovery, atomic cache/handoff publication en operationele diagnostics; 215/215 current bleef behouden.
 - `BEATBEAM_LIVE_SHOW_UX_V2_TECHNICAL_PASS`: Live Show als standaard, aparte Preview/Manual/Advanced, bestaande Preview Map/raw diagnostics behouden en geen wijziging van production authority.
 - `SMART_CUE_PLANNER_V1_TECHNICAL_PASS` en `SMART_CUE_VDJ_WRITER_GATE_OFF_PASS`: deterministic 215-track planning, corpus/reviewpackage, read-only native cue-preflight en exact-identity writer/ownership/verify/rollback foundation; `SMART_CUE_AUTO_APPLY_OFF` live bewezen.
+- `BEATBEAM_SHOW_SIMULATOR_V1_TECHNICAL_PASS`: musical timeline, cue/event/section navigation, isolated previewframes en native 2D/3D Preview Map datasource; 215-track deterministic corpusprojectie en packaged runtime-smoke groen.
 - FILL micro-evidence/tooling en het 36-item blinded reviewpakket.
 
 ## LEGACY / CLOSED

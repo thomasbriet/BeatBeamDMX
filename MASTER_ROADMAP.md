@@ -2621,15 +2621,14 @@ een afzonderlijke expliciete vervolgbeslissing.
 
 # 6. BeatBeam Show Simulator
 
-- `TODO` Simulator bouwen waarmee een analyse zonder echte lampen kan worden afgespeeld.
-- `TODO` Fixtures virtueel weergeven.
-- `TODO` Kleuruitvoer visualiseren.
-- `TODO` Moving-head beweging visualiseren.
-- `TODO` Programma/effect per fixture tonen.
-- `TODO` Auto Show-beslissingen live tonen.
-- `TODO` Handmatige overrides in simulator testbaar maken.
-- `TODO` Analyse-tijdlijn scrubbaar maken.
-- `TODO` Simulator gebruiken voor regressietests van showlogica.
+- `TECHNICAL FOUNDATION DONE` — `BEATBEAM_SHOW_SIMULATOR_V1_TECHNICAL_PASS`.
+- Eén offline simulation playhead projecteert sections, RME/events, EventEnvelope,
+  read-only Smart Cue-markers en Dynamic Composer naar isolated
+  `simulation_slot_previews`.
+- De bestaande native 2D/3D Preview Map kiest deze datasource uitsluitend tijdens
+  Simulator.  Simulator blijft `physical_output = NONE`; live transport,
+  `current_values`, manual state en production authority zijn uitgesloten.
+- Verdere beoordeling is `HOLD_USER_REVIEW`, geen nieuwe production authority.
 
 ---
 
