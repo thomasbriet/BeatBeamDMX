@@ -80,10 +80,12 @@ struct LiveShowWorkspaceView: View {
 
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .top, spacing: 14) {
+                    LiveDmxConnectionCard()
                     LiveFixtureGroupsCard()
                     LiveSafetyAndPhysicalCard()
                 }
                 VStack(spacing: 14) {
+                    LiveDmxConnectionCard()
                     LiveFixtureGroupsCard()
                     LiveSafetyAndPhysicalCard()
                 }
@@ -91,6 +93,76 @@ struct LiveShowWorkspaceView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("BeatBeam Live Show")
+    }
+}
+
+private struct LiveDmxConnectionCard: View {
+    @EnvironmentObject private var model: AppModel
+
+    private var selectedDevice: String {
+        model.selectedPortLabel.isEmpty ? "Geen interface geselecteerd" : model.selectedPortLabel
+    }
+
+    private var connectionDetail: String {
+        if model.physicalDmxConnected {
+            return model.dmxStatus
+        }
+        if let error = model.physicalDmxError, !error.isEmpty {
+            return error
+        }
+        if model.errorText.localizedCaseInsensitiveContains("DMX") {
+            return model.errorText
+        }
+        if model.ports.isEmpty {
+            return "Geen DMX-interface gevonden. Sluit de interface aan en vernieuw."
+        }
+        return "Geselecteerd: \(selectedDevice)"
+    }
+
+    var body: some View {
+        PanelSurface(title: "Physical DMX", compact: true) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    LiveStatusBadge(
+                        text: model.physicalDmxConnected ? "DMX CONNECTED" : "DMX DISCONNECTED",
+                        tone: model.physicalDmxConnected ? .active : .neutral
+                    )
+                    Text(connectionDetail)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(BeatBeamPalette.secondaryText)
+                        .lineLimit(2)
+                }
+
+                Picker("DMX interface", selection: $model.selectedPortLabel) {
+                    Text("Selecteer interface").tag("")
+                    ForEach(model.ports, id: \.device) { port in
+                        Text(port.label).tag(port.label)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(model.ports.isEmpty)
+
+                HStack(spacing: 8) {
+                    Button("REFRESH") { model.refreshPorts() }
+                        .buttonStyle(.bordered)
+
+                    if model.physicalDmxConnected {
+                        Button("RECONNECT") { model.reconnectDMX() }
+                            .buttonStyle(.borderedProminent)
+                        Button("DISCONNECT") { model.disconnectDMX() }
+                            .buttonStyle(.bordered)
+                    } else {
+                        Button("CONNECT DMX") { model.connectDMX() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.selectedPortLabel.isEmpty)
+                    }
+                }
+
+                Text("Connection controls do not change production authority.")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(BeatBeamPalette.secondaryText)
+            }
+        }
     }
 }
 

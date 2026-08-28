@@ -56,6 +56,34 @@ class LiveShowUxTests(unittest.TestCase):
         self.assertIn('"PHYSICAL DISCONNECTED"', self.live)
         self.assertIn('Preview remains usable', self.live)
 
+    def test_live_show_restores_existing_dmx_connection_controls(self):
+        for text in (
+            'LiveDmxConnectionCard()',
+            'PanelSurface(title: "Physical DMX"',
+            'Picker("DMX interface", selection: $model.selectedPortLabel)',
+            '"CONNECT DMX"',
+            '"RECONNECT"',
+            '"DISCONNECT"',
+            'model.refreshPorts()',
+            'model.connectDMX()',
+            'model.reconnectDMX()',
+            'model.disconnectDMX()',
+            'DMX CONNECTED',
+            'DMX DISCONNECTED',
+        ):
+            self.assertIn(text, self.live)
+        for text in (
+            'func connectDMX()',
+            'func reconnectDMX()',
+            'func disconnectDMX()',
+            'selectedPortDefaultsKey',
+            'UserDefaults.standard.set(selectedPortLabel, forKey: selectedPortDefaultsKey)',
+            '!response.ports.contains(where: { $0.label == selectedPortLabel })',
+            '"/api/dmx/connect"',
+            '"/api/dmx/disconnect"',
+        ):
+            self.assertIn(text, self.native)
+
     def test_live_presentation_does_not_introduce_a_second_backend_or_production_selector(self):
         self.assertNotIn('URLSession', self.live)
         self.assertNotIn('select_production_show_source', self.live)

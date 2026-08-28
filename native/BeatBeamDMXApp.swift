@@ -3082,6 +3082,28 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func reconnectDMX() {
+        guard let device = selectedPortDevice() else {
+            errorText = "Geen DMX-poort geselecteerd."
+            return
+        }
+        Task {
+            do {
+                beginLocalMutationHold()
+                _ = try await post("/api/dmx/disconnect", body: EmptyRequest(), as: AppState.self)
+                let state: AppState = try await post(
+                    "/api/dmx/connect",
+                    body: ConnectRequest(port: device, fps: 30),
+                    as: AppState.self
+                )
+                apply(state, source: .action)
+                errorText = ""
+            } catch {
+                errorText = "DMX opnieuw verbinden mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
     func blackout() {
         Task {
             do {
@@ -4311,7 +4333,7 @@ final class AppModel: ObservableObject {
     private func loadPorts() async throws {
         let response: PortsResponse = try await get("/api/ports", as: PortsResponse.self)
         ports = response.ports
-        if selectedPortLabel.isEmpty {
+        if !response.ports.contains(where: { $0.label == selectedPortLabel }) {
             selectedPortLabel = response.ports.first(where: { $0.device.contains("usbserial") })?.label
                 ?? response.ports.first?.label
                 ?? ""
