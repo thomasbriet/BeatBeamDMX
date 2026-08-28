@@ -34,8 +34,8 @@ let healthy = """
   "track": { "title": "Track", "artist": "Artist", "active_deck": 1, "playing": true, "position_milliseconds": 1200, "duration_milliseconds": null, "bpm": 128, "beat": 2, "bar": 3, "transport_fresh": true, "readiness": "READY" },
   "decks": [{ "number": 1, "loaded": true, "title": "Track", "artist": "Artist", "playing": true, "master": true, "active": true, "analysis_readiness": "READY", "prewarm_readiness": "READY" }],
   "musical_state": { "section": "chorus", "section_progress": 0.5, "relative_energy": 0.8, "energy_trajectory": "rising", "recurrence": 0.2, "material_context": null, "current_rme": null, "event_envelope": { "active": false, "phase": null, "progress": null, "event_type": null }, "effective_intensity": 0.8, "analyzed_intensity": 0.7, "live_intensity_valid": true },
-  "dmx": { "connected": true, "device_name": "DMX", "renderer_healthy": true, "renderer_active": true, "frame_sequence": 10, "last_error": null, "dispatch_failures": 0, "physical_output_available": true },
-  "fixtures": [], "overrides": { "any_active": false, "phrase": null, "energy": null, "color": null, "momentary_effects": [], "blackout": false, "automatic": true }, "control": { "scope": "LIVE_CONTROL", "colors": [{"id":"red","label":"Red"}], "phrases": [], "energies": [], "momentary_effects": [], "cue_shots": [], "momentary_lease_seconds": 3 }, "warnings": [], "future_additive_field": "ignored"
+  "dmx": { "connected": true, "device_name": "DMX", "renderer_healthy": true, "renderer_active": true, "frame_sequence": 10, "last_error": null, "dispatch_failures": 0, "rendered_output_available": true, "physical_output_available": true },
+  "fixtures": [], "output": { "rendered_available": true, "physical_output_available": true, "blackout": false, "frame_sequence": 10, "fixtures": [{"id":"par","label":"PAR","role":"par","active":true,"dimmer":200,"red":120,"green":30,"blue":10,"white":0,"strobe":0,"pan":null,"tilt":null}] }, "overrides": { "any_active": false, "phrase": null, "energy": null, "color": null, "momentary_effects": [], "blackout": false, "automatic": true }, "control": { "scope": "LIVE_CONTROL", "colors": [{"id":"red","label":"Red"}], "phrases": [], "energies": [], "momentary_effects": [], "cue_shots": [], "momentary_lease_seconds": 3 }, "warnings": [], "future_additive_field": "ignored"
 }
 """
 
@@ -47,6 +47,8 @@ struct RemoteLiveStateV2ContractTests {
             require(full.show.physicalFrameSource == "dynamic_composer", "healthy physical source")
             require(full.track.readiness == "READY", "healthy readiness")
             require(full.stateRevision == 10, "revision")
+            require(full.dmx.renderedOutputAvailable == true, "rendered output availability")
+            require(full.output?.fixtures.first?.red == 120, "authoritative output fixture")
 
             let fallback = try decode(healthy.replacingOccurrences(of: "\"dynamic_composer\", \"preview_source\": \"dynamic_composer\", \"fallback_active\": false, \"fallback_reason\": null", with: "\"existing_autoshow\", \"preview_source\": \"baseline\", \"fallback_active\": true, \"fallback_reason\": \"transport_stale\""))
             require(fallback.show.fallbackActive, "fallback active")
@@ -57,6 +59,7 @@ struct RemoteLiveStateV2ContractTests {
                 .replacingOccurrences(of: "\"physical_output_available\": true", with: "\"physical_output_available\": false")
             let disconnected = try decode(disconnectedFixture)
             require(!disconnected.dmx.connected && !disconnected.dmx.physicalOutputAvailable, "DMX disconnected")
+            require(disconnected.output?.renderedAvailable == true && disconnected.output?.physicalOutputAvailable == false, "disconnected output remains rendered")
 
             let blackout = try decode(healthy.replacingOccurrences(of: "\"blackout\": false, \"automatic\": true", with: "\"blackout\": true, \"automatic\": false"))
             require(blackout.overrides.blackout, "blackout")

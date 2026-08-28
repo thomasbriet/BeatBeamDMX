@@ -10075,6 +10075,9 @@ class DmxController:
         self.render_frame_sequence = 0
         self.last_rendered = None
         self.current_values = {}
+        # Exact post-authority frame. It is valid without an Enttec sink and is
+        # deliberately distinct from `last_sent`.
+        self.current_final_values = {}
         self.current_slot_previews = {}
         self.physical_dmx_trace_history = deque(maxlen=PHYSICAL_DMX_TRACE_HISTORY_MAX_BEATS)
         self._physical_dmx_trace_key = None
@@ -11443,6 +11446,7 @@ class DmxController:
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
             self.current_values = values
+            self.current_final_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
             self.current_slot_previews = slot_previews
             self._schedule_save_locked()
             stop_beat_pulse_test = bool(config["blackout_active"])
@@ -11509,6 +11513,7 @@ class DmxController:
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
             self.current_values = values
+            self.current_final_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
             self.current_slot_previews = slot_previews
             self.debug_log.log("ONE_SHOT_TRIGGER", cue=cue_name)
             return dict(self.current_values)
@@ -11518,6 +11523,7 @@ class DmxController:
             self.config["blackout_active"] = True
             self.active_one_shot_cue = None
             self.current_values = {}
+            self.current_final_values = {}
             self.current_slot_previews = {}
             self.rme_preview_differential = {}
             self.debug_log.log("BLACKOUT", active=True)
@@ -11575,6 +11581,7 @@ class DmxController:
             auto_show = dict(self.current_auto_show or {})
             preview_auto_show = dict(self.current_preview_auto_show or {})
             live_values = dict(self.current_values)
+            rendered_final_values = dict(self.current_final_values)
             slot_previews = dict(self.current_slot_previews)
             slot_previews = self._apply_virtualdj_beat_pulse_preview_overlay_locked(slot_previews)
             values = dict(sorted(live_values.items()))
@@ -11633,6 +11640,7 @@ class DmxController:
                 "physical_dmx_trace": list(self.physical_dmx_trace_history),
                 "conflicts": list(self.conflicts),
                 "values": values,
+                "rendered_final_values": rendered_final_values,
                 "developer_virtualdj_beat_pulse_test": self.virtualdj_beat_pulse_test_state(),
                 "developer_virtualdj_beat_pulse_preview": self.virtualdj_beat_pulse_preview_test_state(),
                 "playback": {
@@ -11692,6 +11700,7 @@ class DmxController:
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
             self.current_values = values
+            self.current_final_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
             self.current_slot_previews = slot_previews
             self._schedule_save_locked()
             self.debug_log.log(
@@ -11744,6 +11753,7 @@ class DmxController:
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
             self.current_values = values
+            self.current_final_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
             self.current_slot_previews = slot_previews
             self._schedule_save_locked()
             self.debug_log.log(
@@ -16381,7 +16391,9 @@ class DmxController:
                 self.current_preview_auto_show = preview_auto_show
                 self.rme_preview_differential = differential
                 self.production_show_decision = production_decision
+                final_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
                 self.current_values = values
+                self.current_final_values = final_values
                 self.current_slot_previews = slot_previews
                 self.render_frame_sequence += 1
                 self.last_rendered = render_now
@@ -16390,7 +16402,7 @@ class DmxController:
                         self.error = None
                     self.renderer_error = None
                 self._record_physical_dmx_trace(
-                    config, osc, auto_show, production_decision, values, values,
+                    config, osc, auto_show, production_decision, values, final_values,
                     "current_values_ready",
                 )
                 developer_playback_state = self.osc.developer_playback_state()
@@ -16414,7 +16426,7 @@ class DmxController:
                     or self.dmx is not dmx
                 ):
                     return False
-                output_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
+                output_values = dict(self.current_final_values)
                 self._record_physical_dmx_trace(
                     config, osc, self.current_auto_show or {}, self.production_show_decision,
                     values, output_values, "dmx_dispatch",
@@ -17404,6 +17416,81 @@ def _remote_live_fixture_groups(dmx_state):
     return [result[key] for key in sorted(result)]
 
 
+def _remote_live_output_preview(dmx_state):
+    """Project the already-rendered authoritative output frame for the remote.
+
+    This is deliberately a projection, not a renderer: ``rendered_final_values``
+    is the post-authority frame kept by ``DmxController`` immediately before a
+    possible DMX dispatch.  It consequently stays useful when no Enttec device
+    is connected and cannot drift from the physical dispatch transform.
+    """
+    slots = dmx_state.get("slots") if isinstance(dmx_state.get("slots"), dict) else {}
+    order = dmx_state.get("slot_order") if isinstance(dmx_state.get("slot_order"), list) else list(slots)
+    values = dmx_state.get("rendered_final_values")
+    if not isinstance(values, dict):
+        # Compatibility with an already-running backend during a rolling app
+        # update.  New runtimes always expose rendered_final_values.
+        values = dmx_state.get("values") if isinstance(dmx_state.get("values"), dict) else {}
+    renderer = dmx_state.get("renderer_health") if isinstance(dmx_state.get("renderer_health"), dict) else {}
+    rendered_available = bool(renderer.get("healthy")) and bool(renderer.get("active"))
+    blackout = bool(dmx_state.get("blackout_active"))
+
+    def byte_for(channel):
+        value = values.get(channel, values.get(str(channel), 0))
+        try:
+            return max(0, min(255, int(round(float(value)))))
+        except (TypeError, ValueError):
+            return 0
+
+    fixtures = []
+    for slot_id in order:
+        slot = slots.get(slot_id)
+        if not isinstance(slot, dict) or not slot.get("enabled"):
+            continue
+        try:
+            fixture = find_fixture(FIXTURE_LIBRARY, slot.get("fixture"))
+            mode = find_mode(fixture, slot.get("mode"))
+            capabilities = mode_capabilities(mode)
+            address = int(slot.get("address") or 1)
+        except (TypeError, ValueError, KeyError):
+            continue
+        channels = {"dimmer": 0, "red": 0, "green": 0, "blue": 0, "white": 0, "strobe": 0}
+        pan = tilt = None
+        for definition in mode.get("channels", []):
+            absolute = address + int(definition.get("offset") or 1) - 1
+            channel_type = str(definition.get("type") or "").lower()
+            component = str(definition.get("component") or "").lower()
+            value = byte_for(absolute)
+            if channel_type == "intensity":
+                channels["dimmer"] = value
+            elif channel_type == "color" and component in {"red", "green", "blue", "white"}:
+                channels[component] = value
+            elif channel_type == "strobe":
+                channels["strobe"] = value
+            elif channel_type == "pan":
+                pan = value
+            elif channel_type == "tilt":
+                tilt = value
+        # RGB-only fixtures do not necessarily have a separate dimmer channel.
+        if not channels["dimmer"]:
+            channels["dimmer"] = max(channels["red"], channels["green"], channels["blue"], channels["white"])
+        if blackout:
+            channels = {key: 0 for key in channels}
+        role = "moving" if capabilities.get("pan") or capabilities.get("tilt") else _remote_live_role(slot)
+        fixtures.append({
+            "id": str(slot_id), "label": str(slot.get("label") or slot_id), "role": role,
+            "active": bool(channels["dimmer"] or channels["strobe"]),
+            **channels, "pan": pan, "tilt": tilt,
+        })
+    return {
+        "rendered_available": rendered_available,
+        "physical_output_available": bool(dmx_state.get("connected")) and rendered_available,
+        "blackout": blackout,
+        "frame_sequence": renderer.get("render_frame_sequence"),
+        "fixtures": fixtures,
+    }
+
+
 def _remote_live_warnings(live_ui, dmx_state, selector, overrides):
     warnings = []
 
@@ -17445,7 +17532,8 @@ def _remote_live_effect_capabilities(dmx_state):
 
     The remote must not infer fixture support from a label. This reads the
     same enabled slot modes that the production renderer consumes. A missing
-    fixture capability is structural; disconnected output is temporary.
+    fixture capability is structural.  Physical DMX connection state is never
+    a capability gate: all supported controls remain testable offline.
     """
     slots = dmx_state.get("slots") if isinstance(dmx_state.get("slots"), dict) else {}
     facts = []
@@ -17475,7 +17563,7 @@ def _remote_live_effect_capabilities(dmx_state):
         "color": sum(fact["color"] for fact in facts),
     }
     renderer = dmx_state.get("renderer_health") if isinstance(dmx_state.get("renderer_health"), dict) else {}
-    output_ready = bool(dmx_state.get("connected")) and bool(renderer.get("healthy")) and bool(renderer.get("active"))
+    renderer_ready = bool(renderer.get("healthy")) and bool(renderer.get("active"))
     definitions = (
         ("manual_strobe", "Manual Strobe", "momentary", "strobe-capable fixtures", "strobe", 1),
         ("audience_sweep", "Audience Sweep", "momentary", "moving fixtures", "moving", 1),
@@ -17496,10 +17584,10 @@ def _remote_live_effect_capabilities(dmx_state):
         temporary = False
         if not available:
             reason = f"Requires {minimum}+ {target_group} in the current fixture setup"
-        elif not output_ready:
+        elif not renderer_ready:
             available = False
             temporary = True
-            reason = "DMX output is disconnected or renderer is unavailable"
+            reason = "Renderer is unavailable"
         result.append({
             "id": effect_id, "label": label, "kind": kind, "available": available,
             "reason_if_unavailable": reason, "temporarily_unavailable": temporary,
@@ -17654,6 +17742,8 @@ def remote_live_state_v2():
     auto_show = dmx_state.get("auto_show") if isinstance(dmx_state.get("auto_show"), dict) else {}
     preview = dmx_state.get("preview_auto_show") if isinstance(dmx_state.get("preview_auto_show"), dict) else {}
     renderer = dmx_state.get("renderer_health") if isinstance(dmx_state.get("renderer_health"), dict) else {}
+    output_preview = _remote_live_output_preview(dmx_state)
+    effect_capabilities = _remote_live_effect_capabilities(dmx_state)
     active_deck = next((deck for deck in (live_ui.get("decks") or []) if isinstance(deck, dict) and deck.get("is_active")), None)
     musical_source = preview if preview.get("continuous_musical_state") else auto_show
     continuous = musical_source.get("continuous_musical_state") if isinstance(musical_source.get("continuous_musical_state"), dict) else {}
@@ -17749,17 +17839,19 @@ def remote_live_state_v2():
             "frame_sequence": renderer.get("render_frame_sequence"),
             "last_error": renderer.get("error") or dmx_state.get("error"),
             "dispatch_failures": ((dmx_state.get("playback") or {}).get("dmx_dispatch_failures")),
-            "physical_output_available": bool(dmx_state.get("connected")) and bool(renderer.get("healthy")),
+            "rendered_output_available": output_preview["rendered_available"],
+            "physical_output_available": output_preview["physical_output_available"],
         },
         "fixtures": _remote_live_fixture_groups(dmx_state),
+        "output": output_preview,
         "overrides": overrides,
         "control": {
             "scope": REMOTE_LIVE_CONTROL_SCOPE,
             "colors": [{"id": key, "label": live_override_color_label(key)} for key in MANUAL_COLOR_PRESETS],
             "phrases": [{"id": key, "label": label} for key, label in AUTO_SHOW_PHRASE_OVERRIDES.items() if key != "none"],
             "energies": [{"id": key, "label": live_override_energy_label(key)} for key in ("low", "mid", "high")],
-            "momentary_effects": [effect for effect in _remote_live_effect_capabilities(dmx_state) if effect["kind"] == "momentary"],
-            "cue_shots": [effect for effect in _remote_live_effect_capabilities(dmx_state) if effect["kind"] == "one_shot"],
+            "momentary_effects": [effect for effect in effect_capabilities if effect["kind"] == "momentary"],
+            "cue_shots": [effect for effect in effect_capabilities if effect["kind"] == "one_shot"],
             "momentary_lease_seconds": REMOTE_MOMENTARY_LEASE_SECONDS,
         },
     }

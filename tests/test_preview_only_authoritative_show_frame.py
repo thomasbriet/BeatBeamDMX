@@ -178,9 +178,11 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertTrue(first["render_active"])
         self.assertEqual(1, first["render_frame_sequence"])
         self.assertIsNotNone(first["last_rendered"])
+        self.assertEqual(first["values"], first["rendered_final_values"])
         self.assertEqual(2, second["render_frame_sequence"])
         self.assertGreaterEqual(second["last_rendered"], first["last_rendered"])
         self.assertIsNone(second["last_sent"])
+        self.assertTrue(second["rendered_final_values"])
 
     def test_disconnected_tick_runs_each_authoritative_stage_once_without_send(self):
         controller, _ = self.controller()
@@ -256,7 +258,7 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertEqual(controller.current_values, dmx.sent[0])
         self.assertIsNotNone(controller.last_sent)
 
-    def test_every_remote_effect_reaches_its_existing_renderer_route(self):
+    def test_every_remote_effect_reaches_its_existing_renderer_route_without_physical_dmx(self):
         controller, transport = self.controller()
         controller.config["slots"]["par_2"] = copy.deepcopy(controller.config["slots"]["par"])
         controller.config["slots"]["par_2"]["address"] = 17
@@ -288,6 +290,62 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
                     slot_id, controller.config["slots"][slot_id], osc, auto_show, full_config=controller.config
                 )
                 self.assertEqual(cue_id, rendered["_one_shot_cue_id"])
+
+    def test_manual_colors_render_authoritative_offline_output_without_dmx(self):
+        controller, _ = self.controller()
+        rendered = {}
+        with patch("beatbeam_app.time.time", return_value=300.0):
+            for color in ("red", "blue", "yellow", "cyan", "none"):
+                auto_show = dict(controller.config["auto_show"])
+                auto_show["override_color"] = color
+                controller.update_config({"auto_show": auto_show})
+                state = controller.state()
+                self.assertFalse(state["connected"])
+                self.assertIsNone(state["last_sent"])
+                self.assertTrue(state["rendered_final_values"])
+                rendered[color] = dict(state["rendered_final_values"])
+        self.assertNotEqual(rendered["red"], rendered["blue"])
+        self.assertNotEqual(rendered["yellow"], rendered["cyan"])
+        self.assertNotEqual(rendered["cyan"], rendered["none"])
+
+    def test_hold_effects_and_cue_shots_render_and_release_without_dmx(self):
+        controller, _ = self.controller()
+        with patch("beatbeam_app.time.time", return_value=300.0):
+            baseline_auto_show = dict(controller.config["auto_show"])
+            controller.update_config({"auto_show": baseline_auto_show})
+            baseline = dict(controller.current_final_values)
+            for field in (
+                "override_manual_strobe", "override_audience_sweep", "override_all_on",
+                "override_par_chase", "override_par_snake",
+            ):
+                with self.subTest(hold=field):
+                    pressed = dict(baseline_auto_show); pressed[field] = True
+                    controller.update_config({"auto_show": pressed})
+                    self.assertNotEqual(baseline, controller.current_final_values)
+                    pressed_frame = dict(controller.current_final_values)
+                    released = dict(baseline_auto_show); released[field] = False
+                    controller.update_config({"auto_show": released})
+                    self.assertFalse(controller.current_auto_show[field])
+                    self.assertNotEqual(pressed_frame, controller.current_final_values)
+                    self.assertIsNone(controller.state()["last_sent"])
+            for cue in ("audience_riser", "white_hit", "color_burst", "snap_fan", "mirror_bounce", "par_chase_burst"):
+                with self.subTest(cue=cue):
+                    controller.trigger_one_shot_cue(cue)
+                    self.assertEqual(cue, controller.active_one_shot_cue["id"])
+                    self.assertTrue(controller.current_final_values)
+                    self.assertIsNone(controller.state()["last_sent"])
+
+    def test_offline_blackout_zeros_final_output_then_rendering_resumes(self):
+        controller, _ = self.controller()
+        with patch("beatbeam_app.time.time", return_value=300.0):
+            controller.update_config({"auto_show": dict(controller.config["auto_show"])})
+            self.assertTrue(controller.current_final_values)
+            controller.blackout()
+            state = controller.state()
+            self.assertEqual({}, state["rendered_final_values"])
+            self.assertIsNone(state["last_sent"])
+            controller.update_config({"blackout_active": False})
+            self.assertTrue(controller.state()["rendered_final_values"])
 
     def test_connect_disconnect_and_reconnect_do_not_duplicate_the_existing_engine(self):
         controller, _ = self.controller()

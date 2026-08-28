@@ -13,6 +13,7 @@ struct RemoteLiveStateV2: Decodable, Equatable {
     let musicalState: RemoteMusicalState
     let dmx: RemoteDmxHealth
     let fixtures: [RemoteFixtureGroup]
+    let output: RemoteOutputPreview?
     let overrides: RemoteOverrideState
     let warnings: [RemoteWarning]
     let control: RemoteControlCapabilities
@@ -43,7 +44,16 @@ struct RemoteRme: Decodable, Equatable { let type: String?; let temporalKind: St
 struct RemoteEventEnvelope: Decodable, Equatable { let active: Bool; let phase: String?; let progress: Double?; let eventType: String? }
 struct RemoteDmxHealth: Decodable, Equatable {
     let connected: Bool; let deviceName: String?; let rendererHealthy: Bool; let rendererActive: Bool
-    let frameSequence: Int?; let lastError: String?; let dispatchFailures: Int?; let physicalOutputAvailable: Bool
+    let frameSequence: Int?; let lastError: String?; let dispatchFailures: Int?; let renderedOutputAvailable: Bool?; let physicalOutputAvailable: Bool
+}
+struct RemoteOutputPreview: Decodable, Equatable {
+    let renderedAvailable: Bool; let physicalOutputAvailable: Bool; let blackout: Bool
+    let frameSequence: Int?; let fixtures: [RemoteOutputFixture]
+}
+struct RemoteOutputFixture: Decodable, Equatable, Identifiable {
+    let id: String; let label: String; let role: String; let active: Bool
+    let dimmer: Int; let red: Int; let green: Int; let blue: Int; let white: Int; let strobe: Int
+    let pan: Int?; let tilt: Int?
 }
 struct RemoteFixtureGroup: Decodable, Equatable, Identifiable {
     let id: String; let label: String; let role: String; let active: Bool; let enabledSlots: Int

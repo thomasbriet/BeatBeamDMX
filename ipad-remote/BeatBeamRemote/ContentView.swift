@@ -236,6 +236,8 @@ private struct LiveControlScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     liveHeader
+                    if !state.dmx.connected { offlineDispatchNotice }
+                    if let output = state.output { OutputPreviewCard(output: output) }
                     HStack(spacing: 12) {
                         blackoutControl
                         Button("RELEASE ALL") { store.perform("release_all") }
@@ -276,6 +278,17 @@ private struct LiveControlScreen: View {
                 Button("PAIR / UPGRADE") { store.forgetConnection() }.font(.caption.bold()).buttonStyle(.bordered)
             }}
         }
+    }
+
+    private var offlineDispatchNotice: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "cable.connector.slash")
+            Text("DMX DISCONNECTED — Physical output is unavailable. Controls remain enabled for rendered preview and test.")
+        }
+        .font(.caption.bold()).foregroundStyle(.orange).padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.orange.opacity(0.12)).clipShape(RoundedRectangle(cornerRadius: 10))
+        .accessibilityLabel("DMX disconnected. Physical output unavailable. Controls remain enabled for preview and test.")
     }
 
     private var blackoutControl: some View {
@@ -348,6 +361,66 @@ private struct OverridesControlScreen: View {
             RemoteCard(title: "MOMENTARY EFFECTS") { LazyVGrid(columns: [GridItem(.adaptive(minimum: 150))], spacing: 10) { ForEach(state.control.momentaryEffects.filter(\.isAvailable)) { MomentaryEffectPad(effect: $0, active: state.overrides.momentaryEffects.contains($0.id)).environmentObject(store) } } }
             RemoteCard(title: "CUE SHOTS") { LazyVGrid(columns: [GridItem(.adaptive(minimum: 145))], spacing: 10) { ForEach(state.control.cueShots.filter(\.isAvailable)) { cue in Button(cue.label) { store.perform("trigger_cue", value: cue.id) }.buttonStyle(LiveActionStyle(tint: .indigo)) } } }
         }.padding(16).frame(maxWidth: 1000, alignment: .leading) }
+    }
+}
+
+private struct OutputPreviewCard: View {
+    let output: RemoteOutputPreview
+
+    var body: some View {
+        RemoteCard(title: "OUTPUT PREVIEW") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text(output.blackout ? "BLACKOUT — OUTPUT ZERO" : "AUTHORITATIVE RENDERED OUTPUT")
+                        .font(.caption.bold().monospaced())
+                        .foregroundStyle(output.blackout ? RemoteTheme.danger : RemoteTheme.accent)
+                    Spacer()
+                    Text(output.physicalOutputAvailable ? "DMX DISPATCH AVAILABLE" : "PREVIEW / TEST ONLY")
+                        .font(.caption2.bold().monospaced())
+                        .foregroundStyle(output.physicalOutputAvailable ? .green : .orange)
+                }
+                if !output.renderedAvailable {
+                    Text("Renderer unavailable — output frame cannot be projected.")
+                        .font(.caption).foregroundStyle(.orange)
+                } else if output.fixtures.isEmpty {
+                    Text("No enabled fixtures in the current configuration.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 116), spacing: 9)], spacing: 9) {
+                        ForEach(output.fixtures) { fixture in fixtureTile(fixture) }
+                    }
+                }
+            }
+        }
+        .accessibilityLabel(output.blackout ? "Output preview: blackout, all output zero" : "Output preview: authoritative rendered fixture output")
+    }
+
+    private func fixtureTile(_ fixture: RemoteOutputFixture) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(outputColor(fixture))
+                .frame(height: 28)
+                .overlay { Text(fixture.active ? "ACTIVE" : "BLACK").font(.caption2.bold().monospaced()).foregroundStyle(.white) }
+            Text(fixture.label).font(.caption.bold()).foregroundStyle(.white).lineLimit(1)
+            Text("RGBW \(fixture.red)/\(fixture.green)/\(fixture.blue)/\(fixture.white)")
+                .font(.caption2.monospaced()).foregroundStyle(.secondary)
+            Text("DIM \(fixture.dimmer)  STR \(fixture.strobe)")
+                .font(.caption2.monospaced()).foregroundStyle(.secondary)
+            if fixture.role == "moving" {
+                Text("PAN \(fixture.pan.map(String.init) ?? "—")  TILT \(fixture.tilt.map(String.init) ?? "—")")
+                    .font(.caption2.monospaced()).foregroundStyle(.secondary)
+            }
+        }
+        .padding(9).frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.06)).clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func outputColor(_ fixture: RemoteOutputFixture) -> Color {
+        let white = Double(fixture.white)
+        let red = min(255, Double(fixture.red) + white) / 255
+        let green = min(255, Double(fixture.green) + white) / 255
+        let blue = min(255, Double(fixture.blue) + white) / 255
+        return Color(red: red, green: green, blue: blue).opacity(max(0.18, Double(fixture.dimmer) / 255))
     }
 }
 

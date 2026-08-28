@@ -28,6 +28,15 @@ def fixture_state(*, mode="DYNAMIC_COMPOSER_ENABLED", source="dynamic_composer",
             "renderer_health": {"active": True, "healthy": renderer_healthy,
                                 "error": None if renderer_healthy else "renderer fault",
                                 "render_frame_sequence": 42},
+            # This is the authoritative post-authority frame.  It exists even
+            # when the Enttec sink is deliberately disconnected.
+            "rendered_final_values": {
+                1: 66, 3: 77, 6: 180, 7: 12, 10: 201, 11: 20, 12: 10, 13: 0,
+                16: 80, 18: 90, 21: 160, 25: 30, 26: 190, 27: 40, 28: 0,
+                31: 210, 32: 111, 33: 22, 34: 33, 35: 0, 36: 9,
+                39: 200, 40: 44, 41: 55, 42: 66, 43: 0, 44: 8,
+                47: 70, 48: 80, 49: 90,
+            },
             "playback": {"dmx_dispatch_failures": 0},
             "production_show_selector": {
                 "production_show_mode": mode, "production_show_source": source,
@@ -57,11 +66,11 @@ def fixture_state(*, mode="DYNAMIC_COMPOSER_ENABLED", source="dynamic_composer",
             },
             "slot_order": ["moving", "moving_2", "par", "par_2", "wash"],
             "slots": {
-                "moving": {"enabled": True, "group": "movers_a", "fixture": "shehds_led_wash_7x12w_rgbw_moving_head", "mode": "15ch", "label": "Moving"},
-                "moving_2": {"enabled": True, "group": "movers_a", "fixture": "shehds_led_wash_7x12w_rgbw_moving_head", "mode": "15ch", "label": "Moving 2"},
-                "par": {"enabled": True, "group": "pars", "fixture": "shehds_flat_par_12x3w_rgbw", "mode": "8ch", "label": "PAR"},
-                "par_2": {"enabled": True, "group": "pars", "fixture": "shehds_flat_par_12x3w_rgbw", "mode": "8ch", "label": "PAR 2"},
-                "wash": {"enabled": True, "group": "washes", "fixture": "uking_zq06016", "mode": "P001", "label": "Wash"},
+                "moving": {"enabled": True, "group": "movers_a", "fixture": "shehds_led_wash_7x12w_rgbw_moving_head", "mode": "15ch", "label": "Moving", "address": 1},
+                "moving_2": {"enabled": True, "group": "movers_a", "fixture": "shehds_led_wash_7x12w_rgbw_moving_head", "mode": "15ch", "label": "Moving 2", "address": 16},
+                "par": {"enabled": True, "group": "pars", "fixture": "shehds_flat_par_12x3w_rgbw", "mode": "8ch", "label": "PAR", "address": 31},
+                "par_2": {"enabled": True, "group": "pars", "fixture": "shehds_flat_par_12x3w_rgbw", "mode": "8ch", "label": "PAR 2", "address": 39},
+                "wash": {"enabled": True, "group": "washes", "fixture": "uking_zq06016", "mode": "P001", "label": "Wash", "address": 47},
             },
         },
     }
@@ -129,7 +138,7 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         state["dmx"]["preview_auto_show"]["continuous_musical_state"]["energy_trajectory"] = "sideways"
         self.assertEqual("unknown", self.project(state)["musical_state"]["energy_trajectory"])
 
-    def test_effect_capabilities_follow_actual_fixture_modes_and_output_health(self):
+    def test_effect_capabilities_follow_fixture_modes_not_physical_dispatch(self):
         state = fixture_state()["dmx"]
         effects = {effect["id"]: effect for effect in beatbeam_app._remote_live_effect_capabilities(state)}
         self.assertTrue(all(effect["available"] for effect in effects.values()))
@@ -143,10 +152,33 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         self.assertFalse(unavailable["par_chase"]["temporarily_unavailable"])
 
         disconnected = fixture_state(connected=False)["dmx"]
-        temporary = {effect["id"]: effect for effect in beatbeam_app._remote_live_effect_capabilities(disconnected)}
+        offline = {effect["id"]: effect for effect in beatbeam_app._remote_live_effect_capabilities(disconnected)}
+        self.assertTrue(offline["white_hit"]["available"])
+        self.assertFalse(offline["white_hit"]["temporarily_unavailable"])
+        self.assertIsNone(offline["white_hit"]["reason_if_unavailable"])
+
+        renderer_down = fixture_state(renderer_healthy=False)["dmx"]
+        temporary = {effect["id"]: effect for effect in beatbeam_app._remote_live_effect_capabilities(renderer_down)}
         self.assertFalse(temporary["white_hit"]["available"])
         self.assertTrue(temporary["white_hit"]["temporarily_unavailable"])
-        self.assertIn("DMX output", temporary["white_hit"]["reason_if_unavailable"])
+        self.assertIn("Renderer", temporary["white_hit"]["reason_if_unavailable"])
+
+    def test_output_preview_projects_post_authority_frame_while_dmx_is_disconnected(self):
+        payload = self.project(fixture_state(connected=False))
+        self.assertFalse(payload["dmx"]["physical_output_available"])
+        self.assertTrue(payload["dmx"]["rendered_output_available"])
+        self.assertTrue(payload["output"]["rendered_available"])
+        self.assertFalse(payload["output"]["physical_output_available"])
+        self.assertEqual(42, payload["output"]["frame_sequence"])
+        fixtures = {fixture["id"]: fixture for fixture in payload["output"]["fixtures"]}
+        self.assertEqual((201, 20, 10, 180, 12), tuple(fixtures["moving"][key] for key in ("red", "green", "blue", "dimmer", "strobe")))
+        self.assertEqual((111, 22, 33, 210), tuple(fixtures["par"][key] for key in ("red", "green", "blue", "dimmer")))
+
+        blackout = self.project(fixture_state(connected=False, blackout=True))["output"]
+        self.assertTrue(blackout["blackout"])
+        self.assertTrue(all(not fixture["active"] and fixture["dimmer"] == 0
+                            and fixture["red"] == 0 and fixture["green"] == 0 and fixture["blue"] == 0
+                            for fixture in blackout["fixtures"]))
 
     def test_blackout_remains_authoritative_while_remote_state_exposes_it_separately(self):
         state = fixture_state(blackout=True)
