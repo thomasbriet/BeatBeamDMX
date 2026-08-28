@@ -72,7 +72,7 @@ class ProductionShowSelectorTests(unittest.TestCase):
         self.assertFalse(decision["dynamic_composer_active"])
         self.assertEqual("mode_shadow", decision["fallback_reason"])
 
-    def test_enabled_selects_valid_candidate_only_with_exact_generation_and_track(self):
+    def test_enabled_selects_valid_candidate_with_matching_transport_generation_and_track(self):
         dynamic = candidate()
         selected, decision = self.select(dynamic=dynamic)
         self.assertIs(selected, dynamic)
@@ -94,14 +94,14 @@ class ProductionShowSelectorTests(unittest.TestCase):
                 self.assertIs(selected, base)
                 self.assertEqual("manual_override", decision["fallback_reason"])
 
-    def test_track_handoff_generation_and_renderer_gates_are_fail_closed(self):
+    def test_track_handoff_and_renderer_gates_are_fail_closed(self):
         cases = []
         wrong_track = projection(); wrong_track["canonical_track_path"] = "/Music/other.flac"
         cases.append(("track_mismatch", {"source": wrong_track}))
         stale = projection(); stale["availability"] = "available_stale"
         cases.append(("handoff_not_current", {"source": stale}))
-        mismatch = projection(); mismatch["active_track"]["generation"] = 8
-        cases.append(("generation_mismatch", {"source": mismatch}))
+        missing_handoff_generation = projection(); missing_handoff_generation["active_track"]["generation"] = None
+        cases.append(("generation_mismatch", {"source": missing_handoff_generation}))
         cases.append(("generation_mismatch", {"composer_generation": 8}))
         cases.append(("renderer_unhealthy", {"renderer_healthy": False}))
         paused = playback(); paused["playback_state"] = {
@@ -114,6 +114,16 @@ class ProductionShowSelectorTests(unittest.TestCase):
                 selected, decision = self.select(base=base, **kwargs)
                 self.assertIs(selected, base)
                 self.assertEqual(reason, decision["fallback_reason"])
+
+    def test_handoff_and_playback_generations_are_independent_authority_witnesses(self):
+        source = projection()
+        source["active_track"]["generation"] = 22
+        dynamic = candidate()
+        selected, decision = self.select(source=source, dynamic=dynamic, composer_generation=7)
+        self.assertIs(selected, dynamic)
+        self.assertTrue(decision["dynamic_composer_active"])
+        self.assertEqual(7, decision["playback_generation"])
+        self.assertEqual(22, decision["handoff_generation"])
 
     def test_invalid_or_nonfinite_candidate_fails_back_without_partial_selection(self):
         for mutation in (

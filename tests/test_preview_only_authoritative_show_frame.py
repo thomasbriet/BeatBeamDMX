@@ -1,3 +1,4 @@
+import copy
 import json
 import threading
 import tempfile
@@ -5,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from beatbeam_app import DmxController
+from beatbeam_app import DmxController, MANUAL_COLOR_PRESETS
 from show_interpreter_input_adapter import ShowInterpreterEffectiveContext
 
 
@@ -99,6 +100,19 @@ class ProductionAuthorityHandoff(RmeHandoff):
 class ProductionAuthorityBridge(PreviewBridge):
     def __init__(self):
         self.handoff = ProductionAuthorityHandoff()
+
+
+class CrossDomainProductionAuthorityHandoff(ProductionAuthorityHandoff):
+    def project(self, state, include_shadow=False, include_rich_events=False):
+        result = super().project(state, include_shadow, include_rich_events)
+        if result:
+            result["active_track"]["generation"] = 22
+        return result
+
+
+class CrossDomainProductionAuthorityBridge(PreviewBridge):
+    def __init__(self):
+        self.handoff = CrossDomainProductionAuthorityHandoff()
 
 
 class ArrivalEnvelopeHandoff(RmeHandoff):
@@ -304,6 +318,54 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertEqual("existing_autoshow", decision["production_show_source"])
         self.assertEqual("mode_baseline", decision["fallback_reason"])
         self.assertEqual(expected, controller.current_values)
+
+    def test_dynamic_par_trace_has_eight_beat_congruent_final_dmx_frames(self):
+        transport = PreviewTransport()
+        transport.state["_playback_generation"] = 10
+        controller = DmxController(transport, CrossDomainProductionAuthorityBridge())
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.config["production_show_mode"] = "DYNAMIC_COMPOSER_ENABLED"
+        controller.render_active = controller.connected = controller.running = True
+        dmx = FakeDmx()
+        controller.dmx = dmx
+        original_evaluation = controller._preview_auto_show_evaluation
+
+        def alternating_par_candidate(*args, **kwargs):
+            candidate, projection = original_evaluation(*args, **kwargs)
+            candidate = copy.deepcopy(candidate)
+            candidate["selected_primitives"]["par"]["color_animation"] = "alternate"
+            candidate["composition_signature"]["color_animation"] = "alternate"
+            return candidate, projection
+
+        controller._preview_auto_show_evaluation = alternating_par_candidate
+        previews = []
+        for offset, beat in enumerate(range(24, 32)):
+            transport.state["beat_value"] = float(beat)
+            transport.state["time_seconds"] = 12.0 + offset * .48
+            with patch("beatbeam_app.time.time", return_value=300.0 + offset):
+                self.tick(controller)
+            previews.append(controller.state()["slot_previews"]["par"])
+
+        state = controller.state()
+        trace = state["physical_dmx_trace"]
+        self.assertEqual("dynamic_composer", state["production_show_selector"]["production_show_source"])
+        self.assertEqual(8, len(trace))
+        self.assertEqual(8, len(dmx.sent))
+        self.assertGreater(len({(item["red"], item["green"], item["blue"]) for item in previews}), 1)
+        self.assertGreater(len({tuple(item["par_fixtures"][0]["composer_desired_rgbw"][:3]) for item in trace}), 1)
+        for frame, sent in zip(trace, dmx.sent):
+            self.assertEqual("dmx_dispatch", frame["output_state"])
+            self.assertEqual("alternate", frame["par_color_animation"])
+            channels = frame["par_fixtures"][0]["channels"]
+            desired = tuple(frame["par_fixtures"][0]["composer_desired_rgbw"])
+            self.assertIn(desired, MANUAL_COLOR_PRESETS.values())
+            for component in ("red", "green", "blue"):
+                channel = channels[component]["channel"]
+                self.assertEqual(channels[component]["current_value"], channels[component]["final_dmx_value"])
+                self.assertEqual(channels[component]["final_dmx_value"], sent[channel])
+                self.assertEqual(channels[component]["final_dmx_value"], desired[("red", "green", "blue").index(component)])
+            self.assertEqual(channels["dimmer"]["current_value"], channels["dimmer"]["final_dmx_value"])
 
     def test_new_controller_restart_defaults_to_persisted_baseline_mode(self):
         first, _ = self.controller()
@@ -542,8 +604,14 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertEqual("center_out_build", differential["selected_primitives"]["wash"]["wash_cue"])
         self.assertIn("Dynamic Composer • RME Build", differential["preview_cue"])
         self.assertNotEqual(baseline_previews["head"]["target_pan"], state["slot_previews"]["head"]["target_pan"])
-        self.assertNotEqual(baseline_previews["par"]["blue"], state["slot_previews"]["par"]["blue"])
-        self.assertNotEqual(baseline_previews["wall_wash"]["blue"], state["slot_previews"]["wall_wash"]["blue"])
+        self.assertNotEqual(
+            tuple(baseline_previews["par"][channel] for channel in ("red", "green", "blue")),
+            tuple(state["slot_previews"]["par"][channel] for channel in ("red", "green", "blue")),
+        )
+        self.assertNotEqual(
+            tuple(baseline_previews["wall_wash"][channel] for channel in ("red", "green", "blue")),
+            tuple(state["slot_previews"]["wall_wash"][channel] for channel in ("red", "green", "blue")),
+        )
         self.assertEqual(
             state["slot_previews"]["head"]["target_pan"],
             differential["rendered_preview_slots"]["head"]["target_pan"],

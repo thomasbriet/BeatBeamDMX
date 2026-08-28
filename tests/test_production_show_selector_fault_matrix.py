@@ -63,8 +63,8 @@ class ProductionShowSelectorFaultMatrixTests(unittest.TestCase):
             source["active_track"]["deck"] = 2
             return dynamic, source, transport, base
 
-        def handoff_generation(dynamic, source, transport, base):
-            source["active_track"]["generation"] = 8
+        def missing_handoff_generation(dynamic, source, transport, base):
+            source["active_track"]["generation"] = None
             return dynamic, source, transport, base
 
         def state_mutation(field, value):
@@ -121,7 +121,7 @@ class ProductionShowSelectorFaultMatrixTests(unittest.TestCase):
             ("missing_handoff", "handoff_not_current", missing_handoff, {}),
             ("wrong_track", "track_mismatch", change("source.canonical_track_path", "/Music/wrong.flac"), {}),
             ("wrong_deck", "deck_mismatch", wrong_deck, {}),
-            ("generation_mismatch", "generation_mismatch", handoff_generation, {}),
+            ("generation_mismatch", "generation_mismatch", missing_handoff_generation, {}),
             ("playback_stopped", "transport_not_advancing", change("transport.playing", False), {}),
             ("transport_stale", "transport_stale", change("transport.stale", True), {}),
             ("state_missing", "continuous_state_missing", state_mutation("observation_id", ""), {}),

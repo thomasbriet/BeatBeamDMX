@@ -237,7 +237,13 @@ def _eligibility_reason(baseline, candidate, projection, playback, playback_gene
     if (playback_deck is None) != (active_deck is None) \
             or playback_deck is not None and playback_deck != active_deck:
         return "deck_mismatch"
-    if playback_generation is None or handoff_generation != playback_generation \
+    # `active_track.generation` belongs to the bridge/prewarm handoff lifecycle,
+    # whereas `_playback_generation` belongs to BeatBeam's transport lifecycle.
+    # Both are required freshness witnesses, but they intentionally use separate
+    # counters and therefore must never be compared for numeric equality.
+    # Track path, deck, ready status and availability above establish that both
+    # witnesses describe the same authoritative playback.
+    if playback_generation is None or handoff_generation is None \
             or composer_generation != playback_generation:
         return "generation_mismatch"
     candidate_context = candidate.get("rme_preview") if isinstance(candidate, dict) else None

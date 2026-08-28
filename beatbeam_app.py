@@ -95,6 +95,7 @@ PLAYBACK_DISCONTINUITY_MINIMUM_MS = 750.0
 DEFAULT_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS = 100
 MINIMUM_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS = 40
 MAXIMUM_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS = 500
+PHYSICAL_DMX_TRACE_HISTORY_MAX_BEATS = 16
 # A state refresh can arrive just after a scheduled downbeat. Keep that
 # already-due plan briefly so the refresh cannot replace it with the following
 # bar before the scheduler thread has dispatched it.
@@ -1729,8 +1730,7 @@ WALL_WASH_CUES = {
     },
 }
 
-LIVE_OVERRIDE_COLORS = {
-    "none": None,
+MANUAL_COLOR_PRESETS = {
     "red": (255, 0, 0, 0),
     "yellow": (255, 220, 0, 0),
     "green": (0, 255, 0, 0),
@@ -1741,7 +1741,35 @@ LIVE_OVERRIDE_COLORS = {
     "orange": (255, 120, 0, 0),
     "blue": (0, 80, 255, 0),
     "white": (255, 255, 255, 255),
+}
+
+# Live Manual is the single physical color vocabulary. `rainbow` remains a
+# scheduler over these exact presets; it is deliberately not a color value.
+LIVE_OVERRIDE_COLORS = {
+    "none": None,
+    **MANUAL_COLOR_PRESETS,
     "rainbow": None,
+}
+
+# Existing palette identities remain musical selection metadata. Their physical
+# realization is always one or more exact Manual presets, never generated RGB.
+AUTO_SHOW_MANUAL_PRESET_PALETTES = {
+    "yellow_blue": ("yellow", "blue", "white"),
+    "magenta_cyan": ("pink", "cyan", "purple"),
+    "amber_teal": ("orange", "cyan", "yellow"),
+    "amber_violet": ("orange", "purple", "yellow"),
+    "teal_orange": ("cyan", "orange", "yellow"),
+    "violet_lime": ("purple", "lime", "white"),
+    "ice_fire": ("cyan", "red", "white"),
+    "rose_mint": ("pink", "green", "white"),
+    "cobalt_amber": ("blue", "orange", "yellow"),
+    "ruby_lime": ("red", "lime", "yellow"),
+    "lilac_gold": ("purple", "yellow", "white"),
+    "blue_amber": ("blue", "orange", "yellow"),
+    "purple_gold": ("purple", "yellow", "white"),
+    "deep_blue_white": ("blue", "white", "cyan"),
+    "red_white": ("red", "white", "yellow"),
+    "pink_blue": ("pink", "blue", "white"),
 }
 
 AUTO_SHOW_STYLES = {
@@ -6194,6 +6222,25 @@ def auto_show_color_profile(name):
     return AUTO_SHOW_COLOR_PROFILES.get(name, AUTO_SHOW_COLOR_PROFILES["yellow_blue"])
 
 
+def manual_color_preset_rgbw(name):
+    """Resolve only an operator-visible Manual color; unknown values fail closed."""
+    return MANUAL_COLOR_PRESETS.get(str(name or "").strip().lower())
+
+
+def manual_color_preset_name_for_rgbw(rgbw):
+    try:
+        value = tuple(int(component) for component in rgbw)
+    except (TypeError, ValueError):
+        return None
+    return next((name.upper() for name, preset in MANUAL_COLOR_PRESETS.items() if preset == value), None)
+
+
+def manual_color_preset_names_for_palette(name):
+    return AUTO_SHOW_MANUAL_PRESET_PALETTES.get(
+        str(name or "").strip().lower(), AUTO_SHOW_MANUAL_PRESET_PALETTES["yellow_blue"]
+    )
+
+
 def osc_track_identity(osc):
     title = str(osc.get("track_title") or "").strip()
     artist = str(osc.get("track_artist") or "").strip()
@@ -10006,6 +10053,8 @@ class DmxController:
         self.last_rendered = None
         self.current_values = {}
         self.current_slot_previews = {}
+        self.physical_dmx_trace_history = deque(maxlen=PHYSICAL_DMX_TRACE_HISTORY_MAX_BEATS)
+        self._physical_dmx_trace_key = None
         self.current_auto_show = None
         self.current_preview_auto_show = None
         self.preview_pulse_test_mode = "OFF"
@@ -10390,6 +10439,83 @@ class DmxController:
             dispatched_at = playback_system_monotonic_time()
             dmx.send(values)
             return dispatched_at
+
+    def _record_physical_dmx_trace(self, config, osc, auto_show, decision,
+                                   current_values, final_values, output_state):
+        """Keep bounded, read-only evidence of final PAR DMX RGBW bytes."""
+        beat_value = osc.get("beat_value")
+        try:
+            beat_marker = math.floor(float(beat_value))
+        except (TypeError, ValueError):
+            beat_marker = None
+        trace_key = (
+            beat_marker,
+            decision.get("production_show_source"),
+            bool(decision.get("manual_override_active")),
+        )
+        par_fixtures = []
+        for slot_id in config.get("slot_order", []):
+            slot = (config.get("slots") or {}).get(slot_id) or {}
+            if not slot.get("enabled") or self._role_for_slot(slot) != "par":
+                continue
+            fixture = find_fixture(FIXTURE_LIBRARY, slot["fixture"])
+            mode = find_mode(fixture, slot["mode"])
+            address = int(slot["address"])
+            slot_context = self._slot_context(config, slot_id, slot)
+            composer_desired_rgbw = self._dynamic_preview_palette_rgbw(slot_context, auto_show)
+            channels = {}
+            for channel in mode.get("channels", []):
+                component = channel.get("component")
+                channel_type = channel.get("type")
+                if channel_type == "intensity":
+                    name = "dimmer"
+                elif channel_type == "color" and component in {"red", "green", "blue", "white"}:
+                    name = component
+                elif channel_type in {"strobe", "program", "speed"}:
+                    name = channel_type
+                else:
+                    continue
+                absolute = address + int(channel["offset"]) - 1
+                channels[name] = {
+                    "channel": absolute,
+                    "current_value": current_values.get(absolute),
+                    "final_dmx_value": final_values.get(absolute),
+                }
+            par_fixtures.append({
+                "slot_id": slot_id,
+                "fixture": fixture["id"],
+                "mode": mode["name"],
+                "address": address,
+                "composer_desired_rgbw": list(composer_desired_rgbw)
+                    if composer_desired_rgbw is not None else None,
+                "composer_desired_preset": manual_color_preset_name_for_rgbw(composer_desired_rgbw),
+                "physical_rgbw_preset": manual_color_preset_name_for_rgbw(tuple(
+                    final_values.get(channels.get(component, {}).get("channel"))
+                    for component in ("red", "green", "blue", "white")
+                )),
+                "channels": channels,
+            })
+        primitive = ((auto_show.get("selected_primitives") or {}).get("par") or {})
+        trace = {
+            "render_frame_sequence": self.render_frame_sequence,
+            "beat_value": beat_value,
+            "beat_marker": beat_marker,
+            "output_state": output_state,
+            "production_show_source": decision.get("production_show_source"),
+            "fallback_reason": decision.get("fallback_reason"),
+            "manual_override_active": bool(decision.get("manual_override_active")),
+            "par_fixture_group_intent": dict(
+                (auto_show.get("fixture_group_intents") or {}).get("par") or {}
+            ),
+            "par_primitive": dict(primitive),
+            "par_color_animation": primitive.get("color_animation"),
+            "par_fixtures": par_fixtures,
+        }
+        if self.physical_dmx_trace_history and self._physical_dmx_trace_key == trace_key:
+            self.physical_dmx_trace_history[-1] = trace
+        else:
+            self.physical_dmx_trace_history.append(trace)
+            self._physical_dmx_trace_key = trace_key
 
     def _dispatch_virtualdj_beat_pulse(self, plan, generation, is_current):
         if not is_current(plan, generation):
@@ -11474,6 +11600,7 @@ class DmxController:
                     for slot_id, slot_config in config["slots"].items()
                 },
                 "slot_previews": slot_previews,
+                "physical_dmx_trace": list(self.physical_dmx_trace_history),
                 "conflicts": list(self.conflicts),
                 "values": values,
                 "developer_virtualdj_beat_pulse_test": self.virtualdj_beat_pulse_test_state(),
@@ -12312,6 +12439,21 @@ class DmxController:
         return rgbw
 
     def _auto_show_rgbw_for_slot(self, base_rgbw, slot_context, auto_show):
+        """Select one exact Manual preset for every Auto Show physical frame."""
+        dynamic_rgbw = self._dynamic_preview_palette_rgbw(slot_context, auto_show)
+        if dynamic_rgbw is not None:
+            return dynamic_rgbw
+        palette = manual_color_preset_names_for_palette(auto_show.get("color_profile_name"))
+        beat_value = float(auto_show.get("beat_value", auto_show.get("beat_step", 1)) or 1)
+        role_bias = {"moving": 0, "par": 1, "wash": 2, "static": 0}.get(
+            slot_context.get("role", "static"), 0
+        )
+        member_index = int(slot_context.get("member_index", 0))
+        group_index = int(slot_context.get("group_index", 0))
+        index = (int(math.floor(beat_value)) + member_index + group_index + role_bias) % len(palette)
+        return manual_color_preset_rgbw(palette[index])
+
+    def _legacy_auto_show_rgbw_for_slot(self, base_rgbw, slot_context, auto_show):
         role = slot_context["role"]
         dynamic_rgbw = self._dynamic_preview_palette_rgbw(slot_context, auto_show)
         if dynamic_rgbw is not None:
@@ -12750,31 +12892,30 @@ class DmxController:
         role = slot_context.get("role", "static")
         primitive = (auto_show.get("selected_primitives") or {}).get(role) or {}
         palette_name = primitive.get("palette") if isinstance(primitive, dict) else None
-        if not isinstance(palette_name, str) or palette_name not in AUTO_SHOW_COLOR_PROFILES:
+        if not isinstance(palette_name, str) or palette_name not in AUTO_SHOW_MANUAL_PRESET_PALETTES:
             return None
-        profile = auto_show_color_profile(palette_name)
         intent = (auto_show.get("fixture_group_intents") or {}).get(role) or {}
         rate = clamp_unit(intent.get("color_change_rate", 0.0))
         group_index = int(slot_context.get("group_index", 0))
         member_index = int(slot_context.get("member_index", 0))
-        palette = (profile["primary"], profile["secondary"], profile["accent"])
+        palette = manual_color_preset_names_for_palette(palette_name)
         parameters = primitive.get("palette_parameters") if isinstance(primitive, dict) else None
         parameters = parameters if isinstance(parameters, dict) else {}
         relationship = str(parameters.get("relationship", "complementary"))
         if relationship in {"analogous", "adjacent_hue"}:
-            palette = (profile["primary"], profile["accent"], profile["primary"])
+            palette = (palette[0], palette[2], palette[0])
         elif relationship in {"split_complementary", "two_color_split"}:
-            palette = (profile["primary"], profile["accent"], profile["secondary"])
+            palette = (palette[0], palette[2], palette[1])
         elif relationship in {"monochromatic", "mono"}:
-            palette = (profile["primary"], profile["primary"], profile["accent"])
+            palette = (palette[0], palette[0], palette[2])
         elif relationship == "warm_pair":
-            palette = (profile["primary"], profile["accent"], profile["secondary"])
+            palette = (palette[0], palette[2], palette[1])
         elif relationship == "cool_pair":
-            palette = (profile["secondary"], profile["primary"], profile["accent"])
+            palette = (palette[1], palette[0], palette[2])
         elif relationship == "triad_bright":
-            palette = (profile["primary"], profile["secondary"], profile["accent"])
+            palette = (palette[0], palette[1], palette[2])
         elif relationship in {"complementary", "complementary_bright", "warm_cool_contrast"}:
-            palette = (profile["primary"], profile["secondary"], profile["primary"])
+            palette = (palette[0], palette[1], palette[0])
         try:
             palette_phase_offset = max(0, min(3, int(parameters.get("phase_offset", 0))))
             balance = max(.32, min(.68, float(parameters.get("balance", .50))))
@@ -12805,8 +12946,7 @@ class DmxController:
             index = (group_index + role_bias) % 2
         else:  # group_split and a malformed value both remain a safe group split.
             index = (group_index + role_bias) % len(palette)
-        color = palette[index]
-        return normalize_rgbw_peak(color, peak_target=255, white_cap=0, minimum_peak=96)
+        return manual_color_preset_rgbw(palette[index])
 
     def _wall_wash_zone_rgb_for_slot(self, slot_context, auto_show, osc):
         dynamic_wash = (auto_show.get("selected_primitives") or {}).get("wash") or {}
@@ -15279,10 +15419,12 @@ class DmxController:
         effective["_auto_show_rgbw"] = self._auto_show_rgbw_for_slot(
             base_rgbw, slot_context, auto_show
         )
+        effective["_force_rgbw_override"] = True
+        # Auto Show colors are per-fixture Manual presets.  Zone gradients are
+        # intentionally not used here because they would synthesize colors
+        # between operator-visible presets.
         if role == "wash":
-            zone_rgb = self._wall_wash_zone_rgb_for_slot(slot_context, auto_show, osc)
-            effective["_auto_show_zone_rgb"] = zone_rgb
-            effective["_auto_show_rgbw"] = self._wall_wash_average_rgbw(zone_rgb)
+            effective.pop("_auto_show_zone_rgb", None)
 
         slot_energy = energy + role_profile["energy_bias"]
         slot_energy += float(track_theme.get("energy_bias", 0.0)) * (0.45 if role == "moving" else 0.28)
@@ -16213,6 +16355,10 @@ class DmxController:
                 self.current_slot_previews = slot_previews
                 self.render_frame_sequence += 1
                 self.last_rendered = render_now
+                self._record_physical_dmx_trace(
+                    config, osc, auto_show, production_decision, values, values,
+                    "current_values_ready",
+                )
                 developer_playback_state = self.osc.developer_playback_state()
                 if self.connected and self.running and self.dmx is not None:
                     dmx = self.dmx
@@ -16234,6 +16380,10 @@ class DmxController:
                 ):
                     return False
                 output_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
+                self._record_physical_dmx_trace(
+                    config, osc, self.current_auto_show or {}, self.production_show_decision,
+                    values, output_values, "dmx_dispatch",
+                )
                 self._send_dmx_frame(dmx, output_values)
                 self.error = None
                 self.last_sent = time.time()
