@@ -15,7 +15,7 @@
 | Smart Cue V1 placementreview | `HOLD_HUMAN_REVIEW` | Beoordeel 24 diverse tracks op MIX IN, MAIN, BREAK, MIX OUT en exacte 16/12/8/4-bar aftellingen. | Technische planner/writer-foundation is pass; muzikale plaatsing is niet menselijk geaccepteerd en auto-apply blijft hard uit. |
 | Show Simulator V1 review | `HOLD_USER_REVIEW` | Beoordeel timeline, cue/event/section-jumps en de gesimuleerde 2D/3D Preview Map. | Technische pass is gereed; Simulator heeft hard nul fysieke authority. |
 | VirtualDJ-native SongAnalyzer V1 review | `HOLD_USER_REVIEW` | Beoordeel SongAnalyzer-kolom en Analyze/Reanalyze/Retry als dagelijkse workflow. | Technische live/headless pass is gereed; bredere usabilityreview ontbreekt. |
-| Dynamic Composer advanced effects V2 review | `HOLD_USER_REVIEW` | Beoordeel dimmermotieven, verzadigde paletten, kleur-/participatievariatie en gecontroleerde RETURN-herkenning in Simulator/Preview. | Technische foundation is corpus-, determinisme- en runtime-safe; fysieke output blijft `BASELINE_ONLY`. |
+| Dynamic Composer advanced effects V2 review | `HOLD_USER_REVIEW` | Beoordeel dimmermotieven, verzadigde paletten, kleur-/participatievariatie en gecontroleerde RETURN-herkenning in Beta-productie. | De productie-gate is lokaal persistent `DYNAMIC_COMPOSER_ENABLED`; manual/blackout en de fail-closed `existing_autoshow`-fallback behouden voorrang. |
 
 ## NEXT
 
@@ -23,7 +23,6 @@
 | --- | --- | --- | --- |
 | FILL calibration decision | `BLOCKED_ON_HUMAN_LABELS` | Evalueer de gelabelde set; kies bounded kalibratie, shadow-event-experiment of geen promotie. | NOW/FILL-review. |
 | FILL shadow-event / envelope decision | `BLOCKED_ON_CALIBRATION_EVIDENCE` | Alleen bij aantoonbaar bewijs bepalen of FILL als bounded micro-event mag worden geprojecteerd. | Kalibratiebesluit; geen directe strobe-regel. |
-| Dynamic Composer production decision | `GATED_OFF` | Alleen als aparte milestone beoordelen of promotie verantwoord is. | Alle relevante human/safety-gates; huidige runtime blijft `BASELINE_ONLY`. |
 | Controlled VirtualDJ Smart Cue apply | `BLOCKED_ON_HUMAN_PLACEMENT_REVIEW` | Alleen met expliciete toestemming een write/readback/delete-cyclus op een disposable/testasset uitvoeren. | Smart Cue-human-review; geen normale librarytrack en geen library-wide apply. |
 
 ## LATER
@@ -55,7 +54,8 @@
 - `BEATBEAM_LIVE_SHOW_UX_V2_TECHNICAL_PASS`: Live Show als standaard, aparte Preview/Manual/Advanced, bestaande Preview Map/raw diagnostics behouden en geen wijziging van production authority.
 - `SMART_CUE_PLANNER_V1_TECHNICAL_PASS` en `SMART_CUE_VDJ_WRITER_GATE_OFF_PASS`: deterministic 215-track planning, corpus/reviewpackage, read-only native cue-preflight en exact-identity writer/ownership/verify/rollback foundation; `SMART_CUE_AUTO_APPLY_OFF` live bewezen.
 - `BEATBEAM_SHOW_SIMULATOR_V1_TECHNICAL_PASS`: musical timeline, cue/event/section navigation, isolated previewframes en native 2D/3D Preview Map datasource; 215-track deterministic corpusprojectie en packaged runtime-smoke groen.
-- `DYNAMIC_COMPOSER_ADVANCED_EFFECT_VARIATION_V2_TECHNICAL_PASS`: first-class dimmermotieven, saturated discrete color animation, fixture-participatie en component-aware anti-repeat in Preview/Simulator; 222-track/2.284-section corpus 0 invalid/renderer failures, packaged Beta-smoke groen, production authority onveranderd `BASELINE_ONLY`.
+- `DYNAMIC_COMPOSER_ADVANCED_EFFECT_VARIATION_V2_TECHNICAL_PASS`: first-class dimmermotieven, saturated discrete color animation, fixture-participatie en component-aware anti-repeat; 222-track/2.284-section corpus 0 invalid/renderer failures en packaged Beta-smoke groen. De expliciete productie-enablement staat in het volgende checkpoint.
+- `DYNAMIC_COMPOSER_BETA_PRODUCTION_ENABLEMENT_PASS` (2026-08-28): Beta lokaal persistent op `DYNAMIC_COMPOSER_ENABLED`; live smoke 161 Dynamic Composer-frames/8 s, geen nieuwe dispatch failures en exacte composer-intent → `current_values` → RGB-DMX presetcongruentie. Baseline-fallback en manual/blackout-precedence beschikbaar.
 - FILL micro-evidence/tooling en het 36-item blinded reviewpakket.
 
 ## LEGACY / CLOSED

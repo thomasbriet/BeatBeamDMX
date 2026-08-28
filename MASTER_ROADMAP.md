@@ -2601,6 +2601,21 @@ PASS`; `SHOWINTENT_BOUNDED_PROMOTION_DECISION =
 READY_FOR_BOUNDED_ENABLE_DESIGN`. Een mogelijk bounded-enable ontwerp blijft
 een afzonderlijke expliciete vervolgbeslissing.
 
+### Dynamic Composer Beta Production Enablement
+
+`GEREED — DYNAMIC_COMPOSER_BETA_PRODUCTION_ENABLEMENT_PASS` (2026-08-28).
+
+Na de expliciete productiepromotie draait de geïnstalleerde Beta persistent met
+`production_show_mode = DYNAMIC_COMPOSER_ENABLED`. De selector behoudt de
+bestaande exacte track/deck/generation/readiness-, transport- en
+rendererhealth-guards; unknown, stale, mismatch, lifecycle-discontinuity,
+manual override en blackout kiezen same-frame `existing_autoshow`. De fysieke
+PAR-kleurroute is live bewezen als congruent: composer-intent → production frame
+→ `current_values` → finale RGB-DMX, uitsluitend met exacte handmatige
+presetwaarden. De korte herstelde DMX-smoke registreerde 161 Dynamic
+Composer-frames in 8 s zonder nieuwe dispatch failure. Baseline blijft direct
+beschikbaar als fallback; dit is geen verwijdering van de safety path.
+
 ---
 
 # 5. BeatBeam UI — iPad / live bediening

@@ -15,9 +15,9 @@
 
 ## Current Production State
 
-- Physical output blijft `existing_autoshow -> current_values`.
-- `DYNAMIC_COMPOSER_PRODUCTION_MODE = BASELINE_ONLY`; de selector is technisch geïmplementeerd en fail-closed, maar ENABLED bestaat alleen in pure tests.
-- Dynamic Composer, live intensity, event envelopes en variatie zijn **Preview Map**-functionaliteit en wijzigen geen fysieke DMX-authority.
+- Physical output staat in Beta op `dynamic_composer -> current_values`; `existing_autoshow` blijft de same-frame fail-closed fallback.
+- `DYNAMIC_COMPOSER_PRODUCTION_MODE = DYNAMIC_COMPOSER_ENABLED` is lokaal persistent geactiveerd na bounded live acceptatie. Exacte track/deck/generation/readiness, transport, renderergezondheid, manual override en blackout blijven de selector fail-closed naar baseline sturen.
+- Dynamic Composer, live intensity, event envelopes en variatie voeden daarmee uitsluitend onder deze expliciete productie-gate de bestaande renderer; Preview Map is niet de fysieke authority.
 - Bestaande handmatige veiligheid (phrase/color/energy/strobe, one-shot, chase, snake, all-on, sweep en blackout) blijft downstream van dezelfde bestaande renderer; dit is geen open infrastructuurtaak.
 
 ## Technical PASS
@@ -34,7 +34,8 @@
 - `BEATBEAM_LIVE_SHOW_UX_V2_TECHNICAL_PASS`: de native standaardweergave is nu Live Show met compacte Live/Preview/Manual/Advanced-navigatie. Zij projecteert uitsluitend bestaande typed runtime-state: authoritative playback, decks/readiness, continuous state, intensity, event/envelope, composer/fixture-intent, manual safety en fysieke DMX-status. Raw diagnostics en de bestaande Preview Map zijn behouden; `is_playing` is alleen additief in de bestaande deck-state. Productie blijft `BASELINE_ONLY` en Preview blijft niet-authoritative.
 - `SMART_CUE_PLANNER_V1_TECHNICAL_PASS` en `SMART_CUE_VDJ_WRITER_GATE_OFF_PASS`: 215/215 current analyses leveren deterministisch `smart-cue-plan-v1` zonder audioheranalyse; MIX IN/MAIN/BREAK/MIX OUT en MAIN-countdowns zijn provenance-clean en fail-closed. De bestaande VirtualDJ plugin/bridge exposeert plan-, cue-preflight- en conflictstatus read-only. De writer heeft exact deck/file/content/generation-preflight, managed ownership, verify/rollback en transportguards, maar production apply is hard `SMART_CUE_AUTO_APPLY_OFF`.
 - `BEATBEAM_SHOW_SIMULATOR_V1_TECHNICAL_PASS`: 215 offline tracks, één simulation playhead met section/RME/event/Smart Cue-timeline, deterministic scrub/jumps en geïsoleerde Dynamic Composer previewframes. De bestaande 2D/3D Preview Map consumeert bij Simulator de afzonderlijke `simulation_slot_previews`; fysieke output blijft hard `NONE`.
-- `DYNAMIC_COMPOSER_ADVANCED_EFFECT_VARIATION_V2_TECHNICAL_PASS`: preview/simulator-only V2 voegt een bounded, beat-/bar-gequantiseerde dimmermotiefbank, heldere verzadigde profielpaletten met discrete kleuranimatie, fixture-participatie en component-aware `CompositionHistory` toe. Corpus: 222/222 current tracks, 2.284 secties, 0 invalid candidates/renderer failures; mediane trackdiversiteit is 4 dimmermotieven en 4 participatiepatronen. Productie blijft hard `BASELINE_ONLY`.
+- `DYNAMIC_COMPOSER_ADVANCED_EFFECT_VARIATION_V2_TECHNICAL_PASS`: de foundation voegt een bounded, beat-/bar-gequantiseerde dimmermotiefbank, heldere verzadigde profielpaletten met discrete kleuranimatie, fixture-participatie en component-aware `CompositionHistory` toe. Corpus: 222/222 current tracks, 2.284 secties, 0 invalid candidates/renderer failures; mediane trackdiversiteit is 4 dimmermotieven en 4 participatiepatronen. De expliciete Beta-productie-gate wordt afzonderlijk hieronder vastgelegd.
+- `DYNAMIC_COMPOSER_BETA_PRODUCTION_ENABLEMENT_PASS` (2026-08-28): de geïnstalleerde Beta draait persistent met `DYNAMIC_COMPOSER_ENABLED`. Een live smoke leverde 161 Dynamic Composer-frames in 8 s, geen nieuwe DMX-dispatch-failures en exacte preset-congruentie van composer-intent via `current_values` naar finale RGB-DMX. Bestaande manual- en blackout-precedence en `existing_autoshow` fallback bleven beschikbaar.
 - FILL: pre-native micro-evidence, tooling en geblindeerd reviewpakket zijn gereed; 82 candidates in de 24-track diagnose. Geen FILL-promotie.
 
 ## Human Holds / thuisreview
@@ -48,14 +49,14 @@
 7. **Smart Cues V1:** beoordeel de 24-track thuisreview op praktische MIX IN-runway, juiste MAIN, bruikbare BREAK/MIX OUT en muzikale 16/12/8/4-bar aftellingen. `SMART_CUE_PLACEMENT = HOLD_HUMAN_REVIEW`.
 8. **Show Simulator V1:** beoordeel timeline, navigatie en gesimuleerde 2D/3D Preview Map in de native app. `BEATBEAM_SHOW_SIMULATOR_V1 = HOLD_USER_REVIEW`; dit heeft geen live- of DMX-authority.
 9. **VirtualDJ-native SongAnalyzer V1:** beoordeel dagelijks gebruik van SongAnalyzer-kolom, Analyze/Reanalyze/Retry en lazy browsed/loaded status. De technische live flow is pass; bredere usability blijft `HOLD_USER_REVIEW`.
-10. **Dynamic Composer effects V2:** beoordeel opeenvolgende secties op muzikale dimmervariatie, felle/verzadigde kleuren, gecontroleerde RETURN-herkenning en visuele rust. `DYNAMIC_COMPOSER_ADVANCED_EFFECT_VARIATION_V2 = HOLD_USER_REVIEW`; Simulator/Preview hebben geen fysieke authority.
+10. **Dynamic Composer effects V2:** beoordeel opeenvolgende secties op muzikale dimmervariatie, felle/verzadigde kleuren, gecontroleerde RETURN-herkenning en visuele rust. `DYNAMIC_COMPOSER_ADVANCED_EFFECT_VARIATION_V2 = HOLD_USER_REVIEW`; de Beta-productie-gate is actief, maar manual/blackout en de baseline-fallback behouden voorrang.
 
 ## Active / Next
 
 - Lees en documenteer de openstaande menselijke reviews; geen parameterwijziging op basis van een enkele indruk.
 - Na FILL-labels: kalibratiebesluit op evidence, of expliciet niet promoveren.
 - Na consistente human evidence: afzonderlijke beslissing over shadow-event promotie en eventuele envelope-integratie.
-- Een eventuele Dynamic Composer-production promotion komt pas ná alle expliciete safety- en human gates; dit is geen huidige enablementtaak.
+- Monitor de expliciet geactiveerde Dynamic Composer Beta-productie tijdens regulier gebruik; bij unknown/stale/mismatch/renderer failure/manual/blackout kiest de selector direct `existing_autoshow`.
 - Na voldoende Smart Cue-placementreview: een afzonderlijke `CONTROLLED_VDJ_APPLY`-milestone op een expliciet toegestaan disposable/testasset; geen library-wide apply.
 
 ## Later / Deferred
@@ -70,10 +71,10 @@
 - `FILL_EVIDENCE_PROMISING_MORE_REVIEW_REQUIRED` en `FILL_CALIBRATION = HOLD_HUMAN_LABELS`; FILL is nooit een directe “FILL → strobe”-productregel.
 - `SMART_CUE_PLACEMENT = HOLD_HUMAN_REVIEW` en `SMART_CUE_AUTO_APPLY = OFF`; geen production- of library-wide cuewrites vóór review plus een apart gecontroleerd applybesluit.
 - `MUSICAL_EVENT_ENVELOPE_HUMAN_VISUAL_ACCEPTANCE = HOLD`, `LIVE_INTENSITY_FEEDBACK = HOLD_HUMAN_RETEST`, `PREVIEW_BEAT_PULSE_RENDER_QUALITY = HOLD_HUMAN_RETEST` en `BEATBEAM_LIVE_SHOW_UX_V2 = HOLD_USER_REVIEW`.
-- Unknown, stale, mismatch, invalid state, lifecycle discontinuity, renderer failure en manual override vallen same-frame terug naar baseline.
+- Unknown, stale, mismatch, invalid state, lifecycle discontinuity, renderer failure, manual override en blackout vallen same-frame terug naar baseline.
 
 ## Git State
 
 - SongAnalyzer-checkpoints: `397e071` (FILL), `d3fd28f` (shadow handoff), `b982211` (VirtualDJ lifecycle), `f6025a1` (analysis-worker operational hardening), `fa7c80f`/`838a421`/`6634e7f` (VirtualDJ-native headless workflow), `c727a86` (statuscache), `4b494e0` (headless productization); geen remote.
-- BeatBeam-checkpoints: `84c1779` (composer foundation), `c499a0c` (preview/runtime diagnostics), `ad3dd8a` (continuous coverage/checkpoint), `f7de492` (Live Show UX V2), `5cc3c82` (Show Simulator V1 completion).
+- BeatBeam-checkpoints: `84c1779` (composer foundation), `c499a0c` (preview/runtime diagnostics), `ad3dd8a` (continuous coverage/checkpoint), `f7de492` (Live Show UX V2), `5cc3c82` (Show Simulator V1 completion), `25f3064` (fysieke PAR-kleurcongruentie).
 - Generated review-/soakartifacts zijn geen source-dirty state. Lokale commits blijven de veilige werkwijze; geen automatische push.
