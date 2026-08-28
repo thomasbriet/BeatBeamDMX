@@ -10047,6 +10047,9 @@ class DmxController:
         self.port = None
         self.fps = DEFAULT_DMX_FPS
         self.error = None
+        # Renderer health is deliberately independent from optional DMX dispatch.
+        # `error` remains the operator-visible transport/runtime diagnostic.
+        self.renderer_error = None
         self.dmx_dispatch_failures = 0
         self.last_sent = None
         self.render_frame_sequence = 0
@@ -11560,6 +11563,13 @@ class DmxController:
                 "port": self.port,
                 "fps": self.fps,
                 "error": self.error,
+                "renderer_health": {
+                    "active": self.render_active,
+                    "healthy": bool(self.render_active and self.renderer_error is None),
+                    "error": self.renderer_error,
+                    "render_frame_sequence": self.render_frame_sequence,
+                    "last_rendered": self.last_rendered,
+                },
                 "last_sent": self.last_sent,
                 "render_active": self.render_active,
                 "render_frame_sequence": self.render_frame_sequence,
@@ -14496,7 +14506,7 @@ class DmxController:
             projection,
             osc,
             (osc or {}).get("_playback_generation"),
-            renderer_healthy=bool(self.render_active and self.error is None),
+            renderer_healthy=bool(self.render_active and self.renderer_error is None),
             safety_context={"blackout_active": config.get("blackout_active") is True},
         )
         if decision.get("production_mode") == "DYNAMIC_COMPOSER_SHADOW":
@@ -16355,6 +16365,10 @@ class DmxController:
                 self.current_slot_previews = slot_previews
                 self.render_frame_sequence += 1
                 self.last_rendered = render_now
+                if self.renderer_error is not None:
+                    if self.error == self.renderer_error:
+                        self.error = None
+                    self.renderer_error = None
                 self._record_physical_dmx_trace(
                     config, osc, auto_show, production_decision, values, values,
                     "current_values_ready",
@@ -16363,7 +16377,8 @@ class DmxController:
                 if self.connected and self.running and self.dmx is not None:
                     dmx = self.dmx
             except Exception as exc:
-                self.error = str(exc)
+                self.renderer_error = str(exc)
+                self.error = self.renderer_error
                 return False
 
         self._observe_virtualdj_beat_pulse_test(developer_playback_state)

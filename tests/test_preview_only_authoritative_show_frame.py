@@ -143,6 +143,18 @@ class FakeDmx:
         self.closed = True
 
 
+class FailOnceDmx(FakeDmx):
+    def __init__(self):
+        super().__init__()
+        self.fail_next = True
+
+    def send(self, values):
+        if self.fail_next:
+            self.fail_next = False
+            raise RuntimeError("synthetic dmx dispatch failure")
+        super().send(values)
+
+
 class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
     def controller(self):
         transport = PreviewTransport()
@@ -455,6 +467,51 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertEqual(0, observation["dynamic_frames"])
         self.assertEqual(1, observation["baseline_fallback_frames"])
         self.assertEqual(1, observation["candidate_faults"])
+
+    def test_dmx_dispatch_error_does_not_make_healthy_dynamic_renderer_ineligible(self):
+        transport = PreviewTransport()
+        controller = DmxController(transport, ProductionAuthorityBridge())
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.config["production_show_mode"] = "DYNAMIC_COMPOSER_ENABLED"
+        controller.render_active = controller.connected = controller.running = True
+        controller.dmx = FailOnceDmx()
+
+        self.assertTrue(controller._render_tick())
+        first = controller.state()
+        self.assertEqual("dynamic_composer", first["production_show_selector"]["production_show_source"])
+        self.assertTrue(first["production_show_selector"]["renderer_healthy"])
+        self.assertTrue(first["renderer_health"]["healthy"])
+        self.assertIn("dmx dispatch failure", first["error"])
+
+        self.assertFalse(controller._render_tick())
+        second = controller.state()
+        self.assertEqual("dynamic_composer", second["production_show_selector"]["production_show_source"])
+        self.assertIsNone(second["production_show_selector"]["fallback_reason"])
+        self.assertTrue(second["renderer_health"]["healthy"])
+        self.assertEqual(1, second["playback"]["dmx_dispatch_failures"])
+
+    def test_renderer_health_failure_falls_back_then_recovers_without_restart(self):
+        transport = PreviewTransport()
+        controller = DmxController(transport, ProductionAuthorityBridge())
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.config["production_show_mode"] = "DYNAMIC_COMPOSER_ENABLED"
+        controller.render_active = True
+        controller.renderer_error = "synthetic renderer fault"
+
+        self.tick(controller)
+        fallback = controller.state()
+        self.assertEqual("existing_autoshow", fallback["production_show_selector"]["production_show_source"])
+        self.assertEqual("renderer_unhealthy", fallback["production_show_selector"]["fallback_reason"])
+        self.assertFalse(fallback["production_show_selector"]["renderer_healthy"])
+        self.assertTrue(fallback["renderer_health"]["healthy"])
+
+        self.tick(controller)
+        recovered = controller.state()
+        self.assertEqual("dynamic_composer", recovered["production_show_selector"]["production_show_source"])
+        self.assertIsNone(recovered["production_show_selector"]["fallback_reason"])
+        self.assertTrue(recovered["production_show_selector"]["renderer_healthy"])
 
     def test_shadow_mode_cannot_be_selected_through_operator_settings(self):
         transport = PreviewTransport()

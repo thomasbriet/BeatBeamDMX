@@ -131,6 +131,7 @@ def select_production_show_source(
         "playback_generation": playback_generation,
         "handoff_generation": handoff_generation,
         "composer_generation": composer_generation,
+        "renderer_healthy": bool(renderer_healthy),
         "current_rme": context.get("current_rme") if isinstance(context, dict) else None,
         "event_envelope": dict(envelope) if isinstance(envelope, dict) else {},
         "analyzed_intensity": baseline.get("energy"),
