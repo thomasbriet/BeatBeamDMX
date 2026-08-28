@@ -56,21 +56,34 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
     def test_qr_scan_starts_the_complete_pairing_exchange(self):
         self.assertIn("Task { await pair(using: configurationURLText, code: pairingCodeText) }", self.store)
 
-    def test_dashboard_is_read_only_and_has_required_live_information(self):
-        for text in ("NOW PLAYING", "PRODUCTION", "FRAME", "FALLBACK", "SYSTEM HEALTH", "MUSICAL CONTEXT", "FIXTURE GROUPS", "BLACKOUT ACTIVE", "MANUAL OVERRIDE ACTIVE"):
+    def test_fixed_landscape_console_has_exact_tabs_and_no_main_scroll(self):
+        for text in ("LIVE", "OVERRIDE", "STATUS", "SETTINGS", "ConsoleTabBar", "ConsoleSurface", "LiveConsole", "OverrideConsole", "StatusConsole", "SettingsConsole"):
             self.assertIn(text, self.view)
-        self.assertIn("proxy.size.width > proxy.size.height", self.view)
-        self.assertIn("UIInterfaceOrientationPortrait", (ROOT / "ipad-remote/BeatBeamRemote/Info.plist").read_text(encoding="utf-8"))
+        self.assertNotIn("ScrollView", self.view)
+        orientations = (ROOT / "ipad-remote/BeatBeamRemote/Info.plist").read_text(encoding="utf-8")
+        self.assertIn("UIInterfaceOrientationLandscapeLeft", orientations)
+        self.assertIn("UIInterfaceOrientationLandscapeRight", orientations)
+        self.assertNotIn("UIInterfaceOrientationPortrait", orientations)
+
+    def test_live_is_observation_only_and_override_contains_existing_controls(self):
+        for text in ("NOW PLAYING", "SHOW NOW", "RENDERED OUTPUT", "MODE", "FRAME", "MUSIC", "OVERRIDE"):
+            self.assertIn(text, self.view)
         self.assertNotIn("setBlackoutEnabled", self.view)
         self.assertNotIn("setAutoShowEnabled", self.view)
-        for symbol in ("LIVE CONTROL", "BLACKOUT", "RELEASE ALL", "REVERT BASELINE", "ENABLE DYNAMIC", "HOLD EFFECT PADS", "CUE SHOTS", "OverridesControlScreen"):
+        for symbol in ("COLORS", "Rainbow", "PHRASE / ENERGY", "ENERGY", "HOLD EFFECTS", "ONE-SHOTS", "RELEASE ALL", "BLACKOUT", "REVERT BASELINE", "ENABLE DYNAMIC"):
             self.assertIn(symbol, self.view)
+
+    def test_status_and_settings_keep_reconnect_and_pairing_operational(self):
+        for symbol in ("BEATBEAM CONNECTION", "RECONNECT", "SCAN QR", "PAIR / RE-PAIR", "SYSTEM", "VIRTUALDJ", "SONGANALYZER", "CONNECTION PREFERENCES", "FORGET THIS PAIRING"):
+            self.assertIn(symbol, self.view)
+        self.assertIn("store.showConfiguration = true", self.view)
+        self.assertIn("store.showScanner = true", self.view)
 
     def test_effect_pads_are_backend_capability_driven_and_blackout_is_authoritative(self):
         self.assertIn("struct RemoteEffectCapability", self.models)
         self.assertIn("isAvailable", self.models)
         self.assertIn("isTemporarilyUnavailable", self.models)
-        self.assertIn("filter(\\.isAvailable)", self.view)
+        self.assertIn("if effect.isAvailable", self.view)
         self.assertIn("UnavailableEffectPad", self.view)
         self.assertIn("BlackoutAuthorityBanner", self.view)
         self.assertIn("Physical output is blacked out", self.view)

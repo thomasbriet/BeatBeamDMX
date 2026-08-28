@@ -96,6 +96,7 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         self.assertEqual("READY", payload["track"]["readiness"])
         self.assertEqual({"movers_a", "pars", "washes"}, {group["id"] for group in payload["fixtures"]})
         self.assertTrue(payload["dmx"]["physical_output_available"])
+        self.assertIn({"id": "rainbow", "label": "Rainbow"}, payload["control"]["colors"])
 
     def test_fallback_renderer_transport_and_readiness_are_visible_without_recalculation(self):
         state = fixture_state(source="existing_autoshow", fallback="transport_stale", renderer_healthy=False,

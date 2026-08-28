@@ -17847,7 +17847,7 @@ def remote_live_state_v2():
         "overrides": overrides,
         "control": {
             "scope": REMOTE_LIVE_CONTROL_SCOPE,
-            "colors": [{"id": key, "label": live_override_color_label(key)} for key in MANUAL_COLOR_PRESETS],
+            "colors": [{"id": key, "label": live_override_color_label(key)} for key in (*MANUAL_COLOR_PRESETS, "rainbow")],
             "phrases": [{"id": key, "label": label} for key, label in AUTO_SHOW_PHRASE_OVERRIDES.items() if key != "none"],
             "energies": [{"id": key, "label": live_override_energy_label(key)} for key in ("low", "mid", "high")],
             "momentary_effects": [effect for effect in effect_capabilities if effect["kind"] == "momentary"],
