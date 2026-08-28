@@ -70,6 +70,9 @@ struct RemoteControlCapabilities: Decodable, Equatable {
 struct RemoteControlAcknowledgement: Decodable {
     let accepted: Bool; let commandId: String?; let newStateRevision: Int; let effectiveState: RemoteLiveStateV2; let error: String?
 }
+struct RemoteControlRejection: Decodable {
+    let accepted: Bool; let commandId: String?; let newStateRevision: Int; let effectiveState: RemoteLiveStateV2; let error: String?
+}
 struct RemoteConnectionHost: Codable, Equatable {
     let origin: URL
     var displayHost: String {

@@ -196,10 +196,21 @@ final class RemoteStore: ObservableObject {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-            let ack = try decoder().decode(RemoteControlAcknowledgement.self, from: data)
-            apply(ack.effectiveState)
-            guard ack.accepted else { transientMessage = ack.error ?? "Opdracht geweigerd door BeatBeam."; return false }
-            return (200..<300).contains(http.statusCode) || http.statusCode == 409
+            if (200..<300).contains(http.statusCode) {
+                let acknowledgement = try decoder().decode(RemoteControlAcknowledgement.self, from: data)
+                apply(acknowledgement.effectiveState)
+                guard acknowledgement.accepted else { transientMessage = acknowledgement.error ?? "Opdracht geweigerd door BeatBeam."; return false }
+                return true
+            }
+            if http.statusCode == 409 {
+                // A conflict is a typed command rejection, never a success ack.
+                let rejection = try decoder().decode(RemoteControlRejection.self, from: data)
+                apply(rejection.effectiveState)
+                transientMessage = rejection.error ?? "Opdracht geweigerd door BeatBeam."
+                return false
+            }
+            try validateHTTP(http, data: data)
+            return false
         } catch {
             applyConnectionError(error)
             return false
@@ -322,6 +333,13 @@ final class RemoteStore: ObservableObject {
     }
 
     private func applyConnectionError(_ error: Error) {
+        if let decoding = error as? DecodingError {
+            let diagnostic = Self.decodingDiagnostic(decoding)
+            print("BeatBeam Remote decoding failure: \(diagnostic)")
+            connectionState = .serverIncompatible
+            transientMessage = "Serverdata is niet compatibel: \(diagnostic)"
+            return
+        }
         if let remote = error as? RemoteConnectionError {
             connectionState = remote == .authenticationFailed ? .authFailed : .serverIncompatible
             transientMessage = remote.errorDescription
@@ -338,6 +356,17 @@ final class RemoteStore: ObservableObject {
             return
         }
         connectionState = .offline; transientMessage = error.localizedDescription
+    }
+
+    private static func decodingDiagnostic(_ error: DecodingError) -> String {
+        func path(_ context: DecodingError.Context) -> String { context.codingPath.map(\.stringValue).joined(separator: ".") }
+        switch error {
+        case let .typeMismatch(type, context): return "typeMismatch \(type) at \(path(context)): \(context.debugDescription)"
+        case let .valueNotFound(type, context): return "valueNotFound \(type) at \(path(context)): \(context.debugDescription)"
+        case let .keyNotFound(key, context): return "keyNotFound \(key.stringValue) at \(path(context)): \(context.debugDescription)"
+        case let .dataCorrupted(context): return "dataCorrupted at \(path(context)): \(context.debugDescription)"
+        @unknown default: return "unknown DecodingError"
+        }
     }
 
     private func request(host: RemoteConnectionHost, path: String, method: String, timeout: TimeInterval, token: String?) throws -> URLRequest {

@@ -17608,6 +17608,18 @@ def remote_live_state_v2():
         "blackout": bool(dmx_state.get("blackout_active")),
         "automatic": not bool(auto_show.get("override_active")) and not bool(dmx_state.get("blackout_active")),
     }
+    raw_energy_trajectory = continuous.get("energy_trajectory")
+    if isinstance(raw_energy_trajectory, (int, float)) and not isinstance(raw_energy_trajectory, bool):
+        energy_trajectory = "rising" if raw_energy_trajectory > 0.02 else ("falling" if raw_energy_trajectory < -0.02 else "steady")
+    elif isinstance(raw_energy_trajectory, str):
+        # This presentation field has a small, explicit vocabulary.  Preserve
+        # neither an implementation-specific value nor a new unknown enum in
+        # the V2 contract: the native client can present "unknown" safely.
+        energy_trajectory = raw_energy_trajectory.lower()
+        if energy_trajectory not in {"rising", "falling", "steady"}:
+            energy_trajectory = "unknown"
+    else:
+        energy_trajectory = None if raw_energy_trajectory is None else "unknown"
     payload = {
         "schema_version": REMOTE_LIVE_STATE_SCHEMA_VERSION,
         "schema": "beatbeam.remote-live-state.v2",
@@ -17650,7 +17662,7 @@ def remote_live_state_v2():
             "section": continuous.get("section_label") or continuous.get("section") or live_ui.get("phrase"),
             "section_progress": continuous.get("section_progress"),
             "relative_energy": continuous.get("relative_energy"),
-            "energy_trajectory": continuous.get("energy_trajectory"),
+            "energy_trajectory": energy_trajectory,
             "recurrence": continuous.get("recurrence_strength"),
             "material_context": continuous.get("material_context") or continuous.get("section_character"),
             "current_rme": rme_context.get("current_rme") or selector.get("current_rme"),

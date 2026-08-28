@@ -44,6 +44,15 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
         self.assertIn("startEventStream()", self.store)
         self.assertIn("fallbackPollIntervalNanoseconds", self.store)
 
+    def test_decode_and_http_failures_are_diagnostic_and_never_decoded_as_success(self):
+        self.assertIn("decodingDiagnostic", self.store)
+        self.assertIn("typeMismatch", self.store)
+        self.assertIn("codingPath", self.store)
+        self.assertIn("RemoteHTTPError, http.statusCode == 401 || http.statusCode == 403", self.store)
+        self.assertIn("if http.statusCode == 409", self.store)
+        self.assertIn("RemoteControlRejection", self.store)
+        self.assertIn("try validateHTTP(http, data: data)", self.store)
+
     def test_qr_scan_starts_the_complete_pairing_exchange(self):
         self.assertIn("Task { await pair(using: configurationURLText, code: pairingCodeText) }", self.store)
 

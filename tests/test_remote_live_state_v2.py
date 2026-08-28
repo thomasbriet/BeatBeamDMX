@@ -117,6 +117,16 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         self.assertGreater(third["state_revision"], second["state_revision"])
         self.assertGreater(third["event_sequence"], second["event_sequence"])
 
+    def test_numeric_energy_trajectory_is_normalized_to_the_swift_string_contract(self):
+        state = fixture_state()
+        state["dmx"]["preview_auto_show"]["continuous_musical_state"]["energy_trajectory"] = -0.41
+        self.assertEqual("falling", self.project(state)["musical_state"]["energy_trajectory"])
+
+    def test_unknown_energy_trajectory_has_a_bounded_contract_value(self):
+        state = fixture_state()
+        state["dmx"]["preview_auto_show"]["continuous_musical_state"]["energy_trajectory"] = "sideways"
+        self.assertEqual("unknown", self.project(state)["musical_state"]["energy_trajectory"])
+
 
 class RemoteReadScopeTests(unittest.TestCase):
     def setUp(self):
