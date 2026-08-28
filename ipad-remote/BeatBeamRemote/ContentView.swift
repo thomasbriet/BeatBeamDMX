@@ -61,9 +61,10 @@ private struct ConsoleSurface: View {
 
     var body: some View {
         GeometryReader { proxy in
-            VStack(spacing: 9) {
+            VStack(spacing: 10) {
                 if state.overrides.blackout { BlackoutAuthorityBanner() }
-                ConsoleHeader(state: state)
+                ConsoleHeader(state: state, selectedTab: $selectedTab)
+                LiveStatusStrip(state: state)
                 Group {
                     switch selectedTab {
                     case .live: LiveConsole(state: state)
@@ -73,9 +74,8 @@ private struct ConsoleSurface: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                ConsoleTabBar(selectedTab: $selectedTab)
             }
-            .padding(10).frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+            .padding(12).frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
         }
     }
 }
@@ -83,22 +83,29 @@ private struct ConsoleSurface: View {
 private struct ConsoleHeader: View {
     @EnvironmentObject private var store: RemoteStore
     let state: RemoteLiveStateV2
+    @Binding var selectedTab: RemoteTab
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             HStack(spacing: 8) {
                 Image(systemName: "sparkles.tv.fill").foregroundStyle(RemoteTheme.accent)
-                Text("BEATBEAM").font(.headline.bold().monospaced()).foregroundStyle(.white)
-                Text("LIVE REMOTE").font(.caption.bold().monospaced()).foregroundStyle(.secondary)
+                Text("BEATBEAM REMOTE").font(.headline.bold().monospaced()).foregroundStyle(.white)
             }
-            Divider().overlay(RemoteTheme.border)
-            Text(state.track.title ?? "(geen track)").font(.subheadline.bold()).foregroundStyle(.white).lineLimit(1)
-            Spacer(minLength: 4)
-            StatusBadge(label: state.dmx.connected ? "DMX LIVE" : "PREVIEW ONLY", tone: state.dmx.connected ? .green : RemoteTheme.warning)
-            StatusBadge(label: store.connectionState.label.uppercased(), tone: store.isConnected ? .green : RemoteTheme.warning)
+            .frame(minWidth: 245, alignment: .leading)
+            ConsoleTabBar(selectedTab: $selectedTab)
+            Spacer(minLength: 0)
+            VStack(alignment: .leading, spacing: 1) {
+                StatusBadge(label: store.connectionState.label.uppercased(), tone: store.isConnected ? .green : RemoteTheme.warning)
+                Text(state.dmx.connected ? "BEATBEAM BETA · DMX LIVE" : "BEATBEAM BETA · PREVIEW").font(.caption2.bold().monospaced()).foregroundStyle(.secondary)
+            }
+            Button { store.showScanner = true } label: {
+                Image(systemName: "qrcode.viewfinder").font(.title3.weight(.medium)).frame(width: 44, height: 44)
+            }
+            .buttonStyle(HardwareButtonStyle(tint: RemoteTheme.panelRaised))
+            .accessibilityLabel("Open pairing QR scanner")
         }
-        .padding(.horizontal, 13).frame(height: 44).background(RemoteTheme.panelRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(RemoteTheme.border))
+        .padding(.horizontal, 14).frame(height: 62).background(RemoteTheme.panelRaised)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(RemoteTheme.border))
     }
 }
 
@@ -108,9 +115,48 @@ private struct ConsoleTabBar: View {
         HStack(spacing: 8) {
             ForEach(RemoteTab.allCases) { tab in
                 Button { selectedTab = tab } label: {
-                    Label(tab.rawValue, systemImage: tab.icon).font(.subheadline.bold().monospaced()).frame(maxWidth: .infinity, minHeight: 42)
+                    Text(tab.rawValue).font(.subheadline.bold().monospaced()).frame(width: 126, height: 44)
                 }
                 .buttonStyle(ConsoleTabStyle(active: selectedTab == tab)).accessibilityLabel("Open \(tab.rawValue)")
+            }
+        }
+    }
+}
+
+private struct LiveStatusStrip: View {
+    let state: RemoteLiveStateV2
+    var body: some View {
+        HStack(spacing: 22) {
+            HStack(spacing: 11) {
+                Image(systemName: "music.note").font(.title3).foregroundStyle(RemoteTheme.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(state.track.title ?? "(geen track)").font(.headline.bold()).foregroundStyle(.white).lineLimit(1)
+                    Text(state.track.artist ?? "Onbekend").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Divider().overlay(RemoteTheme.border)
+            StripMetric(icon: "metronome", label: "BPM", value: state.track.bpm.map { String(format: "%.1f", $0) } ?? "—")
+            Divider().overlay(RemoteTheme.border)
+            StripMetric(icon: "chart.bar.fill", label: "PHRASE", value: state.track.bar.map { "\($0) BARS" } ?? "—")
+            Divider().overlay(RemoteTheme.border)
+            StripMetric(icon: "cube", label: "PRODUCTION MODE", value: productionLabel(state.show.configuredProductionMode), tone: state.show.dynamicComposerEligible ? .purple : RemoteTheme.warning)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 17).frame(height: 86).background(RemoteTheme.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(RemoteTheme.border))
+    }
+}
+
+private struct StripMetric: View {
+    let icon: String; let label: String; let value: String; var tone: Color = .white
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).font(.title3).foregroundStyle(tone)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).font(.caption.bold().monospaced()).foregroundStyle(.secondary)
+                Text(value).font(.title3.bold()).foregroundStyle(tone).lineLimit(1)
             }
         }
     }
@@ -176,18 +222,18 @@ private struct OverrideConsole: View {
     @State private var confirmBaseline = false
     @State private var confirmDynamic = false
     var body: some View {
-        HStack(spacing: 10) {
-            VStack(spacing: 10) {
-                RemoteCard(title: "COLORS") { ColorPadMatrix(state: state).environmentObject(store) }
-                RemoteCard(title: "PHRASE / ENERGY") { PhrasePadMatrix(state: state).environmentObject(store); EnergyFader(state: state).environmentObject(store) }
+        VStack(spacing: 10) {
+            RemoteCard(title: "COLORS") {
+                ColorPadMatrix(state: state).environmentObject(store)
+            }
+            .frame(height: 122)
+            EffectDeck(state: state).environmentObject(store)
+                .frame(maxHeight: .infinity)
+            HStack(spacing: 10) {
+                EnergyOverridePanel(state: state).environmentObject(store)
                 MasterActions(state: state, confirmBaseline: $confirmBaseline, confirmDynamic: $confirmDynamic).environmentObject(store)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            VStack(spacing: 10) {
-                EffectBank(title: "HOLD EFFECTS", effects: state.control.momentaryEffects, activeIDs: state.overrides.momentaryEffects, hold: true)
-                EffectBank(title: "ONE-SHOTS", effects: state.control.cueShots, activeIDs: [], hold: false)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(height: 168)
         }
         .alert("Revert to Baseline?", isPresented: $confirmBaseline) { Button("Revert", role: .destructive) { store.perform("revert_baseline") }; Button("Cancel", role: .cancel) {} } message: { Text("The physical frame returns to the established baseline show. Transport is unchanged.") }
         .alert("Enable Dynamic Composer?", isPresented: $confirmDynamic) { Button("Enable Dynamic") { store.perform("enable_dynamic_composer") }; Button("Cancel", role: .cancel) {} } message: { Text("Enable Dynamic Composer deliberately for the current production show.") }
@@ -199,7 +245,7 @@ private struct ColorPadMatrix: View {
     let state: RemoteLiveStateV2
     private var colors: [RemoteControlOption] { state.control.colors.contains(where: { $0.id == "rainbow" }) ? state.control.colors : state.control.colors + [RemoteControlOption(id: "rainbow", label: "Rainbow")] }
     var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 6), spacing: 7) {
+        HStack(spacing: 7) {
             ConsoleColorPad(label: "AUTO", tint: .gray, active: state.overrides.color == nil) { store.perform("set_color", value: "none") }
             ForEach(colors) { color in ConsoleColorPad(label: color.label.uppercased(), tint: colorTint(color.id), active: state.overrides.color == color.id) { store.perform("set_color", value: color.id) } }
         }
@@ -222,15 +268,30 @@ private struct EnergyFader: View {
     let state: RemoteLiveStateV2
     private var level: Double { ["low": 1.0, "mid": 2.0, "high": 3.0][state.overrides.energy ?? ""] ?? 0 }
     var body: some View {
-        HStack(spacing: 10) {
-            Text("ENERGY").font(.caption.bold().monospaced()).foregroundStyle(.secondary).frame(width: 52, alignment: .leading)
-            Slider(value: Binding(get: { level }, set: setLevel), in: 0...3, step: 1).tint(RemoteTheme.accent)
-            Text(["AUTO", "LOW", "MID", "HIGH"][Int(level)]).font(.caption.bold().monospaced()).foregroundStyle(RemoteTheme.accent).frame(width: 38, alignment: .trailing)
-        }.padding(.top, 7)
+        HStack(spacing: 12) {
+            Text(String(format: "%.2f", level / 3)).font(.title3.bold().monospaced()).foregroundStyle(RemoteTheme.warning).frame(width: 52)
+            Button { setLevel(level - 1) } label: { Image(systemName: "minus").frame(width: 42, height: 42) }.buttonStyle(HardwareButtonStyle(tint: RemoteTheme.panelRaised))
+            Slider(value: Binding(get: { level }, set: setLevel), in: 0...3, step: 1).tint(RemoteTheme.warning)
+                .accessibilityLabel("Energy override")
+            Button { setLevel(level + 1) } label: { Image(systemName: "plus").frame(width: 42, height: 42) }.buttonStyle(HardwareButtonStyle(tint: RemoteTheme.panelRaised))
+            Text("1.00").font(.title3.bold().monospaced()).foregroundStyle(RemoteTheme.warning).frame(width: 52)
+        }
     }
     private func setLevel(_ value: Double) {
         let id = ["none", "low", "mid", "high"][max(0, min(3, Int(value.rounded())))]
         if (state.overrides.energy ?? "none") != id { store.perform("set_energy", value: id) }
+    }
+}
+
+private struct EnergyOverridePanel: View {
+    @EnvironmentObject private var store: RemoteStore
+    let state: RemoteLiveStateV2
+    var body: some View {
+        RemoteCard(title: "ENERGY OVERRIDE") {
+            PhrasePadMatrix(state: state).environmentObject(store)
+            EnergyFader(state: state).environmentObject(store)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -240,32 +301,52 @@ private struct MasterActions: View {
     @Binding var confirmBaseline: Bool
     @Binding var confirmDynamic: Bool
     var body: some View {
-        RemoteCard(title: "MASTER ACTIONS") {
+        RemoteCard(title: "CONTROL") {
             HStack(spacing: 8) {
-                Button("RELEASE ALL") { store.perform("release_all") }.buttonStyle(ConsoleActionStyle(tint: .orange))
-                if state.overrides.blackout { Button("HOLD RELEASE") { store.perform("blackout_off") }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.danger)) }
-                else { Button("BLACKOUT") { store.perform("blackout_on") }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.danger)) }
-                Button("REVERT BASELINE") { confirmBaseline = true }.buttonStyle(ConsoleActionStyle(tint: .purple))
-                Button("ENABLE DYNAMIC") { confirmDynamic = true }.buttonStyle(ConsoleActionStyle(tint: .cyan))
+                Button("RELEASE\nALL") { store.perform("release_all") }.buttonStyle(ConsoleActionStyle(tint: .gray))
+                if state.overrides.blackout { Button("HOLD\nRELEASE") { store.perform("blackout_off") }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.danger)) }
+                else { Button("BLACKOUT\n(HOLD)") { store.perform("blackout_on") }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.danger)) }
+                Button("REVERT\nBASELINE") { confirmBaseline = true }.buttonStyle(ConsoleActionStyle(tint: .gray))
+                Button("ENABLE\nDYNAMIC") { confirmDynamic = true }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.accent))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct EffectDeck: View {
+    @EnvironmentObject private var store: RemoteStore
+    let state: RemoteLiveStateV2
+    var body: some View {
+        RemoteCard(title: "EFFECTS") {
+            VStack(spacing: 10) {
+                EffectRow(title: "HOLD EFFECTS", effects: state.control.momentaryEffects, activeIDs: state.overrides.momentaryEffects, hold: true).environmentObject(store)
+                HStack(spacing: 9) {
+                    Rectangle().fill(RemoteTheme.border).frame(height: 1)
+                    Text("ONE-SHOT EFFECTS").font(.caption.bold().monospaced()).foregroundStyle(.secondary).fixedSize()
+                    Rectangle().fill(RemoteTheme.border).frame(height: 1)
+                }
+                EffectRow(title: nil, effects: state.control.cueShots, activeIDs: [], hold: false).environmentObject(store)
             }
         }
     }
 }
 
-private struct EffectBank: View {
+private struct EffectRow: View {
     @EnvironmentObject private var store: RemoteStore
-    let title: String; let effects: [RemoteEffectCapability]; let activeIDs: [String]; let hold: Bool
+    let title: String?; let effects: [RemoteEffectCapability]; let activeIDs: [String]; let hold: Bool
     var body: some View {
-        RemoteCard(title: title) {
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+        VStack(spacing: 7) {
+            if let title { Text(title).font(.caption.bold().monospaced()).foregroundStyle(.secondary) }
+            HStack(spacing: 10) {
                 ForEach(effects) { effect in
                     if effect.isAvailable {
                         if hold { MomentaryEffectPad(effect: effect, active: activeIDs.contains(effect.id)).environmentObject(store) }
-                        else { Button(effect.label.uppercased()) { store.perform("trigger_cue", value: effect.id) }.buttonStyle(PerformancePadStyle(tint: .indigo, active: false)) }
+                        else { Button { store.perform("trigger_cue", value: effect.id) } label: { EffectPadFace(effect: effect, active: false) }.buttonStyle(HardwarePerformancePadStyle(active: false)) }
                     } else { UnavailableEffectPad(effect: effect) }
                 }
             }
-        }.frame(maxHeight: .infinity)
+        }
     }
 }
 
@@ -358,11 +439,24 @@ private struct MomentaryEffectPad: View {
     @EnvironmentObject private var store: RemoteStore
     let effect: RemoteEffectCapability; let active: Bool
     var body: some View {
-        Text(effect.label.uppercased()).font(.headline.bold()).foregroundStyle(.white).frame(maxWidth: .infinity, minHeight: 58)
-            .background(active ? RemoteTheme.accent : RemoteTheme.padOff).clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(active ? RemoteTheme.accent : RemoteTheme.border, lineWidth: active ? 2 : 1))
+        EffectPadFace(effect: effect, active: active)
+            .background(active ? RemoteTheme.accent.opacity(0.24) : RemoteTheme.padOff)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(active ? RemoteTheme.accent : RemoteTheme.border, lineWidth: active ? 2 : 1))
             .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in store.beginMomentary(effect.id) }.onEnded { _ in store.endMomentary(effect.id) })
             .onDisappear { store.endMomentary(effect.id) }.accessibilityLabel("Hold \(effect.label)")
+    }
+}
+
+private struct EffectPadFace: View {
+    let effect: RemoteEffectCapability; let active: Bool
+    var body: some View {
+        VStack(spacing: 8) {
+            Text(effect.label.uppercased().replacingOccurrences(of: " ", with: "\n"))
+                .font(.subheadline.bold().monospaced()).multilineTextAlignment(.center).lineLimit(2)
+            Image(systemName: effectIcon(effect.id)).font(.title2).foregroundStyle(active ? RemoteTheme.accent : .white.opacity(0.88))
+        }
+        .foregroundStyle(.white).frame(maxWidth: .infinity, minHeight: 74)
     }
 }
 
@@ -378,11 +472,11 @@ private struct UnavailableEffectPad: View {
 
 private struct ConsoleColorPad: View {
     let label: String; let tint: Color; let active: Bool; let action: () -> Void
-    var body: some View { Button(action: action) { Text(label).font(.caption.bold().monospaced()).frame(maxWidth: .infinity, minHeight: 43) }.buttonStyle(PerformancePadStyle(tint: tint, active: active)) }
+    var body: some View { Button(action: action) { Text(label).font(.caption.bold().monospaced()).frame(maxWidth: .infinity, minHeight: 70) }.buttonStyle(ColorPerformancePadStyle(tint: tint, active: active)) }
 }
 private struct ConsoleMiniPad: View {
     let label: String; let active: Bool; let action: () -> Void
-    var body: some View { Button(action: action) { Text(label).font(.caption2.bold().monospaced()).frame(maxWidth: .infinity, minHeight: 26) }.buttonStyle(PerformancePadStyle(tint: RemoteTheme.accent, active: active)) }
+    var body: some View { Button(action: action) { Text(label).font(.caption2.bold().monospaced()).frame(maxWidth: .infinity, minHeight: 26) }.buttonStyle(HardwarePerformancePadStyle(active: active)) }
 }
 private struct BlackoutAuthorityBanner: View {
     var body: some View {
@@ -401,7 +495,11 @@ private struct RemoteCard<Content: View>: View {
     init(title: String? = nil, @ViewBuilder content: () -> Content) { self.title = title; self.content = content() }
     var body: some View {
         VStack(alignment: .leading, spacing: 9) { if let title { Text(title).font(.caption.bold().monospaced()).foregroundStyle(.secondary) }; content }
-            .padding(12).frame(maxWidth: .infinity, alignment: .leading).background(RemoteTheme.panel).clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous)).overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(RemoteTheme.border))
+            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(LinearGradient(colors: [RemoteTheme.panelRaised.opacity(0.72), RemoteTheme.panel], startPoint: .top, endPoint: .bottom))
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(RemoteTheme.border))
+            .shadow(color: .black.opacity(0.28), radius: 4, y: 2)
     }
 }
 private struct LiveMetric: View {
@@ -422,15 +520,54 @@ private struct HealthTile: View {
 }
 private struct ConsoleTabStyle: ButtonStyle {
     let active: Bool
-    func makeBody(configuration: Configuration) -> some View { configuration.label.foregroundStyle(active ? .black : .white).background(active ? RemoteTheme.accent : RemoteTheme.panelRaised.opacity(configuration.isPressed ? 0.55 : 1)).clipShape(RoundedRectangle(cornerRadius: 10)) }
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.foregroundStyle(.white)
+            .background(active ? RemoteTheme.warning.opacity(configuration.isPressed ? 0.65 : 0.88) : RemoteTheme.background.opacity(configuration.isPressed ? 0.6 : 1))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(active ? RemoteTheme.warning : RemoteTheme.border, lineWidth: active ? 2 : 1))
+    }
 }
-private struct PerformancePadStyle: ButtonStyle {
+private struct ColorPerformancePadStyle: ButtonStyle {
     let tint: Color; let active: Bool
-    func makeBody(configuration: Configuration) -> some View { configuration.label.foregroundStyle(.white).background((active ? tint : tint.opacity(0.68)).opacity(configuration.isPressed ? 0.55 : 1)).clipShape(RoundedRectangle(cornerRadius: 10)).overlay(RoundedRectangle(cornerRadius: 10).stroke(active ? .white.opacity(0.9) : tint.opacity(0.75), lineWidth: active ? 2 : 1)) }
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.foregroundStyle(tint == .yellow || tint == .white ? .black : .white)
+            .background(LinearGradient(colors: [tint.opacity(configuration.isPressed ? 0.58 : 0.95), tint.opacity(0.48)], startPoint: .top, endPoint: .bottom))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(active ? .white : tint.opacity(0.82), lineWidth: active ? 2 : 1))
+            .shadow(color: tint.opacity(0.35), radius: active ? 7 : 3)
+    }
+}
+private struct HardwarePerformancePadStyle: ButtonStyle {
+    let active: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(LinearGradient(colors: [RemoteTheme.panelRaised, RemoteTheme.background], startPoint: .top, endPoint: .bottom))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(active ? RemoteTheme.accent : RemoteTheme.border, lineWidth: active ? 2 : 1))
+            .shadow(color: .black.opacity(0.42), radius: 3, y: 2)
+            .opacity(configuration.isPressed ? 0.66 : 1)
+    }
+}
+private struct HardwareButtonStyle: ButtonStyle {
+    let tint: Color
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.foregroundStyle(.white)
+            .background(LinearGradient(colors: [tint.opacity(0.96), RemoteTheme.background], startPoint: .top, endPoint: .bottom))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(RemoteTheme.border))
+            .opacity(configuration.isPressed ? 0.65 : 1)
+    }
 }
 private struct ConsoleActionStyle: ButtonStyle {
     let tint: Color
-    func makeBody(configuration: Configuration) -> some View { configuration.label.font(.caption.bold().monospaced()).frame(maxWidth: .infinity, minHeight: 40).foregroundStyle(.white).background(tint.opacity(configuration.isPressed ? 0.55 : 0.88)).clipShape(RoundedRectangle(cornerRadius: 9)) }
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.subheadline.bold().monospaced()).multilineTextAlignment(.center).frame(maxWidth: .infinity, maxHeight: .infinity).foregroundStyle(tint == .gray ? .white : tint)
+            .background(LinearGradient(colors: [tint == .gray ? RemoteTheme.panelRaised : tint.opacity(0.38), RemoteTheme.background], startPoint: .top, endPoint: .bottom))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(tint == .gray ? RemoteTheme.border : tint, lineWidth: 1.5))
+            .shadow(color: .black.opacity(0.38), radius: 3, y: 2)
+            .opacity(configuration.isPressed ? 0.65 : 1)
+    }
 }
 
 private func productionLabel(_ value: String) -> String { value == "DYNAMIC_COMPOSER_ENABLED" ? "DYNAMIC COMPOSER" : "BASELINE" }
@@ -439,6 +576,20 @@ private func timestamp(_ milliseconds: Int?) -> String { guard let milliseconds 
 private func colorTint(_ value: String) -> Color {
     switch value {
     case "red": .red; case "yellow": .yellow; case "green", "lime": .green; case "cyan": .cyan; case "blue": .blue; case "purple": .purple; case "pink": .pink; case "orange": .orange; case "white": .gray; case "rainbow": RemoteTheme.accent; default: .gray
+    }
+}
+private func effectIcon(_ id: String) -> String {
+    switch id {
+    case "manual_strobe", "all_on": "sun.max"
+    case "audience_sweep": "arcade.stick.console"
+    case "par_chase", "par_chase_burst": "arrow.right.to.line.compact"
+    case "par_snake": "waveform.path"
+    case "audience_riser": "chart.bar.fill"
+    case "white_hit": "sparkle"
+    case "color_burst": "circle.hexagongrid"
+    case "snap_fan": "fanblades"
+    case "mirror_bounce": "arrow.up.left.and.arrow.down.right"
+    default: "bolt.fill"
     }
 }
 private func outputColor(_ fixture: RemoteOutputFixture) -> Color {

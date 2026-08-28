@@ -57,9 +57,12 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
         self.assertIn("Task { await pair(using: configurationURLText, code: pairingCodeText) }", self.store)
 
     def test_fixed_landscape_console_has_exact_tabs_and_no_main_scroll(self):
-        for text in ("LIVE", "OVERRIDE", "STATUS", "SETTINGS", "ConsoleTabBar", "ConsoleSurface", "LiveConsole", "OverrideConsole", "StatusConsole", "SettingsConsole"):
+        for text in ("LIVE", "OVERRIDE", "STATUS", "SETTINGS", "ConsoleTabBar", "ConsoleSurface", "ConsoleHeader", "LiveStatusStrip", "LiveConsole", "OverrideConsole", "StatusConsole", "SettingsConsole"):
             self.assertIn(text, self.view)
         self.assertNotIn("ScrollView", self.view)
+        surface = self.view[self.view.index("private struct ConsoleSurface"):self.view.index("private struct ConsoleHeader")]
+        self.assertLess(surface.index("ConsoleHeader"), surface.index("LiveStatusStrip"))
+        self.assertEqual(1, self.view.count("ConsoleTabBar(selectedTab: $selectedTab)"))
         orientations = (ROOT / "ipad-remote/BeatBeamRemote/Info.plist").read_text(encoding="utf-8")
         self.assertIn("UIInterfaceOrientationLandscapeLeft", orientations)
         self.assertIn("UIInterfaceOrientationLandscapeRight", orientations)
@@ -70,7 +73,7 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
             self.assertIn(text, self.view)
         self.assertNotIn("setBlackoutEnabled", self.view)
         self.assertNotIn("setAutoShowEnabled", self.view)
-        for symbol in ("COLORS", "Rainbow", "PHRASE / ENERGY", "ENERGY", "HOLD EFFECTS", "ONE-SHOTS", "RELEASE ALL", "BLACKOUT", "REVERT BASELINE", "ENABLE DYNAMIC"):
+        for symbol in ("COLORS", "Rainbow", "ENERGY OVERRIDE", "ENERGY", "HOLD EFFECTS", "ONE-SHOT EFFECTS", "EffectDeck", "ColorPerformancePadStyle", "HardwarePerformancePadStyle", 'store.perform("release_all")', 'store.perform("blackout_on")', 'store.perform("revert_baseline")', 'store.perform("enable_dynamic_composer")'):
             self.assertIn(symbol, self.view)
 
     def test_status_and_settings_keep_reconnect_and_pairing_operational(self):
