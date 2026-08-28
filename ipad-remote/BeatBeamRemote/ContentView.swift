@@ -11,13 +11,24 @@ private enum RemoteTheme {
 
 struct ContentView: View {
     @EnvironmentObject private var store: RemoteStore
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
             ZStack {
                 LinearGradient(colors: [Color(red: 0.05, green: 0.07, blue: 0.11), RemoteTheme.background], startPoint: .topLeading, endPoint: .bottomTrailing)
                     .ignoresSafeArea()
-                if let state = store.liveState { liveDashboard(state) } else { disconnectedDashboard }
+                if let state = store.liveState {
+                    TabView {
+                        LiveControlScreen(state: state).environmentObject(store)
+                            .tabItem { Label("Live", systemImage: "slider.horizontal.3") }
+                        OverridesControlScreen(state: state).environmentObject(store)
+                            .tabItem { Label("Overrides", systemImage: "hand.raised.fill") }
+                        liveDashboard(state)
+                            .tabItem { Label("Status", systemImage: "waveform.path.ecg") }
+                    }
+                    .tint(RemoteTheme.accent)
+                } else { disconnectedDashboard }
             }
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $store.showConfiguration) { ConnectionSheet().environmentObject(store) }
@@ -31,6 +42,9 @@ struct ContentView: View {
             .alert("BeatBeam Remote", isPresented: Binding(get: { store.transientMessage != nil }, set: { if !$0 { store.transientMessage = nil } })) {
                 Button("OK", role: .cancel) { store.transientMessage = nil }
             } message: { Text(store.transientMessage ?? "") }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active { store.releaseActiveMomentaries(reason: "app backgrounded") }
+            }
         }
     }
 
@@ -214,6 +228,165 @@ struct ContentView: View {
     private func frameLabel(_ value: String) -> String { value == "dynamic_composer" ? "DYNAMIC COMPOSER" : "BASELINE" }
     private func percent(_ value: Double?) -> String { value.map { "\(Int(($0 * 100).rounded()))%" } ?? "—" }
 }
+
+private struct LiveControlScreen: View {
+    @EnvironmentObject private var store: RemoteStore
+    let state: RemoteLiveStateV2
+    @State private var confirmBaseline = false
+    @State private var confirmDynamic = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    liveHeader
+                    if state.overrides.blackout { blackoutState }
+                    HStack(spacing: 12) {
+                        blackoutControl
+                        Button("RELEASE ALL") { store.perform("release_all") }
+                            .buttonStyle(LiveActionStyle(tint: .orange))
+                            .accessibilityLabel("Release all manual overrides")
+                        productionControls
+                    }
+                    if proxy.size.width > proxy.size.height {
+                        HStack(alignment: .top, spacing: 14) {
+                            VStack(spacing: 14) { quickColors; phraseEnergy }.frame(maxWidth: .infinity)
+                            VStack(spacing: 14) { momentaryPads; cueShots }.frame(maxWidth: .infinity)
+                        }
+                    } else {
+                        quickColors; phraseEnergy; momentaryPads; cueShots
+                    }
+                }
+                .padding(16).frame(maxWidth: 1180, alignment: .leading)
+            }
+        }
+        .alert("Revert to Baseline?", isPresented: $confirmBaseline) {
+            Button("Revert", role: .destructive) { store.perform("revert_baseline") }; Button("Cancel", role: .cancel) {}
+        } message: { Text("The physical frame will return to the existing baseline show. Transport is unchanged.") }
+        .alert("Enable Dynamic Composer?", isPresented: $confirmDynamic) {
+            Button("Enable Dynamic") { store.perform("enable_dynamic_composer") }; Button("Cancel", role: .cancel) {}
+        } message: { Text("Enable the production Dynamic Composer only after this deliberate confirmation.") }
+    }
+
+    private var liveHeader: some View {
+        RemoteCard {
+            HStack { VStack(alignment: .leading) {
+                Text("LIVE CONTROL").font(.caption.bold().monospaced()).foregroundStyle(RemoteTheme.accent)
+                Text(state.track.title ?? "(geen track)").font(.title2.bold()).foregroundStyle(.white)
+                Text(state.track.artist ?? "Onbekend").foregroundStyle(.secondary)
+            }; Spacer(); VStack(alignment: .trailing) {
+                Text(state.show.configuredProductionMode == "DYNAMIC_COMPOSER_ENABLED" ? "DYNAMIC" : "BASELINE").font(.headline.monospaced()).foregroundStyle(RemoteTheme.accent)
+                Text("FRAME: \(state.show.physicalFrameSource.replacingOccurrences(of: "_", with: " "))").font(.caption.monospaced()).foregroundStyle(state.show.fallbackActive ? .orange : .secondary)
+                if state.show.fallbackActive { Text("FALLBACK: \(state.show.fallbackReason ?? "active")").font(.caption.bold()).foregroundStyle(.orange) }
+                Button("PAIR / UPGRADE") { store.forgetConnection() }.font(.caption.bold()).buttonStyle(.bordered)
+            }}
+        }
+    }
+
+    private var blackoutState: some View {
+        Text("BLACKOUT ACTIVE — RELEASE: HOLD BLACKOUT FOR 1.2s").font(.headline.bold()).foregroundStyle(.white).frame(maxWidth: .infinity).padding(14).background(RemoteTheme.danger).clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var blackoutControl: some View {
+        Group {
+            if state.overrides.blackout {
+                Text("HOLD TO RELEASE")
+                    .frame(maxWidth: .infinity, minHeight: 58).background(RemoteTheme.danger)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .onLongPressGesture(minimumDuration: 1.2) { store.perform("blackout_off") }
+            } else {
+                Button("BLACKOUT") { store.perform("blackout_on") }.buttonStyle(LiveActionStyle(tint: RemoteTheme.danger))
+            }
+        }.foregroundStyle(.white).font(.headline.bold()).accessibilityLabel(state.overrides.blackout ? "Hold to release blackout" : "Activate blackout")
+    }
+
+    private var productionControls: some View {
+        Group {
+            if state.show.configuredProductionMode == "DYNAMIC_COMPOSER_ENABLED" {
+                Button("REVERT BASELINE") { confirmBaseline = true }.buttonStyle(LiveActionStyle(tint: .purple))
+            } else {
+                Button("ENABLE DYNAMIC") { confirmDynamic = true }.buttonStyle(LiveActionStyle(tint: .cyan))
+            }
+        }
+    }
+
+    private var quickColors: some View {
+        RemoteCard(title: "COLORS") { ColorGrid(state: state).environmentObject(store) }
+    }
+    private var phraseEnergy: some View {
+        RemoteCard(title: "PHRASE / ENERGY") { OverrideChips(state: state).environmentObject(store) }
+    }
+    private var momentaryPads: some View {
+        RemoteCard(title: "HOLD EFFECT PADS") {
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                ForEach(state.control.momentaryEffects) { effect in MomentaryEffectPad(effect: effect, active: state.overrides.momentaryEffects.contains(effect.id)).environmentObject(store) }
+            }
+        }
+    }
+    private var cueShots: some View {
+        RemoteCard(title: "CUE SHOTS") {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 128))], spacing: 9) {
+                ForEach(state.control.cueShots) { cue in Button(cue.label) { store.perform("trigger_cue", value: cue.id) }.buttonStyle(LiveActionStyle(tint: .indigo)) }
+            }
+        }
+    }
+}
+
+private struct OverridesControlScreen: View {
+    @EnvironmentObject private var store: RemoteStore
+    let state: RemoteLiveStateV2
+    var body: some View {
+        ScrollView { VStack(alignment: .leading, spacing: 14) {
+            Text("OVERRIDES").font(.largeTitle.bold()).foregroundStyle(.white)
+            if state.overrides.anyActive { Text("ACTIVE: \([state.overrides.color, state.overrides.phrase, state.overrides.energy].compactMap { $0 }.joined(separator: " · "))").foregroundStyle(.orange) }
+            Button("RELEASE ALL") { store.perform("release_all") }.buttonStyle(LiveActionStyle(tint: .orange))
+            RemoteCard(title: "COLORS") { ColorGrid(state: state).environmentObject(store) }
+            RemoteCard(title: "PHRASE / ENERGY") { OverrideChips(state: state).environmentObject(store) }
+            RemoteCard(title: "MOMENTARY EFFECTS") { LazyVGrid(columns: [GridItem(.adaptive(minimum: 150))], spacing: 10) { ForEach(state.control.momentaryEffects) { MomentaryEffectPad(effect: $0, active: state.overrides.momentaryEffects.contains($0.id)).environmentObject(store) } } }
+            RemoteCard(title: "CUE SHOTS") { LazyVGrid(columns: [GridItem(.adaptive(minimum: 145))], spacing: 10) { ForEach(state.control.cueShots) { cue in Button(cue.label) { store.perform("trigger_cue", value: cue.id) }.buttonStyle(LiveActionStyle(tint: .indigo)) } } }
+        }.padding(16).frame(maxWidth: 1000, alignment: .leading) }
+    }
+}
+
+private struct ColorGrid: View {
+    @EnvironmentObject private var store: RemoteStore
+    let state: RemoteLiveStateV2
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 92))], spacing: 8) {
+            Button("AUTO") { store.perform("set_color", value: "none") }.buttonStyle(LiveActionStyle(tint: state.overrides.color == nil ? .green : .gray))
+            ForEach(state.control.colors) { color in Button(color.label.uppercased()) { store.perform("set_color", value: color.id) }.buttonStyle(LiveActionStyle(tint: colorTint(color.id, active: state.overrides.color == color.id))) }
+        }
+    }
+    private func colorTint(_ value: String, active: Bool) -> Color { if active { return .white }; return ["red": .red, "yellow": .yellow, "green": .green, "lime": .green, "purple": .purple, "pink": .pink, "cyan": .cyan, "orange": .orange, "blue": .blue, "white": .gray][value] ?? .gray }
+}
+
+private struct OverrideChips: View {
+    @EnvironmentObject private var store: RemoteStore
+    let state: RemoteLiveStateV2
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("PHRASE").font(.caption.bold().monospaced()).foregroundStyle(.secondary)
+            ScrollView(.horizontal, showsIndicators: false) { HStack { Button("AUTO") { store.perform("set_phrase", value: "none") }.buttonStyle(ChipStyle(active: state.overrides.phrase == nil)); ForEach(state.control.phrases) { option in Button(option.label) { store.perform("set_phrase", value: option.id) }.buttonStyle(ChipStyle(active: state.overrides.phrase == option.id)) } } }
+            Text("ENERGY").font(.caption.bold().monospaced()).foregroundStyle(.secondary)
+            HStack { Button("AUTO") { store.perform("set_energy", value: "none") }.buttonStyle(ChipStyle(active: state.overrides.energy == nil)); ForEach(state.control.energies) { option in Button(option.label) { store.perform("set_energy", value: option.id) }.buttonStyle(ChipStyle(active: state.overrides.energy == option.id)) } }
+        }
+    }
+}
+
+private struct MomentaryEffectPad: View {
+    @EnvironmentObject private var store: RemoteStore
+    let effect: RemoteControlOption; let active: Bool
+    var body: some View {
+        Text(effect.label.uppercased()).font(.headline.bold()).foregroundStyle(.white).frame(maxWidth: .infinity, minHeight: 70)
+            .background(active ? RemoteTheme.accent : Color.white.opacity(0.13)).clipShape(RoundedRectangle(cornerRadius: 14))
+            .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in store.beginMomentary(effect.id) }.onEnded { _ in store.endMomentary(effect.id) })
+            .onDisappear { store.endMomentary(effect.id) }
+            .accessibilityLabel("Hold \(effect.label)")
+    }
+}
+
+private struct LiveActionStyle: ButtonStyle { let tint: Color; func makeBody(configuration: Configuration) -> some View { configuration.label.frame(maxWidth: .infinity, minHeight: 58).foregroundStyle(.white).background(tint.opacity(configuration.isPressed ? 0.6 : 0.92)).clipShape(RoundedRectangle(cornerRadius: 14)) } }
+private struct ChipStyle: ButtonStyle { let active: Bool; func makeBody(configuration: Configuration) -> some View { configuration.label.font(.subheadline.bold()).padding(.horizontal, 13).padding(.vertical, 9).foregroundStyle(active ? .black : .white).background(active ? RemoteTheme.accent : Color.white.opacity(0.12)).clipShape(Capsule()) } }
 
 private struct ConnectionSheet: View {
     @EnvironmentObject private var store: RemoteStore

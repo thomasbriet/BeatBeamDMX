@@ -30,12 +30,22 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
         self.assertNotIn('"/api/dmx/update"', self.store)
         self.assertNotIn('"/api/dmx/blackout"', self.store)
 
+    def test_control_surface_uses_only_scoped_acknowledged_live_commands(self):
+        self.assertIn('"/api/remote-v2/control"', self.store)
+        self.assertIn("RemoteControlAcknowledgement", self.store)
+        self.assertIn("beginMomentary", self.store)
+        self.assertIn("releaseActiveMomentaries", self.store)
+        self.assertIn("LIVE_CONTROL", self.store)
+
     def test_connection_state_and_authoritative_snapshot_reconciliation_exist(self):
         for state in ("notPaired", "connecting", "connected", "reconnecting", "offline", "authFailed", "serverIncompatible"):
             self.assertIn(state, self.store)
         self.assertIn("state.stateRevision > newestRevision", self.store)
         self.assertIn("startEventStream()", self.store)
         self.assertIn("fallbackPollIntervalNanoseconds", self.store)
+
+    def test_qr_scan_starts_the_complete_pairing_exchange(self):
+        self.assertIn("Task { await pair(using: configurationURLText, code: pairingCodeText) }", self.store)
 
     def test_dashboard_is_read_only_and_has_required_live_information(self):
         for text in ("NOW PLAYING", "PRODUCTION", "FRAME", "FALLBACK", "SYSTEM HEALTH", "MUSICAL CONTEXT", "FIXTURE GROUPS", "BLACKOUT ACTIVE", "MANUAL OVERRIDE ACTIVE"):
@@ -44,6 +54,8 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
         self.assertIn("UIInterfaceOrientationPortrait", (ROOT / "ipad-remote/BeatBeamRemote/Info.plist").read_text(encoding="utf-8"))
         self.assertNotIn("setBlackoutEnabled", self.view)
         self.assertNotIn("setAutoShowEnabled", self.view)
+        for symbol in ("LIVE CONTROL", "BLACKOUT", "RELEASE ALL", "REVERT BASELINE", "ENABLE DYNAMIC", "HOLD EFFECT PADS", "CUE SHOTS", "OverridesControlScreen"):
+            self.assertIn(symbol, self.view)
 
 
 if __name__ == "__main__":

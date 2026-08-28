@@ -59,6 +59,7 @@ final class RemoteStore: ObservableObject {
     @Published var showConfiguration = false
     @Published var showScanner = false
     @Published var transientMessage: String?
+    @Published private(set) var pendingActions: Set<String> = []
 
     private let defaults = UserDefaults.standard
     private let storedHostKey = "BeatBeamRemote.V2Host"
@@ -70,6 +71,7 @@ final class RemoteStore: ObservableObject {
     private var failedRefreshes = 0
     private var newestRevision = -1
     private var newestSequence = -1
+    private var momentaryRenewals: [String: Task<Void, Never>] = [:]
     private let fallbackPollIntervalNanoseconds: UInt64 = 2_500_000_000
     private let streamRetryDelayNanoseconds: UInt64 = 900_000_000
     private lazy var session: URLSession = {
@@ -113,6 +115,7 @@ final class RemoteStore: ObservableObject {
     }
 
     func pausePolling() {
+        releaseActiveMomentaries(reason: "connection paused")
         pollingTask?.cancel(); pollingTask = nil
         eventStreamTask?.cancel(); eventStreamTask = nil
     }
@@ -125,6 +128,10 @@ final class RemoteStore: ObservableObject {
     func handleScannedURL(_ value: String) {
         applyPairingInput(value)
         showScanner = false
+        // A pairing QR is a complete, one-use pairing offer. Scanning it must
+        // perform the exchange rather than merely populate a form behind the
+        // scanner, where it looks as if nothing happened.
+        Task { await pair(using: configurationURLText, code: pairingCodeText) }
     }
 
     func saveConfiguration() {
@@ -143,6 +150,60 @@ final class RemoteStore: ObservableObject {
         host = nil; credential = nil; liveState = nil; newestRevision = -1; newestSequence = -1
         connectionState = .notPaired
         showConfiguration = true
+    }
+
+    func perform(_ action: String, value: String? = nil) {
+        Task { await sendControl(action, value: value) }
+    }
+
+    func beginMomentary(_ effect: String) {
+        guard momentaryRenewals[effect] == nil else { return }
+        Task {
+            let accepted = await sendControl("momentary_press", value: effect)
+            guard accepted else { return }
+            momentaryRenewals[effect] = Task { [weak self] in
+                while let self, !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 900_000_000)
+                    guard !Task.isCancelled else { break }
+                    guard await self.sendControl("momentary_renew", value: effect) else { break }
+                }
+            }
+        }
+    }
+
+    func endMomentary(_ effect: String) {
+        momentaryRenewals.removeValue(forKey: effect)?.cancel()
+        perform("momentary_release", value: effect)
+    }
+
+    func releaseActiveMomentaries(reason: String = "") {
+        let effects = Array(momentaryRenewals.keys)
+        momentaryRenewals.values.forEach { $0.cancel() }
+        momentaryRenewals.removeAll()
+        for effect in effects { perform("momentary_release", value: effect) }
+    }
+
+    private func sendControl(_ action: String, value: String? = nil) async -> Bool {
+        guard credential != nil, host != nil else { showConfiguration = true; return false }
+        let pending = "\(action):\(value ?? "")"
+        pendingActions.insert(pending)
+        defer { pendingActions.remove(pending) }
+        do {
+            var request = try authenticatedRequest(path: "/api/remote-v2/control", method: "POST")
+            let body: [String: Any] = [
+                "command_id": UUID().uuidString, "action": action, "value": value ?? NSNull(),
+            ]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+            let ack = try decoder().decode(RemoteControlAcknowledgement.self, from: data)
+            apply(ack.effectiveState)
+            guard ack.accepted else { transientMessage = ack.error ?? "Opdracht geweigerd door BeatBeam."; return false }
+            return (200..<300).contains(http.statusCode) || http.statusCode == 409
+        } catch {
+            applyConnectionError(error)
+            return false
+        }
     }
 
     private func applyPairingInput(_ raw: String) {
@@ -174,7 +235,9 @@ final class RemoteStore: ObservableObject {
             let response: RemotePairingResponse = try await unauthenticatedPost(host: parsed.host, path: "/api/remote-v2/pair", body: [
                 "pairing_code": pairingCode, "client_name": UIDevice.current.name,
             ])
-            guard response.schemaVersion == 2, response.protocolVersion == 2, response.scope == "REMOTE_READ" else {
+            guard response.schemaVersion == 2, response.protocolVersion == 2,
+                  (response.scopes ?? [response.scope]).contains("REMOTE_READ"),
+                  (response.scopes ?? []).contains("LIVE_CONTROL") else {
                 throw RemoteConnectionError.incompatibleServer
             }
             try RemoteKeychain.save(response.credential, account: parsed.host.origin.absoluteString)

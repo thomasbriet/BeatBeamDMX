@@ -15,6 +15,7 @@ struct RemoteLiveStateV2: Decodable, Equatable {
     let fixtures: [RemoteFixtureGroup]
     let overrides: RemoteOverrideState
     let warnings: [RemoteWarning]
+    let control: RemoteControlCapabilities
 }
 
 struct RemoteConnectionMetadata: Decodable, Equatable { let protocolVersion: Int; let compatible: Bool; let server: String? }
@@ -58,7 +59,16 @@ struct RemoteWarning: Decodable, Equatable, Identifiable {
 }
 struct RemotePairingResponse: Decodable {
     let schemaVersion: Int; let protocolVersion: Int; let scope: String; let credential: String
-    let statePath: String; let eventsPath: String
+    let scopes: [String]?; let clientId: String?; let statePath: String; let eventsPath: String; let controlPath: String?
+}
+struct RemoteControlOption: Decodable, Equatable, Identifiable { let id: String; let label: String }
+struct RemoteControlCapabilities: Decodable, Equatable {
+    let scope: String; let colors: [RemoteControlOption]; let phrases: [RemoteControlOption]
+    let energies: [RemoteControlOption]; let momentaryEffects: [RemoteControlOption]
+    let cueShots: [RemoteControlOption]; let momentaryLeaseSeconds: Double
+}
+struct RemoteControlAcknowledgement: Decodable {
+    let accepted: Bool; let commandId: String?; let newStateRevision: Int; let effectiveState: RemoteLiveStateV2; let error: String?
 }
 struct RemoteConnectionHost: Codable, Equatable {
     let origin: URL

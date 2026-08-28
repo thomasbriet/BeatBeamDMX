@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -149,6 +150,83 @@ class RemoteReadScopeTests(unittest.TestCase):
         self.assertFalse(handler.is_authorized_remote_v2_read_request())
         handler.headers = {"Authorization": f"Bearer {issued['token']}"}
         self.assertTrue(handler.is_authorized_remote_v2_read_request())
+
+    def test_pairing_qr_prefers_reachable_lan_before_optional_tailscale(self):
+        with patch("beatbeam_app.SERVER_HOST", "0.0.0.0"), \
+             patch("beatbeam_app._interface_ipv4_candidates", return_value=[
+                 {"name": "en0", "label": "Wi-Fi", "kind": "wifi", "ip": "192.0.2.20"},
+             ]), \
+             patch("beatbeam_app.tailscale_ipv4", return_value="100.64.0.20"):
+            state = beatbeam_app.remote_access_state()
+        self.assertTrue(state["preferred_url"].startswith("http://192.0.2.20:"))
+
+
+class RemoteLiveControlTests(unittest.TestCase):
+    def setUp(self):
+        self.config = beatbeam_app.REMOTE_ACCESS_CONFIG
+        self.dmx = beatbeam_app.DMX
+        self.leases = dict(beatbeam_app.REMOTE_MOMENTARY_LEASES)
+        self.results = dict(beatbeam_app.REMOTE_CONTROL_RESULTS)
+        beatbeam_app.REMOTE_ACCESS_CONFIG = {"remote_credentials": {
+            "control-token": {"scope": "REMOTE_READ", "scopes": ["REMOTE_READ", "LIVE_CONTROL"], "client_id": "ipad-a"},
+            "read-token": {"scope": "REMOTE_READ", "scopes": ["REMOTE_READ"], "client_id": "ipad-b"},
+        }}
+        class FakeDmx:
+            def __init__(self):
+                self.lock = threading.RLock(); self.config = {"auto_show": {}}; self.calls = []
+            def update_config(self, payload): self.calls.append(("update", payload)); self.config.update(payload); return {}
+            def blackout(self): self.calls.append(("blackout",))
+            def trigger_one_shot_cue(self, cue): self.calls.append(("cue", cue))
+            def set_production_show_mode(self, mode): self.calls.append(("mode", mode))
+        beatbeam_app.DMX = FakeDmx()
+        beatbeam_app.REMOTE_MOMENTARY_LEASES.clear(); beatbeam_app.REMOTE_CONTROL_RESULTS.clear()
+        self.state = {"state_revision": 7, "event_sequence": 7, "overrides": {}}
+        self.patcher = patch("beatbeam_app.remote_live_state_v2", return_value=self.state)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop(); beatbeam_app.REMOTE_ACCESS_CONFIG = self.config; beatbeam_app.DMX = self.dmx
+        beatbeam_app.REMOTE_MOMENTARY_LEASES.clear(); beatbeam_app.REMOTE_MOMENTARY_LEASES.update(self.leases)
+        beatbeam_app.REMOTE_CONTROL_RESULTS.clear(); beatbeam_app.REMOTE_CONTROL_RESULTS.update(self.results)
+
+    def command(self, action, value=None, command_id="command-1", **extra):
+        return beatbeam_app.remote_live_control_command("control-token", {"command_id": command_id, "action": action, "value": value, **extra})
+
+    def test_live_control_allowlist_ack_and_idempotent_manual_color(self):
+        first = self.command("set_color", "red")
+        duplicate = self.command("set_color", "red")
+        self.assertTrue(first["accepted"]); self.assertEqual(first, duplicate)
+        self.assertEqual(1, len(beatbeam_app.DMX.calls))
+        self.assertEqual("red", beatbeam_app.DMX.calls[0][1]["auto_show"]["override_color"])
+        denied = self.command("developer_force_reanalyze", command_id="nope")
+        self.assertFalse(denied["accepted"]); self.assertIn("allowlisted", denied["error"])
+
+    def test_phrase_energy_cue_release_all_blackout_and_modes_are_bounded(self):
+        self.assertTrue(self.command("set_phrase", "chorus", command_id="phrase")["accepted"])
+        self.assertTrue(self.command("set_energy", "high", command_id="energy")["accepted"])
+        self.assertTrue(self.command("trigger_cue", "white_hit", command_id="cue")["accepted"])
+        self.assertTrue(self.command("blackout_on", command_id="blackout")["accepted"])
+        self.assertTrue(self.command("blackout_off", command_id="unblackout")["accepted"])
+        self.assertTrue(self.command("revert_baseline", command_id="baseline")["accepted"])
+        self.assertTrue(self.command("enable_dynamic_composer", command_id="dynamic")["accepted"])
+        self.assertTrue(self.command("release_all", command_id="release")["accepted"])
+        self.assertIn(("cue", "white_hit"), beatbeam_app.DMX.calls)
+        self.assertIn(("blackout",), beatbeam_app.DMX.calls)
+
+    def test_momentary_lease_is_client_owned_and_expiry_releases(self):
+        self.assertTrue(self.command("momentary_press", "par_chase", command_id="press")["accepted"])
+        self.assertIn("par_chase", beatbeam_app.REMOTE_MOMENTARY_LEASES)
+        before = len(beatbeam_app.DMX.calls)
+        self.assertTrue(self.command("momentary_renew", "par_chase", command_id="renew")["accepted"])
+        self.assertGreater(len(beatbeam_app.DMX.calls), before)
+        beatbeam_app._reap_remote_momentary_leases(now=beatbeam_app.REMOTE_MOMENTARY_LEASES["par_chase"]["expires_at"] + 1)
+        self.assertNotIn("par_chase", beatbeam_app.REMOTE_MOMENTARY_LEASES)
+        self.assertFalse(beatbeam_app.DMX.calls[-1][1]["auto_show"]["override_par_chase"])
+
+    def test_read_scope_cannot_control_and_stale_revision_rejects(self):
+        self.assertFalse(beatbeam_app.remote_live_control_token_is_valid("read-token"))
+        stale = self.command("set_color", "blue", command_id="stale", expected_state_revision=6)
+        self.assertFalse(stale["accepted"]); self.assertEqual("stale_state_revision", stale["error"])
 
 
 if __name__ == "__main__":

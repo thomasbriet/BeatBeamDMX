@@ -89,6 +89,7 @@ API_SCHEMA_VERSION = 4
 REMOTE_LIVE_STATE_SCHEMA_VERSION = 2
 REMOTE_PROTOCOL_VERSION = 2
 REMOTE_READ_SCOPE = "REMOTE_READ"
+REMOTE_LIVE_CONTROL_SCOPE = "LIVE_CONTROL"
 REMOTE_LIVE_EVENT_INTERVAL_SECONDS = 0.20
 REMOTE_PAIRING_MAX_FAILURES = 5
 REMOTE_PAIRING_WINDOW_SECONDS = 60.0
@@ -138,6 +139,11 @@ REMOTE_LIVE_STATE_VERSION = {
 }
 REMOTE_PAIRING_ATTEMPTS_LOCK = threading.Lock()
 REMOTE_PAIRING_ATTEMPTS = {}
+REMOTE_CONTROL_LOCK = threading.RLock()
+REMOTE_CONTROL_RESULTS = {}
+REMOTE_MOMENTARY_LEASES = {}
+REMOTE_MOMENTARY_LEASE_SECONDS = 3.0
+REMOTE_CONTROL_RESULT_LIMIT = 128
 SIMULATOR_SMART_CUE_DATA_PATHS = (
     ROOT / "smart-cue-review" / "SMART_CUE_REVIEW_DATA.json",
     ROOT / "artifacts" / "smart-cue-review" / "SMART_CUE_REVIEW_DATA.json",
@@ -16638,7 +16644,7 @@ def load_remote_access_config():
                         str(value): dict(metadata)
                         for value, metadata in credentials.items()
                         if isinstance(value, str) and value and isinstance(metadata, dict)
-                        and str(metadata.get("scope") or "") == REMOTE_READ_SCOPE
+                        and _remote_credential_scopes(metadata)
                     },
                 }
     config = default_remote_access_config()
@@ -16653,13 +16659,17 @@ def save_remote_access_config(config):
         "pairing_code": str(config.get("pairing_code") or "").strip(),
         "remote_credentials": {
             str(value): {
+                # `scope` retains V2 read-client compatibility. `scopes` is the
+                # explicit capability set used for every authorization decision.
                 "scope": REMOTE_READ_SCOPE,
+                "scopes": sorted(_remote_credential_scopes(metadata)),
                 "created_at": int(metadata.get("created_at") or 0),
                 "client_name": str(metadata.get("client_name") or "iPad")[:80],
+                "client_id": str(metadata.get("client_id") or "")[:80],
             }
             for value, metadata in (config.get("remote_credentials") or {}).items()
             if isinstance(value, str) and value and isinstance(metadata, dict)
-            and str(metadata.get("scope") or "") == REMOTE_READ_SCOPE
+            and _remote_credential_scopes(metadata)
         },
     }
     if not payload["token"]:
@@ -16718,8 +16728,19 @@ def remote_access_pairing_code():
     return code if code.isdigit() and len(code) == 6 else None
 
 
-def remote_read_credential(token):
-    """Return a V2 read credential without ever accepting the legacy token."""
+def _remote_credential_scopes(metadata):
+    if not isinstance(metadata, dict):
+        return set()
+    scopes = metadata.get("scopes")
+    if isinstance(scopes, (list, tuple, set)):
+        return {str(scope) for scope in scopes if str(scope) in {REMOTE_READ_SCOPE, REMOTE_LIVE_CONTROL_SCOPE}}
+    # Credentials issued by the read-only V2 foundation migrate safely as read
+    # only. They must pair once more before they can control a show.
+    return {REMOTE_READ_SCOPE} if str(metadata.get("scope") or "") == REMOTE_READ_SCOPE else set()
+
+
+def remote_credential(token):
+    """Return a scoped V2 credential without ever accepting the legacy token."""
     candidate = str(token or "").strip()
     if not candidate:
         return None
@@ -16730,9 +16751,23 @@ def remote_read_credential(token):
     return None
 
 
+def remote_read_credential(token):
+    credential = remote_credential(token)
+    return credential if REMOTE_READ_SCOPE in _remote_credential_scopes(credential) else None
+
+
 def remote_read_token_is_valid(token):
     credential = remote_read_credential(token)
-    return bool(credential and credential.get("scope") == REMOTE_READ_SCOPE)
+    return bool(credential)
+
+
+def remote_live_control_credential(token):
+    credential = remote_credential(token)
+    return credential if REMOTE_LIVE_CONTROL_SCOPE in _remote_credential_scopes(credential) else None
+
+
+def remote_live_control_token_is_valid(token):
+    return bool(remote_live_control_credential(token))
 
 
 def _allow_pairing_attempt(client_ip):
@@ -16775,8 +16810,10 @@ def issue_remote_read_credential(pairing_code, client_name="iPad"):
     token = secrets.token_urlsafe(32)
     credentials[token] = {
         "scope": REMOTE_READ_SCOPE,
+        "scopes": [REMOTE_READ_SCOPE, REMOTE_LIVE_CONTROL_SCOPE],
         "created_at": int(time.time()),
         "client_name": str(client_name or "iPad").strip()[:80] or "iPad",
+        "client_id": secrets.token_urlsafe(12),
     }
     config = {
         **config,
@@ -16786,7 +16823,11 @@ def issue_remote_read_credential(pairing_code, client_name="iPad"):
     REMOTE_ACCESS_CONFIG = config
     save_remote_access_config(config)
     REMOTE_ADDRESS_CACHE["updated_at"] = 0.0
-    return {"token": token, "scope": REMOTE_READ_SCOPE, "protocol_version": REMOTE_PROTOCOL_VERSION}
+    return {
+        "token": token, "scope": REMOTE_READ_SCOPE,
+        "scopes": [REMOTE_READ_SCOPE, REMOTE_LIVE_CONTROL_SCOPE],
+        "client_id": credentials[token]["client_id"], "protocol_version": REMOTE_PROTOCOL_VERSION,
+    }
 
 
 def remote_access_state():
@@ -16836,7 +16877,11 @@ def remote_access_state():
         if tailscale_ip
         else None
     )
-    preferred_url = usb_url or tailscale_url or lan_url or f"{local_url}{pairing_suffix}"
+    # This URL is rendered as the physical iPad pairing QR in the native app.
+    # Prefer the directly reachable local network before an optional overlay
+    # address: an installed Tailscale interface does not imply that the iPad
+    # has that route available.
+    preferred_url = usb_url or lan_url or tailscale_url or f"{local_url}{pairing_suffix}"
     payload = {
         "enabled": bind_host not in ("127.0.0.1", "localhost"),
         "bind_host": bind_host,
@@ -17386,6 +17431,146 @@ def _remote_live_warnings(live_ui, dmx_state, selector, overrides):
     return warnings
 
 
+REMOTE_MOMENTARY_EFFECT_KEYS = {
+    "manual_strobe": "override_manual_strobe",
+    "audience_sweep": "override_audience_sweep",
+    "all_on": "override_all_on",
+    "par_chase": "override_par_chase",
+    "par_snake": "override_par_snake",
+}
+
+
+def _remote_auto_show_update(updates):
+    """Apply only the existing manual override fields, never raw DMX config."""
+    with DMX.lock:
+        auto_show = dict((DMX.config or {}).get("auto_show") or {})
+    auto_show.update(updates)
+    return DMX.update_config({"auto_show": auto_show})
+
+
+def _release_remote_momentary_effect(effect, owner=None):
+    key = REMOTE_MOMENTARY_EFFECT_KEYS.get(effect)
+    if not key:
+        return False
+    with REMOTE_CONTROL_LOCK:
+        lease = REMOTE_MOMENTARY_LEASES.get(effect)
+        if lease is None or (owner is not None and lease.get("owner") != owner):
+            return False
+        REMOTE_MOMENTARY_LEASES.pop(effect, None)
+    _remote_auto_show_update({key: False})
+    return True
+
+
+def _reap_remote_momentary_leases(now=None):
+    now = time.monotonic() if now is None else float(now)
+    with REMOTE_CONTROL_LOCK:
+        expired = [effect for effect, lease in REMOTE_MOMENTARY_LEASES.items()
+                   if float(lease.get("expires_at") or 0.0) <= now]
+    for effect in expired:
+        _release_remote_momentary_effect(effect)
+    return expired
+
+
+def _remote_control_client_id(token):
+    credential = remote_live_control_credential(token) or {}
+    return str(credential.get("client_id") or "")
+
+
+def _remote_control_ack(command_id, accepted, error=None):
+    state = remote_live_state_v2()
+    return {
+        "accepted": bool(accepted), "command_id": command_id,
+        "new_state_revision": state["state_revision"],
+        "effective_state": state, "error": error,
+    }
+
+
+def remote_live_control_command(token, payload):
+    """The only remote write path: bounded, idempotent live-performance intent."""
+    _reap_remote_momentary_leases()
+    command_id = str((payload or {}).get("command_id") or "").strip()
+    action = str((payload or {}).get("action") or "").strip().lower()
+    owner = _remote_control_client_id(token)
+    if not command_id or not owner:
+        return _remote_control_ack(command_id or None, False, "command_id and LIVE_CONTROL credential required")
+    with REMOTE_CONTROL_LOCK:
+        previous = REMOTE_CONTROL_RESULTS.get(command_id)
+        if previous is not None:
+            return dict(previous)
+    expected = (payload or {}).get("expected_state_revision")
+    if expected is not None:
+        try:
+            if int(expected) != int(remote_live_state_v2()["state_revision"]):
+                result = _remote_control_ack(command_id, False, "stale_state_revision")
+                with REMOTE_CONTROL_LOCK: REMOTE_CONTROL_RESULTS[command_id] = result
+                return result
+        except (TypeError, ValueError):
+            return _remote_control_ack(command_id, False, "invalid_expected_state_revision")
+    try:
+        value = (payload or {}).get("value")
+        if action == "set_color":
+            color = live_override_color_name(value)
+            if str(value or "none").strip().lower() not in LIVE_OVERRIDE_COLORS:
+                raise ValueError("unsupported manual color")
+            _remote_auto_show_update({"override_color": color})
+        elif action == "set_phrase":
+            phrase = auto_show_phrase_override_name(value)
+            if str(value or "none").strip().lower() not in AUTO_SHOW_PHRASE_OVERRIDES:
+                raise ValueError("unsupported phrase override")
+            _remote_auto_show_update({"override_phrase": phrase})
+        elif action == "set_energy":
+            energy = live_override_energy_name(value)
+            if str(value or "none").strip().lower() not in {"none", "low", "mid", "high"}:
+                raise ValueError("unsupported energy override")
+            _remote_auto_show_update({"override_energy": energy})
+        elif action in {"momentary_press", "momentary_renew", "momentary_release"}:
+            effect = str(value or "").strip().lower()
+            key = REMOTE_MOMENTARY_EFFECT_KEYS.get(effect)
+            if not key:
+                raise ValueError("unsupported momentary effect")
+            with REMOTE_CONTROL_LOCK:
+                lease = REMOTE_MOMENTARY_LEASES.get(effect)
+                if action == "momentary_release":
+                    if lease and lease.get("owner") != owner:
+                        raise ValueError("momentary effect is owned by another client")
+                elif lease and lease.get("owner") != owner:
+                    raise ValueError("momentary effect is leased by another client")
+                elif action == "momentary_renew" and not lease:
+                    raise ValueError("momentary effect has no active lease")
+                if action != "momentary_release":
+                    REMOTE_MOMENTARY_LEASES[effect] = {"owner": owner, "expires_at": time.monotonic() + REMOTE_MOMENTARY_LEASE_SECONDS}
+            if action == "momentary_release":
+                _release_remote_momentary_effect(effect, owner)
+            else:
+                _remote_auto_show_update({key: True})
+        elif action == "trigger_cue":
+            cue = one_shot_cue_name(value)
+            if cue == "none": raise ValueError("unsupported cue shot")
+            DMX.trigger_one_shot_cue(cue)
+        elif action == "release_all":
+            with REMOTE_CONTROL_LOCK:
+                REMOTE_MOMENTARY_LEASES.clear()
+            _remote_auto_show_update({"override_phrase": "none", "override_color": "none", "override_energy": "none", **{key: False for key in REMOTE_MOMENTARY_EFFECT_KEYS.values()}})
+        elif action == "blackout_on":
+            DMX.blackout()
+        elif action == "blackout_off":
+            DMX.update_config({"blackout_active": False})
+        elif action == "revert_baseline":
+            DMX.set_production_show_mode(BASELINE_ONLY)
+        elif action == "enable_dynamic_composer":
+            DMX.set_production_show_mode(DYNAMIC_COMPOSER_ENABLED)
+        else:
+            raise ValueError("LIVE_CONTROL action is not allowlisted")
+        result = _remote_control_ack(command_id, True)
+    except Exception as exc:
+        result = _remote_control_ack(command_id, False, str(exc))
+    with REMOTE_CONTROL_LOCK:
+        REMOTE_CONTROL_RESULTS[command_id] = result
+        while len(REMOTE_CONTROL_RESULTS) > REMOTE_CONTROL_RESULT_LIMIT:
+            REMOTE_CONTROL_RESULTS.pop(next(iter(REMOTE_CONTROL_RESULTS)))
+    return result
+
+
 def remote_live_state_v2():
     """Project existing authoritative runtime state for a remote presentation.
 
@@ -17393,6 +17578,7 @@ def remote_live_state_v2():
     readiness or musical-state authority. It deliberately consumes the same
     typed state already used by the native Mac Live Show.
     """
+    _reap_remote_momentary_leases()
     state = full_state()
     dmx_state = state.get("dmx") if isinstance(state.get("dmx"), dict) else {}
     live_ui = state.get("live_ui") if isinstance(state.get("live_ui"), dict) else {}
@@ -17487,6 +17673,15 @@ def remote_live_state_v2():
         },
         "fixtures": _remote_live_fixture_groups(dmx_state),
         "overrides": overrides,
+        "control": {
+            "scope": REMOTE_LIVE_CONTROL_SCOPE,
+            "colors": [{"id": key, "label": live_override_color_label(key)} for key in MANUAL_COLOR_PRESETS],
+            "phrases": [{"id": key, "label": label} for key, label in AUTO_SHOW_PHRASE_OVERRIDES.items() if key != "none"],
+            "energies": [{"id": key, "label": live_override_energy_label(key)} for key in ("low", "mid", "high")],
+            "momentary_effects": [{"id": key, "label": key.replace("_", " ").title()} for key in REMOTE_MOMENTARY_EFFECT_KEYS],
+            "cue_shots": [{"id": key, "label": value["label"]} for key, value in ONE_SHOT_CUES.items()],
+            "momentary_lease_seconds": REMOTE_MOMENTARY_LEASE_SECONDS,
+        },
     }
     payload["warnings"] = _remote_live_warnings(live_ui, dmx_state, selector, overrides)
     signature = json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str)
@@ -17568,6 +17763,11 @@ class AppHandler(BaseHTTPRequestHandler):
             return True
         return remote_read_token_is_valid(self.remote_request_token())
 
+    def is_authorized_remote_v2_live_control_request(self):
+        # Loopback remains useful for local diagnostics, but it is not a remote
+        # control bypass: every mutation still requires the scoped credential.
+        return remote_live_control_token_is_valid(self.remote_request_token())
+
     def deny_remote_request(self, path):
         if path.startswith("/api/"):
             self.send_json({"error": "remote access token required"}, status=403)
@@ -17606,9 +17806,12 @@ class AppHandler(BaseHTTPRequestHandler):
             "schema_version": REMOTE_LIVE_STATE_SCHEMA_VERSION,
             "protocol_version": REMOTE_PROTOCOL_VERSION,
             "scope": REMOTE_READ_SCOPE,
+            "scopes": credential["scopes"],
             "credential": credential["token"],
+            "client_id": credential["client_id"],
             "state_path": "/api/remote-v2/state",
             "events_path": "/api/remote-v2/events",
+            "control_path": "/api/remote-v2/control",
         })
 
     def do_GET(self):
@@ -17687,6 +17890,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.pair_remote_v2(self.read_json())
             except Exception as exc:
                 self.deny_remote_v2_request(str(exc), status=400)
+            return
+        if path == "/api/remote-v2/control":
+            if not self.is_authorized_remote_v2_live_control_request():
+                self.deny_remote_v2_request("LIVE_CONTROL credential required")
+                return
+            result = remote_live_control_command(self.remote_request_token(), self.read_json())
+            self.send_json(result, status=200 if result.get("accepted") else 409)
             return
         if path.startswith("/api/remote-v2/"):
             self.deny_remote_v2_request("REMOTE_READ credentials cannot mutate BeatBeam", status=403)

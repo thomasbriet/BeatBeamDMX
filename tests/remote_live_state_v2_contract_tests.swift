@@ -22,7 +22,7 @@ let healthy = """
   "decks": [{ "number": 1, "loaded": true, "title": "Track", "artist": "Artist", "playing": true, "master": true, "active": true, "analysis_readiness": "READY", "prewarm_readiness": "READY" }],
   "musical_state": { "section": "chorus", "section_progress": 0.5, "relative_energy": 0.8, "energy_trajectory": "rising", "recurrence": 0.2, "material_context": null, "current_rme": null, "event_envelope": { "active": false, "phase": null, "progress": null, "event_type": null }, "effective_intensity": 0.8, "analyzed_intensity": 0.7, "live_intensity_valid": true },
   "dmx": { "connected": true, "device_name": "DMX", "renderer_healthy": true, "renderer_active": true, "frame_sequence": 10, "last_error": null, "dispatch_failures": 0, "physical_output_available": true },
-  "fixtures": [], "overrides": { "any_active": false, "phrase": null, "energy": null, "color": null, "momentary_effects": [], "blackout": false, "automatic": true }, "warnings": [], "future_additive_field": "ignored"
+  "fixtures": [], "overrides": { "any_active": false, "phrase": null, "energy": null, "color": null, "momentary_effects": [], "blackout": false, "automatic": true }, "control": { "scope": "LIVE_CONTROL", "colors": [{"id":"red","label":"Red"}], "phrases": [], "energies": [], "momentary_effects": [], "cue_shots": [], "momentary_lease_seconds": 3 }, "warnings": [], "future_additive_field": "ignored"
 }
 """
 
