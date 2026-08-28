@@ -19,15 +19,18 @@ struct ContentView: View {
                 LinearGradient(colors: [Color(red: 0.05, green: 0.07, blue: 0.11), RemoteTheme.background], startPoint: .topLeading, endPoint: .bottomTrailing)
                     .ignoresSafeArea()
                 if let state = store.liveState {
-                    TabView {
-                        LiveControlScreen(state: state).environmentObject(store)
-                            .tabItem { Label("Live", systemImage: "slider.horizontal.3") }
-                        OverridesControlScreen(state: state).environmentObject(store)
-                            .tabItem { Label("Overrides", systemImage: "hand.raised.fill") }
-                        liveDashboard(state)
-                            .tabItem { Label("Status", systemImage: "waveform.path.ecg") }
+                    VStack(spacing: 0) {
+                        if state.overrides.blackout { BlackoutAuthorityBanner() }
+                        TabView {
+                            LiveControlScreen(state: state).environmentObject(store)
+                                .tabItem { Label("Live", systemImage: "slider.horizontal.3") }
+                            OverridesControlScreen(state: state).environmentObject(store)
+                                .tabItem { Label("Overrides", systemImage: "hand.raised.fill") }
+                            liveDashboard(state)
+                                .tabItem { Label("Status", systemImage: "waveform.path.ecg") }
+                        }
+                        .tint(RemoteTheme.accent)
                     }
-                    .tint(RemoteTheme.accent)
                 } else { disconnectedDashboard }
             }
             .toolbar(.hidden, for: .navigationBar)
@@ -56,7 +59,7 @@ struct ContentView: View {
                 .font(.system(size: 30, weight: .bold)).foregroundStyle(.white)
             Text(store.connectionState.label)
                 .font(.headline).foregroundStyle(.secondary)
-            Text("Deze iPad leest uitsluitend de authoritative Live Show-state. Showbediening is in deze versie bewust niet beschikbaar.")
+            Text("Deze iPad ontvangt de authoritative Live Show-state en gebruikt alleen scoped Live Control-opdrachten.")
                 .multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 420)
             Button(store.connectionState == .notPaired ? "Pair iPad" : "Verbind opnieuw") {
                 if store.connectionState == .notPaired { store.showConfiguration = true } else { store.reconnect() }
@@ -71,8 +74,7 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     header(state)
-                    if state.overrides.blackout { blackoutBanner }
-                    else if state.overrides.anyActive { overrideBanner(state.overrides) }
+                    if !state.overrides.blackout && state.overrides.anyActive { overrideBanner(state.overrides) }
                     warningStack(state.warnings)
                     if proxy.size.width > proxy.size.height {
                         landscapeGrid(state)
@@ -210,15 +212,9 @@ struct ContentView: View {
         }
     }
 
-    private var blackoutBanner: some View {
-        HStack { Image(systemName: "moon.fill").font(.title2); Text("BLACKOUT ACTIVE").font(.title2.bold()); Spacer(); Text("READ-ONLY").font(.caption.bold().monospaced()) }
-            .foregroundStyle(.white).padding(14).background(RemoteTheme.danger).clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .accessibilityLabel("Blackout actief. Deze remote is alleen lezen.")
-    }
-
     private func overrideBanner(_ overrides: RemoteOverrideState) -> some View {
         let details = [overrides.phrase, overrides.energy, overrides.color, overrides.momentaryEffects.isEmpty ? nil : overrides.momentaryEffects.joined(separator: ", ")].compactMap { $0 }.joined(separator: " · ")
-        return HStack { Image(systemName: "hand.raised.fill"); VStack(alignment: .leading) { Text("MANUAL OVERRIDE ACTIVE").font(.headline.bold()); Text(details.isEmpty ? "Automatic frame temporarily overridden" : details).font(.caption) }; Spacer(); Text("READ-ONLY").font(.caption.bold().monospaced()) }
+        return HStack { Image(systemName: "hand.raised.fill"); VStack(alignment: .leading) { Text("MANUAL OVERRIDE ACTIVE").font(.headline.bold()); Text(details.isEmpty ? "Automatic frame temporarily overridden" : details).font(.caption) }; Spacer(); Text("LIVE CONTROL").font(.caption.bold().monospaced()) }
             .foregroundStyle(.black).padding(12).background(RemoteTheme.warning).clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .accessibilityLabel("Handmatige override actief. \(details)")
     }
@@ -240,7 +236,6 @@ private struct LiveControlScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     liveHeader
-                    if state.overrides.blackout { blackoutState }
                     HStack(spacing: 12) {
                         blackoutControl
                         Button("RELEASE ALL") { store.perform("release_all") }
@@ -283,10 +278,6 @@ private struct LiveControlScreen: View {
         }
     }
 
-    private var blackoutState: some View {
-        Text("BLACKOUT ACTIVE — RELEASE: HOLD BLACKOUT FOR 1.2s").font(.headline.bold()).foregroundStyle(.white).frame(maxWidth: .infinity).padding(14).background(RemoteTheme.danger).clipShape(RoundedRectangle(cornerRadius: 14))
-    }
-
     private var blackoutControl: some View {
         Group {
             if state.overrides.blackout {
@@ -318,15 +309,27 @@ private struct LiveControlScreen: View {
     }
     private var momentaryPads: some View {
         RemoteCard(title: "HOLD EFFECT PADS") {
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                ForEach(state.control.momentaryEffects) { effect in MomentaryEffectPad(effect: effect, active: state.overrides.momentaryEffects.contains(effect.id)).environmentObject(store) }
+            let enabled = state.control.momentaryEffects.filter(\.isAvailable)
+            let temporary = state.control.momentaryEffects.filter { !$0.isAvailable && $0.isTemporarilyUnavailable }
+            if enabled.isEmpty && temporary.isEmpty { Text("Geen hold-effecten voor deze fixtureopstelling.").foregroundStyle(.secondary) }
+            else {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    ForEach(enabled) { effect in MomentaryEffectPad(effect: effect, active: state.overrides.momentaryEffects.contains(effect.id)).environmentObject(store) }
+                    ForEach(temporary) { effect in UnavailableEffectPad(effect: effect) }
+                }
             }
         }
     }
     private var cueShots: some View {
         RemoteCard(title: "CUE SHOTS") {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 128))], spacing: 9) {
-                ForEach(state.control.cueShots) { cue in Button(cue.label) { store.perform("trigger_cue", value: cue.id) }.buttonStyle(LiveActionStyle(tint: .indigo)) }
+            let enabled = state.control.cueShots.filter(\.isAvailable)
+            let temporary = state.control.cueShots.filter { !$0.isAvailable && $0.isTemporarilyUnavailable }
+            if enabled.isEmpty && temporary.isEmpty { Text("Geen cue-shots voor deze fixtureopstelling.").foregroundStyle(.secondary) }
+            else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 128))], spacing: 9) {
+                    ForEach(enabled) { cue in Button(cue.label) { store.perform("trigger_cue", value: cue.id) }.buttonStyle(LiveActionStyle(tint: .indigo)) }
+                    ForEach(temporary) { cue in UnavailableEffectPad(effect: cue) }
+                }
             }
         }
     }
@@ -342,8 +345,8 @@ private struct OverridesControlScreen: View {
             Button("RELEASE ALL") { store.perform("release_all") }.buttonStyle(LiveActionStyle(tint: .orange))
             RemoteCard(title: "COLORS") { ColorGrid(state: state).environmentObject(store) }
             RemoteCard(title: "PHRASE / ENERGY") { OverrideChips(state: state).environmentObject(store) }
-            RemoteCard(title: "MOMENTARY EFFECTS") { LazyVGrid(columns: [GridItem(.adaptive(minimum: 150))], spacing: 10) { ForEach(state.control.momentaryEffects) { MomentaryEffectPad(effect: $0, active: state.overrides.momentaryEffects.contains($0.id)).environmentObject(store) } } }
-            RemoteCard(title: "CUE SHOTS") { LazyVGrid(columns: [GridItem(.adaptive(minimum: 145))], spacing: 10) { ForEach(state.control.cueShots) { cue in Button(cue.label) { store.perform("trigger_cue", value: cue.id) }.buttonStyle(LiveActionStyle(tint: .indigo)) } } }
+            RemoteCard(title: "MOMENTARY EFFECTS") { LazyVGrid(columns: [GridItem(.adaptive(minimum: 150))], spacing: 10) { ForEach(state.control.momentaryEffects.filter(\.isAvailable)) { MomentaryEffectPad(effect: $0, active: state.overrides.momentaryEffects.contains($0.id)).environmentObject(store) } } }
+            RemoteCard(title: "CUE SHOTS") { LazyVGrid(columns: [GridItem(.adaptive(minimum: 145))], spacing: 10) { ForEach(state.control.cueShots.filter(\.isAvailable)) { cue in Button(cue.label) { store.perform("trigger_cue", value: cue.id) }.buttonStyle(LiveActionStyle(tint: .indigo)) } } }
         }.padding(16).frame(maxWidth: 1000, alignment: .leading) }
     }
 }
@@ -375,13 +378,42 @@ private struct OverrideChips: View {
 
 private struct MomentaryEffectPad: View {
     @EnvironmentObject private var store: RemoteStore
-    let effect: RemoteControlOption; let active: Bool
+    let effect: RemoteEffectCapability; let active: Bool
     var body: some View {
         Text(effect.label.uppercased()).font(.headline.bold()).foregroundStyle(.white).frame(maxWidth: .infinity, minHeight: 70)
             .background(active ? RemoteTheme.accent : Color.white.opacity(0.13)).clipShape(RoundedRectangle(cornerRadius: 14))
             .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in store.beginMomentary(effect.id) }.onEnded { _ in store.endMomentary(effect.id) })
             .onDisappear { store.endMomentary(effect.id) }
             .accessibilityLabel("Hold \(effect.label)")
+    }
+}
+
+private struct UnavailableEffectPad: View {
+    let effect: RemoteEffectCapability
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(effect.label.uppercased()).font(.caption.bold()).foregroundStyle(.secondary)
+            Text(effect.reasonIfUnavailable ?? "Tijdelijk niet beschikbaar").font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading).padding(8)
+        .background(Color.white.opacity(0.05)).clipShape(RoundedRectangle(cornerRadius: 12))
+        .accessibilityLabel("\(effect.label) niet beschikbaar. \(effect.reasonIfUnavailable ?? "")")
+    }
+}
+
+private struct BlackoutAuthorityBanner: View {
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "moon.fill").font(.title2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("BLACKOUT ACTIVE").font(.title2.bold())
+                Text("Physical output is blacked out. Preview remains underlying show intent.").font(.caption.bold())
+            }
+            Spacer()
+            Text("HOLD BLACKOUT TO RELEASE").font(.caption2.bold().monospaced())
+        }
+        .foregroundStyle(.white).padding(14).background(RemoteTheme.danger)
+        .accessibilityLabel("Blackout actief. Fysieke output is uit. Preview blijft onderliggende showintentie.")
     }
 }
 
@@ -394,7 +426,7 @@ private struct ConnectionSheet: View {
         NavigationStack {
             Form {
                 Section("Pair met BeatBeam") {
-                    Text("Scan de pairing-QR uit BeatBeam op je Mac, of voer het adres en de zes-cijferige code in. De iPad ontvangt uitsluitend een REMOTE_READ-credential.")
+                    Text("Scan de pairing-QR uit BeatBeam op je Mac, of voer het adres en de zes-cijferige code in. De iPad ontvangt scoped REMOTE_READ en LIVE_CONTROL-credentials.")
                         .font(.footnote).foregroundStyle(.secondary)
                     TextField("BeatBeam-adres", text: $store.configurationURLText).textInputAutocapitalization(.never).autocorrectionDisabled()
                     TextField("Pairingcode", text: $store.pairingCodeText).keyboardType(.numberPad)

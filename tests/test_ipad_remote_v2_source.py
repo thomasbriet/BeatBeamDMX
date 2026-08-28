@@ -66,6 +66,16 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
         for symbol in ("LIVE CONTROL", "BLACKOUT", "RELEASE ALL", "REVERT BASELINE", "ENABLE DYNAMIC", "HOLD EFFECT PADS", "CUE SHOTS", "OverridesControlScreen"):
             self.assertIn(symbol, self.view)
 
+    def test_effect_pads_are_backend_capability_driven_and_blackout_is_authoritative(self):
+        self.assertIn("struct RemoteEffectCapability", self.models)
+        self.assertIn("isAvailable", self.models)
+        self.assertIn("isTemporarilyUnavailable", self.models)
+        self.assertIn("filter(\\.isAvailable)", self.view)
+        self.assertIn("UnavailableEffectPad", self.view)
+        self.assertIn("BlackoutAuthorityBanner", self.view)
+        self.assertIn("Physical output is blacked out", self.view)
+        self.assertIn("Preview remains underlying show intent", self.view)
+
 
 if __name__ == "__main__":
     unittest.main()

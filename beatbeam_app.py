@@ -17440,6 +17440,74 @@ REMOTE_MOMENTARY_EFFECT_KEYS = {
 }
 
 
+def _remote_live_effect_capabilities(dmx_state):
+    """Project only effects the configured physical rig can actually render.
+
+    The remote must not infer fixture support from a label. This reads the
+    same enabled slot modes that the production renderer consumes. A missing
+    fixture capability is structural; disconnected output is temporary.
+    """
+    slots = dmx_state.get("slots") if isinstance(dmx_state.get("slots"), dict) else {}
+    facts = []
+    for slot in slots.values():
+        if not isinstance(slot, dict) or not slot.get("enabled"):
+            continue
+        try:
+            fixture = find_fixture(FIXTURE_LIBRARY, slot.get("fixture"))
+            mode = find_mode(fixture, slot.get("mode"))
+            capabilities = mode_capabilities(mode)
+        except Exception:
+            continue
+        channel_types = {channel.get("type") for channel in mode.get("channels", [])}
+        role = "moving" if capabilities["pan"] or capabilities["tilt"] else _remote_live_role(slot)
+        facts.append({
+            "role": role,
+            "strobe": bool(capabilities["strobe"]),
+            "motion": bool(capabilities["pan"] or capabilities["tilt"]),
+            "color": "color" in channel_types,
+        })
+
+    counts = {
+        "all": len(facts),
+        "strobe": sum(fact["strobe"] for fact in facts),
+        "moving": sum(fact["motion"] and fact["role"] == "moving" for fact in facts),
+        "par": sum(fact["role"] == "par" for fact in facts),
+        "color": sum(fact["color"] for fact in facts),
+    }
+    renderer = dmx_state.get("renderer_health") if isinstance(dmx_state.get("renderer_health"), dict) else {}
+    output_ready = bool(dmx_state.get("connected")) and bool(renderer.get("healthy")) and bool(renderer.get("active"))
+    definitions = (
+        ("manual_strobe", "Manual Strobe", "momentary", "strobe-capable fixtures", "strobe", 1),
+        ("audience_sweep", "Audience Sweep", "momentary", "moving fixtures", "moving", 1),
+        ("all_on", "All On", "momentary", "all enabled fixtures", "all", 1),
+        ("par_chase", "PAR Chase", "momentary", "PAR fixtures", "par", 2),
+        ("par_snake", "PAR Snake", "momentary", "PAR fixtures", "par", 2),
+        ("audience_riser", "Audience Rise", "one_shot", "all colour fixtures; motion on movers", "color", 1),
+        ("white_hit", "White Hit", "one_shot", "all colour fixtures", "color", 1),
+        ("color_burst", "Color Burst", "one_shot", "all colour fixtures", "color", 1),
+        ("snap_fan", "Snap Fan", "one_shot", "moving fixtures", "moving", 2),
+        ("mirror_bounce", "Mirror Bounce", "one_shot", "moving fixtures", "moving", 2),
+        ("par_chase_burst", "PAR Chase", "one_shot", "PAR fixtures", "par", 2),
+    )
+    result = []
+    for effect_id, label, kind, target_group, requirement, minimum in definitions:
+        available = counts[requirement] >= minimum
+        reason = None
+        temporary = False
+        if not available:
+            reason = f"Requires {minimum}+ {target_group} in the current fixture setup"
+        elif not output_ready:
+            available = False
+            temporary = True
+            reason = "DMX output is disconnected or renderer is unavailable"
+        result.append({
+            "id": effect_id, "label": label, "kind": kind, "available": available,
+            "reason_if_unavailable": reason, "temporarily_unavailable": temporary,
+            "target_group": target_group,
+        })
+    return result
+
+
 def _remote_auto_show_update(updates):
     """Apply only the existing manual override fields, never raw DMX config."""
     with DMX.lock:
@@ -17690,8 +17758,8 @@ def remote_live_state_v2():
             "colors": [{"id": key, "label": live_override_color_label(key)} for key in MANUAL_COLOR_PRESETS],
             "phrases": [{"id": key, "label": label} for key, label in AUTO_SHOW_PHRASE_OVERRIDES.items() if key != "none"],
             "energies": [{"id": key, "label": live_override_energy_label(key)} for key in ("low", "mid", "high")],
-            "momentary_effects": [{"id": key, "label": key.replace("_", " ").title()} for key in REMOTE_MOMENTARY_EFFECT_KEYS],
-            "cue_shots": [{"id": key, "label": value["label"]} for key, value in ONE_SHOT_CUES.items()],
+            "momentary_effects": [effect for effect in _remote_live_effect_capabilities(dmx_state) if effect["kind"] == "momentary"],
+            "cue_shots": [effect for effect in _remote_live_effect_capabilities(dmx_state) if effect["kind"] == "one_shot"],
             "momentary_lease_seconds": REMOTE_MOMENTARY_LEASE_SECONDS,
         },
     }

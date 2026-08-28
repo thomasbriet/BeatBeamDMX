@@ -256,6 +256,39 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertEqual(controller.current_values, dmx.sent[0])
         self.assertIsNotNone(controller.last_sent)
 
+    def test_every_remote_effect_reaches_its_existing_renderer_route(self):
+        controller, transport = self.controller()
+        controller.config["slots"]["par_2"] = copy.deepcopy(controller.config["slots"]["par"])
+        controller.config["slots"]["par_2"]["address"] = 17
+        controller.config["slot_order"].append("par_2")
+        osc = transport.snapshot_for_render()
+        baseline = controller._auto_show_state(osc, controller.config["auto_show"])
+
+        momentaries = {
+            "manual_strobe": ("head", "override_manual_strobe", lambda value: value["strobe"] >= 220),
+            "audience_sweep": ("head", "override_audience_sweep", lambda value: value["_live_override_audience_sweep"]),
+            "all_on": ("head", "override_all_on", lambda value: value["dimmer"] == 255),
+            "par_chase": ("par", "override_par_chase", lambda value: value["_auto_show_rhythm_mode"] == "pair_swap"),
+            "par_snake": ("par", "override_par_snake", lambda value: value["_auto_show_rhythm_mode"] == "par_snake"),
+        }
+        for effect_id, (slot_id, field, assertion) in momentaries.items():
+            with self.subTest(effect=effect_id):
+                auto_show = dict(baseline); auto_show[field] = True
+                rendered = controller._effective_slot_config(
+                    slot_id, controller.config["slots"][slot_id], osc, auto_show, full_config=controller.config
+                )
+                self.assertTrue(assertion(rendered))
+
+        for cue_id in ("audience_riser", "white_hit", "color_burst", "snap_fan", "mirror_bounce", "par_chase_burst"):
+            with self.subTest(cue=cue_id):
+                auto_show = dict(baseline)
+                auto_show.update({"one_shot_active": True, "one_shot_cue": cue_id, "one_shot_progress": .5})
+                slot_id = "par" if cue_id == "par_chase_burst" else "head"
+                rendered = controller._effective_slot_config(
+                    slot_id, controller.config["slots"][slot_id], osc, auto_show, full_config=controller.config
+                )
+                self.assertEqual(cue_id, rendered["_one_shot_cue_id"])
+
     def test_connect_disconnect_and_reconnect_do_not_duplicate_the_existing_engine(self):
         controller, _ = self.controller()
         entered = threading.Event()

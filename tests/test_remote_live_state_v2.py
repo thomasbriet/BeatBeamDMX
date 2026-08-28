@@ -55,11 +55,13 @@ def fixture_state(*, mode="DYNAMIC_COMPOSER_ENABLED", source="dynamic_composer",
                 "rme_preview": {"current_rme": current_rme},
                 "event_envelope": {"active": False},
             },
-            "slot_order": ["moving", "par", "wash"],
+            "slot_order": ["moving", "moving_2", "par", "par_2", "wash"],
             "slots": {
-                "moving": {"enabled": True, "group": "movers_a", "fixture": "moving_head", "label": "Moving"},
-                "par": {"enabled": True, "group": "pars", "fixture": "flat_par", "label": "PAR"},
-                "wash": {"enabled": True, "group": "washes", "fixture": "wall_wash", "label": "Wash"},
+                "moving": {"enabled": True, "group": "movers_a", "fixture": "shehds_led_wash_7x12w_rgbw_moving_head", "mode": "15ch", "label": "Moving"},
+                "moving_2": {"enabled": True, "group": "movers_a", "fixture": "shehds_led_wash_7x12w_rgbw_moving_head", "mode": "15ch", "label": "Moving 2"},
+                "par": {"enabled": True, "group": "pars", "fixture": "shehds_flat_par_12x3w_rgbw", "mode": "8ch", "label": "PAR"},
+                "par_2": {"enabled": True, "group": "pars", "fixture": "shehds_flat_par_12x3w_rgbw", "mode": "8ch", "label": "PAR 2"},
+                "wash": {"enabled": True, "group": "washes", "fixture": "uking_zq06016", "mode": "P001", "label": "Wash"},
             },
         },
     }
@@ -126,6 +128,31 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         state = fixture_state()
         state["dmx"]["preview_auto_show"]["continuous_musical_state"]["energy_trajectory"] = "sideways"
         self.assertEqual("unknown", self.project(state)["musical_state"]["energy_trajectory"])
+
+    def test_effect_capabilities_follow_actual_fixture_modes_and_output_health(self):
+        state = fixture_state()["dmx"]
+        effects = {effect["id"]: effect for effect in beatbeam_app._remote_live_effect_capabilities(state)}
+        self.assertTrue(all(effect["available"] for effect in effects.values()))
+        self.assertEqual("moving fixtures", effects["audience_sweep"]["target_group"])
+        self.assertEqual("one_shot", effects["mirror_bounce"]["kind"])
+
+        without_pars = fixture_state()["dmx"]
+        without_pars["slots"] = {key: value for key, value in without_pars["slots"].items() if not key.startswith("par")}
+        unavailable = {effect["id"]: effect for effect in beatbeam_app._remote_live_effect_capabilities(without_pars)}
+        self.assertFalse(unavailable["par_chase"]["available"])
+        self.assertFalse(unavailable["par_chase"]["temporarily_unavailable"])
+
+        disconnected = fixture_state(connected=False)["dmx"]
+        temporary = {effect["id"]: effect for effect in beatbeam_app._remote_live_effect_capabilities(disconnected)}
+        self.assertFalse(temporary["white_hit"]["available"])
+        self.assertTrue(temporary["white_hit"]["temporarily_unavailable"])
+        self.assertIn("DMX output", temporary["white_hit"]["reason_if_unavailable"])
+
+    def test_blackout_remains_authoritative_while_remote_state_exposes_it_separately(self):
+        state = fixture_state(blackout=True)
+        payload = self.project(state)
+        self.assertTrue(payload["overrides"]["blackout"])
+        self.assertEqual("dynamic_composer", payload["show"]["preview_source"])
 
 
 class RemoteReadScopeTests(unittest.TestCase):

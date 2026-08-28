@@ -62,10 +62,16 @@ struct RemotePairingResponse: Decodable {
     let scopes: [String]?; let clientId: String?; let statePath: String; let eventsPath: String; let controlPath: String?
 }
 struct RemoteControlOption: Decodable, Equatable, Identifiable { let id: String; let label: String }
+struct RemoteEffectCapability: Decodable, Equatable, Identifiable {
+    let id: String; let label: String; let kind: String?; let available: Bool?
+    let reasonIfUnavailable: String?; let temporarilyUnavailable: Bool?; let targetGroup: String?
+    var isAvailable: Bool { available ?? true }
+    var isTemporarilyUnavailable: Bool { temporarilyUnavailable ?? false }
+}
 struct RemoteControlCapabilities: Decodable, Equatable {
     let scope: String; let colors: [RemoteControlOption]; let phrases: [RemoteControlOption]
-    let energies: [RemoteControlOption]; let momentaryEffects: [RemoteControlOption]
-    let cueShots: [RemoteControlOption]; let momentaryLeaseSeconds: Double
+    let energies: [RemoteControlOption]; let momentaryEffects: [RemoteEffectCapability]
+    let cueShots: [RemoteEffectCapability]; let momentaryLeaseSeconds: Double
 }
 struct RemoteControlAcknowledgement: Decodable {
     let accepted: Bool; let commandId: String?; let newStateRevision: Int; let effectiveState: RemoteLiveStateV2; let error: String?
