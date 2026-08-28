@@ -86,6 +86,12 @@ SHOW_INTENT_SEMANTIC_HISTORY_MAX_FRAMES = 120000
 # gate heeft geen UI, persistence of runtime-endpoint en blijft default uit.
 SHOWINTENT_BOUNDED_PARITY_SOURCE_ENABLED = False
 API_SCHEMA_VERSION = 4
+REMOTE_LIVE_STATE_SCHEMA_VERSION = 2
+REMOTE_PROTOCOL_VERSION = 2
+REMOTE_READ_SCOPE = "REMOTE_READ"
+REMOTE_LIVE_EVENT_INTERVAL_SECONDS = 0.20
+REMOTE_PAIRING_MAX_FAILURES = 5
+REMOTE_PAIRING_WINDOW_SECONDS = 60.0
 DEFAULT_MANUAL_BPM = 124.0
 DEFAULT_MANUAL_PHRASE = "verse"
 PLAYBACK_STATE_SCHEMA_VERSION = 1
@@ -124,6 +130,14 @@ SERVER_HOST = "127.0.0.1"
 SERVER_PORT = DEFAULT_HTTP_PORT
 REMOTE_ACCESS_CONFIG = None
 REMOTE_ADDRESS_CACHE = {"updated_at": 0.0, "state": None}
+REMOTE_LIVE_STATE_LOCK = threading.RLock()
+REMOTE_LIVE_STATE_VERSION = {
+    "signature": None,
+    "state_revision": 0,
+    "event_sequence": 0,
+}
+REMOTE_PAIRING_ATTEMPTS_LOCK = threading.Lock()
+REMOTE_PAIRING_ATTEMPTS = {}
 SIMULATOR_SMART_CUE_DATA_PATHS = (
     ROOT / "smart-cue-review" / "SMART_CUE_REVIEW_DATA.json",
     ROOT / "artifacts" / "smart-cue-review" / "SMART_CUE_REVIEW_DATA.json",
@@ -16598,8 +16612,11 @@ def _interface_ipv4_candidates():
 def default_remote_access_config():
     return {
         "require_token": True,
+        # `token` is the legacy all-api credential. It remains only for an
+        # existing browser/client migration path and is never accepted by V2.
         "token": secrets.token_urlsafe(24),
         "pairing_code": "".join(secrets.choice("0123456789") for _ in range(6)),
+        "remote_credentials": {},
     }
 
 
@@ -16610,11 +16627,19 @@ def load_remote_access_config():
             token = str((payload or {}).get("token") or "").strip()
             require_token = bool((payload or {}).get("require_token", True))
             pairing_code = str((payload or {}).get("pairing_code") or "").strip()
+            credentials = (payload or {}).get("remote_credentials")
+            credentials = credentials if isinstance(credentials, dict) else {}
             if token:
                 return {
                     "require_token": require_token,
                     "token": token,
                     "pairing_code": pairing_code if pairing_code.isdigit() and len(pairing_code) == 6 else default_remote_access_config()["pairing_code"],
+                    "remote_credentials": {
+                        str(value): dict(metadata)
+                        for value, metadata in credentials.items()
+                        if isinstance(value, str) and value and isinstance(metadata, dict)
+                        and str(metadata.get("scope") or "") == REMOTE_READ_SCOPE
+                    },
                 }
     config = default_remote_access_config()
     save_remote_access_config(config)
@@ -16626,12 +16651,25 @@ def save_remote_access_config(config):
         "require_token": bool(config.get("require_token", True)),
         "token": str(config.get("token") or "").strip(),
         "pairing_code": str(config.get("pairing_code") or "").strip(),
+        "remote_credentials": {
+            str(value): {
+                "scope": REMOTE_READ_SCOPE,
+                "created_at": int(metadata.get("created_at") or 0),
+                "client_name": str(metadata.get("client_name") or "iPad")[:80],
+            }
+            for value, metadata in (config.get("remote_credentials") or {}).items()
+            if isinstance(value, str) and value and isinstance(metadata, dict)
+            and str(metadata.get("scope") or "") == REMOTE_READ_SCOPE
+        },
     }
     if not payload["token"]:
         payload["token"] = secrets.token_urlsafe(24)
     if not (payload["pairing_code"].isdigit() and len(payload["pairing_code"]) == 6):
         payload["pairing_code"] = "".join(secrets.choice("0123456789") for _ in range(6))
-    REMOTE_ACCESS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    REMOTE_ACCESS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = REMOTE_ACCESS_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(REMOTE_ACCESS_PATH)
 
 
 def tailscale_ipv4():
@@ -16680,6 +16718,77 @@ def remote_access_pairing_code():
     return code if code.isdigit() and len(code) == 6 else None
 
 
+def remote_read_credential(token):
+    """Return a V2 read credential without ever accepting the legacy token."""
+    candidate = str(token or "").strip()
+    if not candidate:
+        return None
+    credentials = (REMOTE_ACCESS_CONFIG or {}).get("remote_credentials") or {}
+    for stored, metadata in credentials.items():
+        if secrets.compare_digest(str(stored), candidate) and isinstance(metadata, dict):
+            return dict(metadata)
+    return None
+
+
+def remote_read_token_is_valid(token):
+    credential = remote_read_credential(token)
+    return bool(credential and credential.get("scope") == REMOTE_READ_SCOPE)
+
+
+def _allow_pairing_attempt(client_ip):
+    now = time.monotonic()
+    key = str(client_ip or "unknown")
+    with REMOTE_PAIRING_ATTEMPTS_LOCK:
+        attempts = [value for value in REMOTE_PAIRING_ATTEMPTS.get(key, [])
+                    if now - value < REMOTE_PAIRING_WINDOW_SECONDS]
+        REMOTE_PAIRING_ATTEMPTS[key] = attempts
+        return len(attempts) < REMOTE_PAIRING_MAX_FAILURES
+
+
+def _record_failed_pairing_attempt(client_ip):
+    now = time.monotonic()
+    key = str(client_ip or "unknown")
+    with REMOTE_PAIRING_ATTEMPTS_LOCK:
+        attempts = [value for value in REMOTE_PAIRING_ATTEMPTS.get(key, [])
+                    if now - value < REMOTE_PAIRING_WINDOW_SECONDS]
+        attempts.append(now)
+        REMOTE_PAIRING_ATTEMPTS[key] = attempts
+
+
+def issue_remote_read_credential(pairing_code, client_name="iPad"):
+    """Exchange the current short-lived pairing secret for a read-only token.
+
+    The pairing code rotates after each successful exchange. Credentials are
+    intentionally bounded: this foundation supports a small set of named iPad
+    clients, not an unrestricted broad-token registry.
+    """
+    global REMOTE_ACCESS_CONFIG
+    config = REMOTE_ACCESS_CONFIG or default_remote_access_config()
+    expected = str(config.get("pairing_code") or "")
+    supplied = str(pairing_code or "").strip()
+    if not expected or not supplied or not secrets.compare_digest(expected, supplied):
+        return None
+    credentials = dict(config.get("remote_credentials") or {})
+    while len(credentials) >= 8:
+        oldest = min(credentials, key=lambda value: int((credentials[value] or {}).get("created_at") or 0))
+        credentials.pop(oldest, None)
+    token = secrets.token_urlsafe(32)
+    credentials[token] = {
+        "scope": REMOTE_READ_SCOPE,
+        "created_at": int(time.time()),
+        "client_name": str(client_name or "iPad").strip()[:80] or "iPad",
+    }
+    config = {
+        **config,
+        "remote_credentials": credentials,
+        "pairing_code": "".join(secrets.choice("0123456789") for _ in range(6)),
+    }
+    REMOTE_ACCESS_CONFIG = config
+    save_remote_access_config(config)
+    REMOTE_ADDRESS_CACHE["updated_at"] = 0.0
+    return {"token": token, "scope": REMOTE_READ_SCOPE, "protocol_version": REMOTE_PROTOCOL_VERSION}
+
+
 def remote_access_state():
     now = time.time()
     cached = REMOTE_ADDRESS_CACHE.get("state")
@@ -16688,14 +16797,14 @@ def remote_access_state():
 
     local_url = f"http://127.0.0.1:{SERVER_PORT}/remote"
     bind_host = SERVER_HOST
-    token = remote_access_token()
-    token_suffix = f"?token={token}" if token and remote_access_requires_token() else ""
+    pairing_code = remote_access_pairing_code()
+    pairing_suffix = f"?pairing={pairing_code}" if pairing_code else ""
     interface_urls = []
     usb_url = None
     lan_url = None
     if bind_host in ("0.0.0.0", "::"):
         for interface in _interface_ipv4_candidates():
-            url = f"http://{interface['ip']}:{SERVER_PORT}/remote{token_suffix}"
+            url = f"http://{interface['ip']}:{SERVER_PORT}/remote{pairing_suffix}"
             interface_urls.append(
                 {
                     "name": interface["name"],
@@ -16710,7 +16819,7 @@ def remote_access_state():
             elif not lan_url:
                 lan_url = url
     elif bind_host not in ("127.0.0.1", "localhost"):
-        lan_url = f"http://{bind_host}:{SERVER_PORT}/remote{token_suffix}"
+        lan_url = f"http://{bind_host}:{SERVER_PORT}/remote{pairing_suffix}"
         interface_urls.append(
             {
                 "name": "bind",
@@ -16723,25 +16832,26 @@ def remote_access_state():
 
     tailscale_ip = tailscale_ipv4()
     tailscale_url = (
-        f"http://{tailscale_ip}:{SERVER_PORT}/remote{token_suffix}"
+        f"http://{tailscale_ip}:{SERVER_PORT}/remote{pairing_suffix}"
         if tailscale_ip
         else None
     )
-    preferred_url = usb_url or tailscale_url or lan_url or (
-        f"{local_url}{token_suffix}" if token_suffix else local_url
-    )
+    preferred_url = usb_url or tailscale_url or lan_url or f"{local_url}{pairing_suffix}"
     payload = {
         "enabled": bind_host not in ("127.0.0.1", "localhost"),
         "bind_host": bind_host,
         "port": SERVER_PORT,
         "path": "/remote",
-        "local_url": f"{local_url}{token_suffix}" if token_suffix else local_url,
+        "local_url": f"{local_url}{pairing_suffix}",
         "lan_url": lan_url,
         "usb_url": usb_url,
         "tailscale_url": tailscale_url,
         "preferred_url": preferred_url,
         "interface_urls": interface_urls,
-        "auth_required": bool(token_suffix),
+        "auth_required": bool(remote_access_requires_token()),
+        "pairing_code": pairing_code,
+        "remote_protocol_version": REMOTE_PROTOCOL_VERSION,
+        "pairing_path": "/api/remote-v2/pair",
     }
     REMOTE_ADDRESS_CACHE["updated_at"] = now
     REMOTE_ADDRESS_CACHE["state"] = payload
@@ -17195,6 +17305,202 @@ def structure_behavior_state(osc_state=None):
     )
 
 
+def _remote_live_role(slot):
+    fixture_id = str((slot or {}).get("fixture") or "").lower()
+    label = str((slot or {}).get("label") or "").lower()
+    if "moving" in fixture_id or "moving" in label or "bee" in fixture_id or "bee" in label:
+        return "moving"
+    if "wash" in fixture_id or "wash" in label:
+        return "wash"
+    if "par" in fixture_id or "par" in label:
+        return "par"
+    return "static"
+
+
+def _remote_live_fixture_groups(dmx_state):
+    slots = dmx_state.get("slots") if isinstance(dmx_state.get("slots"), dict) else {}
+    order = dmx_state.get("slot_order") if isinstance(dmx_state.get("slot_order"), list) else list(slots)
+    auto_show = dmx_state.get("auto_show") if isinstance(dmx_state.get("auto_show"), dict) else {}
+    intents = auto_show.get("fixture_group_intents") if isinstance(auto_show.get("fixture_group_intents"), dict) else {}
+    primitives = auto_show.get("selected_primitives") if isinstance(auto_show.get("selected_primitives"), dict) else {}
+    result = {}
+    for slot_id in order:
+        slot = slots.get(slot_id)
+        if not isinstance(slot, dict):
+            continue
+        group_id = str(slot.get("group") or "fixtures")
+        role = _remote_live_role(slot)
+        group = result.setdefault(group_id, {
+            "id": group_id,
+            "label": group_id.replace("_", " ").title(),
+            "role": role,
+            "active": False,
+            "enabled_slots": 0,
+            "intensity": None,
+            "color_preset": None,
+            "movement_active": False,
+            "override_active": bool(auto_show.get("override_active")),
+            "available": bool(slot.get("enabled", False)),
+        })
+        group["enabled_slots"] += int(bool(slot.get("enabled", False)))
+        intent = intents.get(role) if isinstance(intents.get(role), dict) else {}
+        primitive = primitives.get(role) if isinstance(primitives.get(role), dict) else {}
+        intensity = intent.get("intensity", auto_show.get("energy"))
+        if isinstance(intensity, (int, float)) and not isinstance(intensity, bool):
+            group["intensity"] = max(0.0, min(1.0, float(intensity)))
+            group["active"] = group["active"] or group["intensity"] > 0.01
+        if role == "moving":
+            movement = intent.get("movement_amount", auto_show.get("movement"))
+            group["movement_active"] = bool(isinstance(movement, (int, float)) and float(movement) > 0.01)
+        if auto_show.get("override_color") not in (None, "", "none"):
+            group["color_preset"] = auto_show.get("override_color")
+        elif isinstance(primitive.get("palette"), str):
+            group["color_preset"] = primitive.get("palette")
+    return [result[key] for key in sorted(result)]
+
+
+def _remote_live_warnings(live_ui, dmx_state, selector, overrides):
+    warnings = []
+
+    def add(code, severity, message):
+        warnings.append({"code": code, "severity": severity, "message": message})
+
+    renderer = dmx_state.get("renderer_health") if isinstance(dmx_state.get("renderer_health"), dict) else {}
+    if not renderer.get("healthy", False):
+        add("RENDERER_UNHEALTHY", "critical", "Renderer unhealthy")
+    if not dmx_state.get("connected", False):
+        add("DMX_DISCONNECTED", "critical", "DMX disconnected")
+    if str(live_ui.get("transport_state") or "").lower() not in ("advancing", "") or live_ui.get("availability") != "available":
+        add("TRANSPORT_STALE", "warning", "VirtualDJ transport is not advancing")
+    if selector.get("production_show_mode") == DYNAMIC_COMPOSER_ENABLED and selector.get("fallback_active"):
+        reason = selector.get("fallback_reason") or "unknown"
+        add("PHYSICAL_FALLBACK", "warning", f"Baseline fallback: {reason}")
+    active_deck = next((deck for deck in (live_ui.get("decks") or []) if deck.get("is_active")), None)
+    readiness = str((active_deck or {}).get("analysis_status") or "").upper()
+    if readiness in {"FAILED", "UNAVAILABLE", "STALE"}:
+        add("SONGANALYZER_" + readiness, "warning", f"SongAnalyzer {readiness}")
+    if overrides.get("blackout"):
+        add("BLACKOUT_ACTIVE", "critical", "Blackout active")
+    elif overrides.get("any_active"):
+        add("MANUAL_OVERRIDE_ACTIVE", "warning", "Manual override active")
+    return warnings
+
+
+def remote_live_state_v2():
+    """Project existing authoritative runtime state for a remote presentation.
+
+    This function never selects a show frame and never derives a competing
+    readiness or musical-state authority. It deliberately consumes the same
+    typed state already used by the native Mac Live Show.
+    """
+    state = full_state()
+    dmx_state = state.get("dmx") if isinstance(state.get("dmx"), dict) else {}
+    live_ui = state.get("live_ui") if isinstance(state.get("live_ui"), dict) else {}
+    selector = dmx_state.get("production_show_selector") if isinstance(dmx_state.get("production_show_selector"), dict) else {}
+    auto_show = dmx_state.get("auto_show") if isinstance(dmx_state.get("auto_show"), dict) else {}
+    preview = dmx_state.get("preview_auto_show") if isinstance(dmx_state.get("preview_auto_show"), dict) else {}
+    renderer = dmx_state.get("renderer_health") if isinstance(dmx_state.get("renderer_health"), dict) else {}
+    active_deck = next((deck for deck in (live_ui.get("decks") or []) if isinstance(deck, dict) and deck.get("is_active")), None)
+    musical_source = preview if preview.get("continuous_musical_state") else auto_show
+    continuous = musical_source.get("continuous_musical_state") if isinstance(musical_source.get("continuous_musical_state"), dict) else {}
+    envelope = musical_source.get("event_envelope") if isinstance(musical_source.get("event_envelope"), dict) else selector.get("event_envelope") or {}
+    rme_context = musical_source.get("rme_preview") if isinstance(musical_source.get("rme_preview"), dict) else {}
+    overrides = {
+        "any_active": bool(auto_show.get("override_active")),
+        "phrase": auto_show.get("override_phrase") if auto_show.get("override_phrase") != "none" else None,
+        "energy": auto_show.get("override_energy") if auto_show.get("override_energy") != "none" else None,
+        "color": auto_show.get("override_color") if auto_show.get("override_color") != "none" else None,
+        "momentary_effects": [
+            name for name, active in {
+                "manual_strobe": auto_show.get("override_manual_strobe"),
+                "audience_sweep": auto_show.get("override_audience_sweep"),
+                "all_on": auto_show.get("override_all_on"),
+                "par_chase": auto_show.get("override_par_chase"),
+                "par_snake": auto_show.get("override_par_snake"),
+            }.items() if active
+        ],
+        "blackout": bool(dmx_state.get("blackout_active")),
+        "automatic": not bool(auto_show.get("override_active")) and not bool(dmx_state.get("blackout_active")),
+    }
+    payload = {
+        "schema_version": REMOTE_LIVE_STATE_SCHEMA_VERSION,
+        "schema": "beatbeam.remote-live-state.v2",
+        "connection": {
+            "protocol_version": REMOTE_PROTOCOL_VERSION,
+            "compatible": True,
+            "server": APP_NAME,
+        },
+        "show": {
+            "configured_production_mode": dmx_state.get("production_show_mode", BASELINE_ONLY),
+            "physical_frame_source": selector.get("production_show_source", "existing_autoshow"),
+            "preview_source": preview.get("preview_source") or "baseline",
+            "fallback_active": bool(selector.get("fallback_active")),
+            "fallback_reason": selector.get("fallback_reason"),
+            "dynamic_composer_eligible": bool(selector.get("dynamic_composer_eligible")),
+            "dynamic_composer_active": bool(selector.get("dynamic_composer_active")),
+            "baseline_fallback_available": True,
+        },
+        "track": {
+            "title": live_ui.get("track_title"),
+            "artist": live_ui.get("track_artist"),
+            "active_deck": live_ui.get("active_deck_number"),
+            "playing": bool((active_deck or {}).get("is_playing")),
+            "position_milliseconds": live_ui.get("position_milliseconds"),
+            "duration_milliseconds": None,
+            "bpm": live_ui.get("bpm"),
+            "beat": live_ui.get("beat_number"),
+            "bar": live_ui.get("bar_number"),
+            "transport_fresh": live_ui.get("availability") == "available" and live_ui.get("transport_state") == "advancing",
+            "readiness": (active_deck or {}).get("analysis_status"),
+        },
+        "decks": [{
+            "number": deck.get("deck_number"), "loaded": bool(deck.get("is_loaded")),
+            "title": deck.get("track_title"), "artist": deck.get("track_artist"),
+            "playing": bool(deck.get("is_playing")), "master": bool(deck.get("is_master")),
+            "active": bool(deck.get("is_active")), "analysis_readiness": deck.get("analysis_status"),
+            "prewarm_readiness": deck.get("prewarm_status"),
+        } for deck in (live_ui.get("decks") or []) if isinstance(deck, dict)],
+        "musical_state": {
+            "section": continuous.get("section_label") or continuous.get("section") or live_ui.get("phrase"),
+            "section_progress": continuous.get("section_progress"),
+            "relative_energy": continuous.get("relative_energy"),
+            "energy_trajectory": continuous.get("energy_trajectory"),
+            "recurrence": continuous.get("recurrence_strength"),
+            "material_context": continuous.get("material_context") or continuous.get("section_character"),
+            "current_rme": rme_context.get("current_rme") or selector.get("current_rme"),
+            "event_envelope": {
+                "active": bool(envelope.get("active")), "phase": envelope.get("phase"),
+                "progress": envelope.get("progress"), "event_type": envelope.get("event_type"),
+            },
+            "effective_intensity": selector.get("effective_intensity", auto_show.get("energy")),
+            "analyzed_intensity": selector.get("analyzed_intensity", auto_show.get("energy")),
+            "live_intensity_valid": selector.get("live_intensity_valid"),
+        },
+        "dmx": {
+            "connected": bool(dmx_state.get("connected")), "device_name": dmx_state.get("port"),
+            "renderer_healthy": bool(renderer.get("healthy")),
+            "renderer_active": bool(renderer.get("active")),
+            "frame_sequence": renderer.get("render_frame_sequence"),
+            "last_error": renderer.get("error") or dmx_state.get("error"),
+            "dispatch_failures": ((dmx_state.get("playback") or {}).get("dmx_dispatch_failures")),
+            "physical_output_available": bool(dmx_state.get("connected")) and bool(renderer.get("healthy")),
+        },
+        "fixtures": _remote_live_fixture_groups(dmx_state),
+        "overrides": overrides,
+    }
+    payload["warnings"] = _remote_live_warnings(live_ui, dmx_state, selector, overrides)
+    signature = json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str)
+    with REMOTE_LIVE_STATE_LOCK:
+        if signature != REMOTE_LIVE_STATE_VERSION["signature"]:
+            REMOTE_LIVE_STATE_VERSION["signature"] = signature
+            REMOTE_LIVE_STATE_VERSION["state_revision"] += 1
+            REMOTE_LIVE_STATE_VERSION["event_sequence"] += 1
+        payload["state_revision"] = REMOTE_LIVE_STATE_VERSION["state_revision"]
+        payload["event_sequence"] = REMOTE_LIVE_STATE_VERSION["event_sequence"]
+    payload["server_timestamp"] = int(time.time() * 1000)
+    return payload
+
+
 def remote_state():
     osc_state = TRANSPORT.state()
     dmx_state = DMX.state()
@@ -17250,6 +17556,18 @@ class AppHandler(BaseHTTPRequestHandler):
         )
         return str(provided or "").strip() == expected
 
+    def remote_request_token(self):
+        return (
+            self.headers.get("X-BeatBeam-Remote-Token")
+            or self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        )
+
+    def is_authorized_remote_v2_read_request(self):
+        client_ip = self.client_address[0] if self.client_address else ""
+        if is_loopback_client(client_ip):
+            return True
+        return remote_read_token_is_valid(self.remote_request_token())
+
     def deny_remote_request(self, path):
         if path.startswith("/api/"):
             self.send_json({"error": "remote access token required"}, status=403)
@@ -17265,8 +17583,48 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def deny_remote_v2_request(self, error="remote read credential required", status=403):
+        self.send_json({
+            "error": error,
+            "schema_version": REMOTE_LIVE_STATE_SCHEMA_VERSION,
+            "protocol_version": REMOTE_PROTOCOL_VERSION,
+        }, status=status)
+
+    def pair_remote_v2(self, payload):
+        client_ip = self.client_address[0] if self.client_address else ""
+        if not _allow_pairing_attempt(client_ip):
+            self.deny_remote_v2_request("pairing temporarily rate limited", status=429)
+            return
+        credential = issue_remote_read_credential(
+            payload.get("pairing_code"), payload.get("client_name", "iPad")
+        )
+        if credential is None:
+            _record_failed_pairing_attempt(client_ip)
+            self.deny_remote_v2_request("pairing code invalid", status=403)
+            return
+        self.send_json({
+            "schema_version": REMOTE_LIVE_STATE_SCHEMA_VERSION,
+            "protocol_version": REMOTE_PROTOCOL_VERSION,
+            "scope": REMOTE_READ_SCOPE,
+            "credential": credential["token"],
+            "state_path": "/api/remote-v2/state",
+            "events_path": "/api/remote-v2/events",
+        })
+
     def do_GET(self):
         path, query = self.request_context()
+        if path.startswith("/api/remote-v2/"):
+            if path not in ("/api/remote-v2/state", "/api/remote-v2/events"):
+                self.deny_remote_v2_request("remote read endpoint not found", status=404)
+                return
+            if not self.is_authorized_remote_v2_read_request():
+                self.deny_remote_v2_request()
+                return
+            if path == "/api/remote-v2/state":
+                self.send_json(remote_live_state_v2())
+                return
+            self.send_event_stream(remote_live_state_v2, interval_seconds=REMOTE_LIVE_EVENT_INTERVAL_SECONDS)
+            return
         if path in ("/remote", "/live-remote") and not self.is_authorized_remote_request(query):
             self.deny_remote_request(path)
             return
@@ -17324,6 +17682,15 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path, query = self.request_context()
+        if path == "/api/remote-v2/pair":
+            try:
+                self.pair_remote_v2(self.read_json())
+            except Exception as exc:
+                self.deny_remote_v2_request(str(exc), status=400)
+            return
+        if path.startswith("/api/remote-v2/"):
+            self.deny_remote_v2_request("REMOTE_READ credentials cannot mutate BeatBeam", status=403)
+            return
         if path.startswith("/api/") and not self.is_authorized_remote_request(query):
             self.deny_remote_request(path)
             return
@@ -17484,11 +17851,17 @@ class AppHandler(BaseHTTPRequestHandler):
             while True:
                 payload = payload_provider()
                 encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-                if encoded != last_payload:
+                comparison = dict(payload) if isinstance(payload, dict) else payload
+                if isinstance(comparison, dict):
+                    # A server timestamp is useful to a client snapshot but is
+                    # not a state transition. Do not turn it into a stream flood.
+                    comparison.pop("server_timestamp", None)
+                comparison_encoded = json.dumps(comparison, separators=(",", ":"), sort_keys=True)
+                if comparison_encoded != last_payload:
                     chunk = f"event: state\ndata: {encoded}\n\n".encode("utf-8")
                     self.wfile.write(chunk)
                     self.wfile.flush()
-                    last_payload = encoded
+                    last_payload = comparison_encoded
                     last_keepalive_at = time.time()
                 elif time.time() - last_keepalive_at >= 10.0:
                     self.wfile.write(b": keepalive\n\n")

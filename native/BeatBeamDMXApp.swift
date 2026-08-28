@@ -371,7 +371,7 @@ func redactedRemoteURL(_ value: String?) -> String {
         return value ?? "nil"
     }
     components.queryItems = components.queryItems?.map { item in
-        item.name.caseInsensitiveCompare("token") == .orderedSame
+        ["token", "pairing"].contains { item.name.caseInsensitiveCompare($0) == .orderedSame }
             ? URLQueryItem(name: item.name, value: "<redacted>")
             : item
     }
@@ -655,6 +655,8 @@ struct RemoteAccessState: Decodable {
     let tailscaleUrl: String?
     let preferredUrl: String?
     let authRequired: Bool
+    let pairingCode: String?
+    let remoteProtocolVersion: Int?
 }
 
 struct DmxState: Decodable {
@@ -2747,6 +2749,7 @@ final class AppModel: ObservableObject {
     @Published var liveOneShotCueProgress = 0.0
     @Published var remoteURLText = "-"
     @Published var remoteStatusText = "Remote niet beschikbaar"
+    @Published var remotePairingCodeText = "-"
     @Published var errorText = ""
     @Published var debugState: DebugState?
     @Published private(set) var liveUiState: LiveUiState?
@@ -4362,6 +4365,7 @@ final class AppModel: ObservableObject {
         if let remote = state.remote {
             nativeLog("remote state decoded: preferred=\(redactedRemoteURL(remote.preferredUrl)) usb=\(redactedRemoteURL(remote.usbUrl)) tailscale=\(redactedRemoteURL(remote.tailscaleUrl)) lan=\(redactedRemoteURL(remote.lanUrl)) local=\(redactedRemoteURL(remote.localUrl))")
             remoteURLText = remote.preferredUrl ?? remote.usbUrl ?? remote.tailscaleUrl ?? remote.lanUrl ?? remote.localUrl ?? "-"
+            remotePairingCodeText = remote.pairingCode ?? "-"
             if let usbUrl = remote.usbUrl, !usbUrl.isEmpty, remoteURLText == usbUrl {
                 remoteStatusText = "USB/Wired remote: \(usbUrl)"
             } else if let tailscaleUrl = remote.tailscaleUrl, !tailscaleUrl.isEmpty {
@@ -4376,6 +4380,7 @@ final class AppModel: ObservableObject {
         } else {
             remoteURLText = "-"
             remoteStatusText = "Remote info niet beschikbaar"
+            remotePairingCodeText = "-"
         }
         transportMode = state.transport.mode
         transportResolvedMode = state.transport.resolvedMode
@@ -6815,6 +6820,10 @@ struct RemoteAccessPanel: View {
                             .fill(BeatBeamPalette.raisedBackground)
                     )
 
+                Text("Pairing code: \(model.remotePairingCodeText)")
+                    .font(.system(size: 14, weight: .bold, design: .monospaced))
+                    .foregroundStyle(BeatBeamPalette.brandCyan)
+
                 HStack(spacing: 8) {
                     Button("Copy") {
                         model.copyRemoteURL()
@@ -6860,6 +6869,17 @@ struct RemoteAccessPanel: View {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(BeatBeamPalette.raisedBackground)
                     )
+            }
+
+            HStack {
+                Text("Pairing code")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(model.remotePairingCodeText)
+                    .font(.system(size: 18, weight: .bold, design: .monospaced))
+                    .foregroundStyle(BeatBeamPalette.brandCyan)
+                    .textSelection(.enabled)
             }
 
             HStack(spacing: 8) {
