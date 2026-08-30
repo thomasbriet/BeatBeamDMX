@@ -1771,6 +1771,19 @@ LIVE_OVERRIDE_COLORS = {
     "rainbow": None,
 }
 
+# Manual two-colour choices are IDs over the existing physical Manual
+# vocabulary. They never introduce a blended RGBW value.
+MANUAL_COLOR_COMBOS = {
+    "blue_orange": ("blue", "orange"),
+    "purple_yellow": ("purple", "yellow"),
+    "pink_cyan": ("pink", "cyan"),
+    "orange_cyan": ("orange", "cyan"),
+    "pink_blue": ("pink", "blue"),
+    "red_lime": ("red", "lime"),
+    "cyan_white": ("cyan", "white"),
+    "orange_white": ("orange", "white"),
+}
+
 # Existing palette identities remain musical selection metadata. Their physical
 # realization is always one or more exact Manual presets, never generated RGB.
 AUTO_SHOW_MANUAL_PRESET_PALETTES = {
@@ -6531,6 +6544,18 @@ def live_override_color_label(value):
     return labels.get(live_override_color_name(value), "Auto")
 
 
+def live_override_color_combo_name(value):
+    key = str(value or "none").strip().lower()
+    return key if key in MANUAL_COLOR_COMBOS else "none"
+
+
+def live_override_color_combo_label(value):
+    combo = MANUAL_COLOR_COMBOS.get(live_override_color_combo_name(value))
+    if not combo:
+        return "Auto"
+    return " / ".join(live_override_color_label(color) for color in combo)
+
+
 def live_override_energy_name(value):
     key = str(value or "none").strip().lower()
     return key if key in {"none", "low", "mid", "high"} else "none"
@@ -10225,6 +10250,7 @@ class DmxController:
             "audience_tilt_split": 127,
             "override_phrase": "none",
             "override_color": "none",
+            "override_color_combo": "none",
             "override_energy": "none",
             "override_manual_strobe": False,
             "override_audience_sweep": False,
@@ -12026,6 +12052,11 @@ class DmxController:
         cleaned["override_color"] = live_override_color_name(
             cleaned.get("override_color", defaults["override_color"])
         )
+        cleaned["override_color_combo"] = live_override_color_combo_name(
+            cleaned.get("override_color_combo", defaults["override_color_combo"])
+        )
+        if cleaned["override_color_combo"] != "none":
+            cleaned["override_color"] = "none"
         cleaned["override_energy"] = live_override_energy_name(
             cleaned.get("override_energy", defaults["override_energy"])
         )
@@ -12114,6 +12145,21 @@ class DmxController:
         global_index = slot_order.index(slot_id)
         slots = full_config.get("slots") or {}
 
+        color_slot_ids = []
+        for current_slot_id in slot_order:
+            current_config = slots.get(current_slot_id)
+            if current_config is None:
+                if current_slot_id != slot_id:
+                    continue
+                current_config = config
+            if not current_config.get("enabled"):
+                continue
+            current_mode = find_mode(
+                find_fixture(FIXTURE_LIBRARY, current_config["fixture"]), current_config["mode"]
+            )
+            if any(channel.get("type") == "color" for channel in current_mode.get("channels", [])):
+                color_slot_ids.append(current_slot_id)
+
         role_slot_ids = []
         for current_slot_id in slot_order:
             current_config = slots.get(current_slot_id)
@@ -12184,6 +12230,9 @@ class DmxController:
             "group": group_name,
             "global_index": global_index,
             "global_count": len(slot_order),
+            "color_capable": slot_id in color_slot_ids,
+            "color_index": color_slot_ids.index(slot_id) if slot_id in color_slot_ids else None,
+            "color_count": len(color_slot_ids),
             "role_index": role_index,
             "role_count": role_count,
             "normalized": normalized,
@@ -13231,6 +13280,7 @@ class DmxController:
     def _live_override_active(self, auto_show):
         return bool(
             live_override_color_name(auto_show.get("override_color")) != "none"
+            or live_override_color_combo_name(auto_show.get("override_color_combo")) != "none"
             or auto_show.get("override_manual_strobe")
             or auto_show.get("override_audience_sweep")
             or auto_show.get("override_all_on")
@@ -13278,6 +13328,14 @@ class DmxController:
             return [rgbw] * 8
         rgbw = LIVE_OVERRIDE_COLORS[color_name]
         return [rgbw] * 8
+
+    def _live_override_combo_rgbw_for_slot(self, override_combo, slot_context):
+        combo = MANUAL_COLOR_COMBOS.get(live_override_color_combo_name(override_combo))
+        if not combo or not slot_context.get("color_capable"):
+            return None
+        # This ordinal is only over enabled colour-capable slots in slot_order.
+        # It is stable between frames and never depends on beat/time.
+        return manual_color_preset_rgbw(combo[int(slot_context.get("color_index", 0)) % 2])
 
     def _slot_key_base_for_fixture(self, fixture_id):
         label_base = fixture_preset(fixture_id)["label_base"].lower()
@@ -13841,15 +13899,20 @@ class DmxController:
         zone_rgb = config.get("_auto_show_zone_rgb")
         output_zone_rgb = None
         if zone_rgb is not None:
-            output_zone_rgb = [
-                (
-                    round(int(segment[0]) * brightness / 255),
-                    round(int(segment[1]) * brightness / 255),
-                    round(int(segment[2]) * brightness / 255),
-                    round(int(segment[3]) * brightness / 255) if len(segment) > 3 else 0,
-                )
-                for segment in zone_rgb
-            ]
+            if config.get("_manual_color_override"):
+                # Manual colour authority keeps RGBW at an exact preset while
+                # the separate dimmer channel still carries intensity.
+                output_zone_rgb = [tuple(clamp_dmx(component) for component in segment[:4]) for segment in zone_rgb]
+            else:
+                output_zone_rgb = [
+                    (
+                        round(int(segment[0]) * brightness / 255),
+                        round(int(segment[1]) * brightness / 255),
+                        round(int(segment[2]) * brightness / 255),
+                        round(int(segment[3]) * brightness / 255) if len(segment) > 3 else 0,
+                    )
+                    for segment in zone_rgb
+                ]
         desired_pan = motion["pan"] if motion else config["pan"]
         desired_tilt = motion["tilt"] if motion else config["tilt"]
         realized_motion = self._realized_motion(
@@ -14016,6 +14079,7 @@ class DmxController:
         now = time.time()
         override_phrase = auto_show_phrase_override_name(config.get("override_phrase"))
         override_color = live_override_color_name(config.get("override_color"))
+        override_color_combo = live_override_color_combo_name(config.get("override_color_combo"))
         override_energy = live_override_energy_name(config.get("override_energy"))
         override_manual_strobe = bool(config.get("override_manual_strobe"))
         override_audience_sweep = bool(config.get("override_audience_sweep"))
@@ -14061,6 +14125,7 @@ class DmxController:
             audience_tilt_split = 127
         override_active = bool(
             override_color != "none"
+            or override_color_combo != "none"
             or override_manual_strobe
             or override_audience_sweep
             or override_all_on
@@ -14449,6 +14514,8 @@ class DmxController:
             "override_active": override_active,
             "override_color": override_color,
             "override_color_label": live_override_color_label(override_color),
+            "override_color_combo": override_color_combo,
+            "override_color_combo_label": live_override_color_combo_label(override_color_combo),
             "override_energy": override_energy,
             "override_energy_label": live_override_energy_label(override_energy),
             "override_manual_strobe": override_manual_strobe,
@@ -15662,12 +15729,26 @@ class DmxController:
             else:
                 effective["tilt"] = 136
 
+        override_combo = live_override_color_combo_name(auto_show.get("override_color_combo"))
         override_color = live_override_color_name(auto_show.get("override_color"))
-        if override_color != "none":
+        if override_combo != "none":
+            override_rgbw = self._live_override_combo_rgbw_for_slot(override_combo, slot_context)
+            if override_rgbw is not None:
+                effective["_auto_show_rgbw"] = override_rgbw
+                effective["_force_rgbw_override"] = True
+                effective["_manual_color_override"] = True
+                effective["color"] = {
+                    "red": int(override_rgbw[0]), "green": int(override_rgbw[1]),
+                    "blue": int(override_rgbw[2]), "white": int(override_rgbw[3]),
+                }
+                if role == "wash":
+                    effective["_auto_show_zone_rgb"] = [override_rgbw] * 8
+        elif override_color != "none":
             override_rgbw = self._live_override_rgbw_for_slot(override_color, slot_context, osc)
             if override_rgbw is not None:
                 effective["_auto_show_rgbw"] = override_rgbw
                 effective["_force_rgbw_override"] = True
+                effective["_manual_color_override"] = True
                 effective["color"] = {
                     "red": int(override_rgbw[0]),
                     "green": int(override_rgbw[1]),
@@ -17409,7 +17490,9 @@ def _remote_live_fixture_groups(dmx_state):
         if role == "moving":
             movement = intent.get("movement_amount", auto_show.get("movement"))
             group["movement_active"] = bool(isinstance(movement, (int, float)) and float(movement) > 0.01)
-        if auto_show.get("override_color") not in (None, "", "none"):
+        if auto_show.get("override_color_combo") not in (None, "", "none"):
+            group["color_preset"] = auto_show.get("override_color_combo")
+        elif auto_show.get("override_color") not in (None, "", "none"):
             group["color_preset"] = auto_show.get("override_color")
         elif isinstance(primitive.get("palette"), str):
             group["color_preset"] = primitive.get("palette")
@@ -17575,7 +17658,7 @@ def _remote_live_effect_capabilities(dmx_state):
         ("color_burst", "Color Burst", "one_shot", "all colour fixtures", "color", 1),
         ("snap_fan", "Snap Fan", "one_shot", "moving fixtures", "moving", 2),
         ("mirror_bounce", "Mirror Bounce", "one_shot", "moving fixtures", "moving", 2),
-        ("par_chase_burst", "PAR Chase", "one_shot", "PAR fixtures", "par", 2),
+        ("par_chase_burst", "PAR Chase Burst", "one_shot", "PAR fixtures", "par", 2),
     )
     result = []
     for effect_id, label, kind, target_group, requirement, minimum in definitions:
@@ -17594,6 +17677,35 @@ def _remote_live_effect_capabilities(dmx_state):
             "target_group": target_group,
         })
     return result
+
+
+def _remote_manual_color_combo_capability(dmx_state):
+    """Report whether the configured rig can express two discrete Manual colours.
+
+    This is structural only: a disconnected Enttec leaves the capability usable
+    for preview/test control, while fewer than two enabled colour targets does
+    not pretend that both halves of a combo can be shown.
+    """
+    slots = dmx_state.get("slots") if isinstance(dmx_state.get("slots"), dict) else {}
+    order = dmx_state.get("slot_order") if isinstance(dmx_state.get("slot_order"), list) else list(slots)
+    color_slots = []
+    for slot_id in order:
+        slot = slots.get(slot_id)
+        if not isinstance(slot, dict) or not slot.get("enabled"):
+            continue
+        try:
+            fixture = find_fixture(FIXTURE_LIBRARY, slot.get("fixture"))
+            mode = find_mode(fixture, slot.get("mode"))
+        except Exception:
+            continue
+        if any(channel.get("type") == "color" for channel in mode.get("channels", [])):
+            color_slots.append(str(slot_id))
+    available = len(color_slots) >= 2
+    return {
+        "available": available,
+        "reason_if_unavailable": None if available else "Requires 2+ enabled colour-capable fixtures in the current fixture setup",
+        "color_slot_ids": color_slots,
+    }
 
 
 def _remote_auto_show_update(updates):
@@ -17686,7 +17798,16 @@ def remote_live_control_command(token, payload):
             color = live_override_color_name(value)
             if str(value or "none").strip().lower() not in LIVE_OVERRIDE_COLORS:
                 raise ValueError("unsupported manual color")
-            _remote_auto_show_update({"override_color": color})
+            _remote_auto_show_update({"override_color": color, "override_color_combo": "none"})
+        elif action == "set_color_combo":
+            combo = live_override_color_combo_name(value)
+            if str(value or "").strip().lower() not in MANUAL_COLOR_COMBOS:
+                raise ValueError("unsupported manual color combo")
+            with DMX.lock:
+                capability = _remote_manual_color_combo_capability(DMX.config or {})
+            if not capability["available"]:
+                raise ValueError(capability["reason_if_unavailable"])
+            _remote_auto_show_update({"override_color": "none", "override_color_combo": combo})
         elif action == "set_phrase":
             phrase = auto_show_phrase_override_name(value)
             if str(value or "none").strip().lower() not in AUTO_SHOW_PHRASE_OVERRIDES:
@@ -17738,7 +17859,7 @@ def remote_live_control_command(token, payload):
         elif action == "release_all":
             with REMOTE_CONTROL_LOCK:
                 REMOTE_MOMENTARY_LEASES.clear()
-            _remote_auto_show_update({"override_phrase": "none", "override_color": "none", "override_energy": "none", **{key: False for key in REMOTE_MOMENTARY_EFFECT_KEYS.values()}})
+            _remote_auto_show_update({"override_phrase": "none", "override_color": "none", "override_color_combo": "none", "override_energy": "none", **{key: False for key in REMOTE_MOMENTARY_EFFECT_KEYS.values()}})
         elif action == "blackout_on":
             DMX.blackout()
         elif action == "blackout_off":
@@ -17776,6 +17897,7 @@ def remote_live_state_v2():
     renderer = dmx_state.get("renderer_health") if isinstance(dmx_state.get("renderer_health"), dict) else {}
     output_preview = _remote_live_output_preview(dmx_state)
     effect_capabilities = _remote_live_effect_capabilities(dmx_state)
+    combo_capability = _remote_manual_color_combo_capability(dmx_state)
     active_deck = next((deck for deck in (live_ui.get("decks") or []) if isinstance(deck, dict) and deck.get("is_active")), None)
     musical_source = preview if preview.get("continuous_musical_state") else auto_show
     continuous = musical_source.get("continuous_musical_state") if isinstance(musical_source.get("continuous_musical_state"), dict) else {}
@@ -17786,6 +17908,7 @@ def remote_live_state_v2():
         "phrase": auto_show.get("override_phrase") if auto_show.get("override_phrase") != "none" else None,
         "energy": auto_show.get("override_energy") if auto_show.get("override_energy") != "none" else None,
         "color": auto_show.get("override_color") if auto_show.get("override_color") != "none" else None,
+        "color_combo": auto_show.get("override_color_combo") if auto_show.get("override_color_combo") != "none" else None,
         "momentary_effects": [
             name for name, active in {
                 "manual_strobe": auto_show.get("override_manual_strobe"),
@@ -17880,6 +18003,11 @@ def remote_live_state_v2():
         "control": {
             "scope": REMOTE_LIVE_CONTROL_SCOPE,
             "colors": [{"id": key, "label": live_override_color_label(key)} for key in (*MANUAL_COLOR_PRESETS, "rainbow")],
+            "color_combinations": [
+                {"id": key, "label": live_override_color_combo_label(key), "colors": list(colors),
+                 "available": combo_capability["available"], "reason_if_unavailable": combo_capability["reason_if_unavailable"]}
+                for key, colors in MANUAL_COLOR_COMBOS.items()
+            ],
             "phrases": [{"id": key, "label": label} for key, label in AUTO_SHOW_PHRASE_OVERRIDES.items() if key != "none"],
             "energies": [{"id": key, "label": live_override_energy_label(key)} for key in ("low", "mid", "high")],
             "momentary_effects": [effect for effect in effect_capabilities if effect["kind"] == "momentary"],

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from beatbeam_app import DmxController, MANUAL_COLOR_PRESETS
+from beatbeam_app import DmxController, MANUAL_COLOR_COMBOS, MANUAL_COLOR_PRESETS, _remote_live_output_preview
 from show_interpreter_input_adapter import ShowInterpreterEffectiveContext
 
 
@@ -307,6 +307,40 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertNotEqual(rendered["red"], rendered["blue"])
         self.assertNotEqual(rendered["yellow"], rendered["cyan"])
         self.assertNotEqual(rendered["cyan"], rendered["none"])
+
+    def test_manual_color_combos_render_only_the_two_exact_presets_offline(self):
+        controller, _ = self.controller()
+        with patch("beatbeam_app.time.time", return_value=300.0):
+            for combo_id, colors in MANUAL_COLOR_COMBOS.items():
+                with self.subTest(combo=combo_id):
+                    auto_show = dict(controller.config["auto_show"])
+                    auto_show.update({"override_color": "none", "override_color_combo": combo_id})
+                    controller.update_config({"auto_show": auto_show})
+                    preview = _remote_live_output_preview(controller.state())
+                    self.assertFalse(preview["physical_output_available"])
+                    rendered = [
+                        (fixture["red"], fixture["green"], fixture["blue"], fixture["white"])
+                        for fixture in preview["fixtures"]
+                        if any(fixture[channel] for channel in ("red", "green", "blue", "white"))
+                    ]
+                    expected = [MANUAL_COLOR_PRESETS[color] for color in colors]
+                    # RGB-only fixtures are the established capability projection
+                    # of Manual WHITE: its RGB stays exact while W is absent/0.
+                    # No channel may become a blend or brightness-scaled colour.
+                    self.assertTrue(all(any(
+                        value[:3] == preset[:3] and value[3] in {0, preset[3]}
+                        for preset in expected
+                    ) for value in rendered))
+                    self.assertEqual({value[:3] for value in rendered}, {preset[:3] for preset in expected})
+
+            controller.blackout()
+            self.assertTrue(_remote_live_output_preview(controller.state())["blackout"])
+            controller.update_config({"blackout_active": False})
+            restored = _remote_live_output_preview(controller.state())
+            self.assertEqual(
+                {preset[:3] for preset in (MANUAL_COLOR_PRESETS[color] for color in MANUAL_COLOR_COMBOS[combo_id])},
+                {(fixture["red"], fixture["green"], fixture["blue"]) for fixture in restored["fixtures"]},
+            )
 
     def test_hold_effects_and_cue_shots_render_and_release_without_dmx(self):
         controller, _ = self.controller()

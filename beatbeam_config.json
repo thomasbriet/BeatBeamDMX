@@ -14,6 +14,7 @@
     "audience_tilt_split": 127,
     "override_phrase": "none",
     "override_color": "none",
+    "override_color_combo": "none",
     "override_energy": "none",
     "override_manual_strobe": false,
     "override_audience_sweep": false,

@@ -48,7 +48,7 @@ def fixture_state(*, mode="DYNAMIC_COMPOSER_ENABLED", source="dynamic_composer",
             },
             "auto_show": {
                 "energy": .72, "movement": .45, "override_active": override,
-                "override_phrase": "none", "override_energy": "none", "override_color": "none",
+                "override_phrase": "none", "override_energy": "none", "override_color": "none", "override_color_combo": "none",
                 "override_manual_strobe": False, "override_audience_sweep": False,
                 "override_all_on": False, "override_par_chase": False, "override_par_snake": False,
                 "fixture_group_intents": {"moving": {"intensity": .8, "movement_amount": .5},
@@ -97,6 +97,8 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         self.assertEqual({"movers_a", "pars", "washes"}, {group["id"] for group in payload["fixtures"]})
         self.assertTrue(payload["dmx"]["physical_output_available"])
         self.assertIn({"id": "rainbow", "label": "Rainbow"}, payload["control"]["colors"])
+        self.assertEqual(8, len(payload["control"]["color_combinations"]))
+        self.assertTrue(all(combo["available"] for combo in payload["control"]["color_combinations"]))
 
     def test_fallback_renderer_transport_and_readiness_are_visible_without_recalculation(self):
         state = fixture_state(source="existing_autoshow", fallback="transport_stale", renderer_healthy=False,
@@ -117,6 +119,14 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         self.assertTrue(payload["overrides"]["blackout"])
         self.assertTrue(payload["overrides"]["any_active"])
         self.assertIn("BLACKOUT_ACTIVE", {warning["code"] for warning in payload["warnings"]})
+
+    def test_active_color_combo_is_projected_authoritatively_and_clears_single_color(self):
+        state = fixture_state(override=True)
+        state["dmx"]["auto_show"].update({"override_color": "none", "override_color_combo": "blue_orange"})
+        payload = self.project(state)
+        self.assertIsNone(payload["overrides"]["color"])
+        self.assertEqual("blue_orange", payload["overrides"]["color_combo"])
+        self.assertTrue(payload["overrides"]["any_active"])
 
     def test_revision_changes_only_when_authoritative_projection_changes(self):
         state = fixture_state()
@@ -163,6 +173,20 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         self.assertFalse(temporary["white_hit"]["available"])
         self.assertTrue(temporary["white_hit"]["temporarily_unavailable"])
         self.assertIn("Renderer", temporary["white_hit"]["reason_if_unavailable"])
+
+    def test_color_combo_capability_is_structural_and_not_gated_by_dmx_connection(self):
+        online = beatbeam_app._remote_manual_color_combo_capability(fixture_state()["dmx"])
+        offline = beatbeam_app._remote_manual_color_combo_capability(fixture_state(connected=False)["dmx"])
+        self.assertTrue(online["available"])
+        self.assertEqual(online["color_slot_ids"], offline["color_slot_ids"])
+
+        one_target = fixture_state()["dmx"]
+        first_slot_id = next(iter(one_target["slots"]))
+        one_target["slots"] = {first_slot_id: one_target["slots"][first_slot_id]}
+        one_target["slot_order"] = [first_slot_id]
+        unavailable = beatbeam_app._remote_manual_color_combo_capability(one_target)
+        self.assertFalse(unavailable["available"])
+        self.assertIn("2+", unavailable["reason_if_unavailable"])
 
     def test_output_preview_projects_post_authority_frame_while_dmx_is_disconnected(self):
         payload = self.project(fixture_state(connected=False))
@@ -243,7 +267,7 @@ class RemoteLiveControlTests(unittest.TestCase):
         }}
         class FakeDmx:
             def __init__(self):
-                self.lock = threading.RLock(); self.config = {"auto_show": {}}; self.calls = []
+                self.lock = threading.RLock(); self.config = beatbeam_app.DmxController.default_config(); self.calls = []
             def update_config(self, payload): self.calls.append(("update", payload)); self.config.update(payload); return {}
             def blackout(self): self.calls.append(("blackout",))
             def trigger_one_shot_cue(self, cue): self.calls.append(("cue", cue))
@@ -271,8 +295,25 @@ class RemoteLiveControlTests(unittest.TestCase):
         self.assertTrue(first["accepted"]); self.assertEqual(first, duplicate)
         self.assertEqual(1, len(beatbeam_app.DMX.calls))
         self.assertEqual("red", beatbeam_app.DMX.calls[0][1]["auto_show"]["override_color"])
+        self.assertEqual("none", beatbeam_app.DMX.calls[0][1]["auto_show"]["override_color_combo"])
         denied = self.command("developer_force_reanalyze", command_id="nope")
         self.assertFalse(denied["accepted"]); self.assertIn("allowlisted", denied["error"])
+
+    def test_color_combo_is_live_control_scoped_and_mutually_exclusive_with_single_color(self):
+        combo = self.command("set_color_combo", "blue_orange", command_id="combo")
+        self.assertTrue(combo["accepted"])
+        auto_show = beatbeam_app.DMX.calls[-1][1]["auto_show"]
+        self.assertEqual("blue_orange", auto_show["override_color_combo"])
+        self.assertEqual("none", auto_show["override_color"])
+        single = self.command("set_color", "white", command_id="single")
+        self.assertTrue(single["accepted"])
+        auto_show = beatbeam_app.DMX.calls[-1][1]["auto_show"]
+        self.assertEqual("white", auto_show["override_color"])
+        self.assertEqual("none", auto_show["override_color_combo"])
+        release = self.command("release_all", command_id="release")
+        self.assertTrue(release["accepted"])
+        self.assertEqual("none", beatbeam_app.DMX.calls[-1][1]["auto_show"]["override_color_combo"])
+        self.assertFalse(self.command_as("read-token", "set_color_combo", "blue_orange", command_id="read")["accepted"])
 
     def test_phrase_energy_cue_release_all_blackout_and_modes_are_bounded(self):
         self.assertTrue(self.command("set_phrase", "chorus", command_id="phrase")["accepted"])
