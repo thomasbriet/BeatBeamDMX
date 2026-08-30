@@ -60,7 +60,7 @@ struct RemoteFixtureGroup: Decodable, Equatable, Identifiable {
     let intensity: Double?; let colorPreset: String?; let movementActive: Bool; let overrideActive: Bool; let available: Bool
 }
 struct RemoteOverrideState: Decodable, Equatable {
-    let anyActive: Bool; let phrase: String?; let energy: String?; let color: String?
+    let anyActive: Bool; let phrase: String?; let energy: String?; let color: String?; let colorCombo: String?
     let momentaryEffects: [String]; let blackout: Bool; let automatic: Bool
 }
 struct RemoteWarning: Decodable, Equatable, Identifiable {
@@ -72,6 +72,9 @@ struct RemotePairingResponse: Decodable {
     let scopes: [String]?; let clientId: String?; let statePath: String; let eventsPath: String; let controlPath: String?
 }
 struct RemoteControlOption: Decodable, Equatable, Identifiable { let id: String; let label: String }
+struct RemoteColorComboCapability: Decodable, Equatable, Identifiable {
+    let id: String; let label: String; let colors: [String]; let available: Bool; let reasonIfUnavailable: String?
+}
 struct RemoteEffectCapability: Decodable, Equatable, Identifiable {
     let id: String; let label: String; let kind: String?; let available: Bool?
     let reasonIfUnavailable: String?; let temporarilyUnavailable: Bool?; let targetGroup: String?
@@ -80,6 +83,7 @@ struct RemoteEffectCapability: Decodable, Equatable, Identifiable {
 }
 struct RemoteControlCapabilities: Decodable, Equatable {
     let scope: String; let colors: [RemoteControlOption]; let phrases: [RemoteControlOption]
+    let colorCombinations: [RemoteColorComboCapability]?
     let energies: [RemoteControlOption]; let momentaryEffects: [RemoteEffectCapability]
     let cueShots: [RemoteEffectCapability]; let momentaryLeaseSeconds: Double
 }

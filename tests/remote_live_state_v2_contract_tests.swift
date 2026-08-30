@@ -35,7 +35,7 @@ let healthy = """
   "decks": [{ "number": 1, "loaded": true, "title": "Track", "artist": "Artist", "playing": true, "master": true, "active": true, "analysis_readiness": "READY", "prewarm_readiness": "READY" }],
   "musical_state": { "section": "chorus", "section_progress": 0.5, "relative_energy": 0.8, "energy_trajectory": "rising", "recurrence": 0.2, "material_context": null, "current_rme": null, "event_envelope": { "active": false, "phase": null, "progress": null, "event_type": null }, "effective_intensity": 0.8, "analyzed_intensity": 0.7, "live_intensity_valid": true },
   "dmx": { "connected": true, "device_name": "DMX", "renderer_healthy": true, "renderer_active": true, "frame_sequence": 10, "last_error": null, "dispatch_failures": 0, "rendered_output_available": true, "physical_output_available": true },
-  "fixtures": [], "output": { "rendered_available": true, "physical_output_available": true, "blackout": false, "frame_sequence": 10, "fixtures": [{"id":"par","label":"PAR","role":"par","active":true,"dimmer":200,"red":120,"green":30,"blue":10,"white":0,"strobe":0,"pan":null,"tilt":null}] }, "overrides": { "any_active": false, "phrase": null, "energy": null, "color": null, "momentary_effects": [], "blackout": false, "automatic": true }, "control": { "scope": "LIVE_CONTROL", "colors": [{"id":"red","label":"Red"}], "phrases": [], "energies": [], "momentary_effects": [], "cue_shots": [], "momentary_lease_seconds": 3 }, "warnings": [], "future_additive_field": "ignored"
+  "fixtures": [], "output": { "rendered_available": true, "physical_output_available": true, "blackout": false, "frame_sequence": 10, "fixtures": [{"id":"par","label":"PAR","role":"par","active":true,"dimmer":200,"red":120,"green":30,"blue":10,"white":0,"strobe":0,"pan":null,"tilt":null}] }, "overrides": { "any_active": false, "phrase": null, "energy": null, "color": null, "color_combo": null, "momentary_effects": [], "blackout": false, "automatic": true }, "control": { "scope": "LIVE_CONTROL", "colors": [{"id":"red","label":"Red"}], "color_combinations": [{"id":"blue_orange","label":"Blue / Orange","colors":["blue","orange"],"available":true,"reason_if_unavailable":null}], "phrases": [], "energies": [], "momentary_effects": [], "cue_shots": [], "momentary_lease_seconds": 3 }, "warnings": [], "future_additive_field": "ignored"
 }
 """
 
@@ -66,6 +66,10 @@ struct RemoteLiveStateV2ContractTests {
 
             let manual = try decode(healthy.replacingOccurrences(of: "\"color\": null", with: "\"color\": \"red\""))
             require(manual.overrides.color == "red", "manual override")
+
+            let combo = try decode(healthy.replacingOccurrences(of: "\"color_combo\": null", with: "\"color_combo\": \"blue_orange\""))
+            require(combo.overrides.colorCombo == "blue_orange", "manual combo override")
+            require(combo.control.colorCombinations?.first?.colors == ["blue", "orange"], "manual combo capability")
 
             let unavailable = try decode(healthy.replacingOccurrences(of: "\"readiness\": \"READY\"", with: "\"readiness\": \"UNAVAILABLE\""))
             require(unavailable.track.readiness == "UNAVAILABLE", "SongAnalyzer unavailable")

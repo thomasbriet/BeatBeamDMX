@@ -27,7 +27,7 @@ private enum RemoteTab: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @EnvironmentObject private var store: RemoteStore
     @Environment(\.scenePhase) private var scenePhase
-    @State private var selectedTab: RemoteTab = .live
+    @State private var selectedTab: RemoteTab = .overrides
 
     var body: some View {
         ZStack {
@@ -64,7 +64,7 @@ private struct ConsoleSurface: View {
             VStack(spacing: 10) {
                 if state.overrides.blackout { BlackoutAuthorityBanner() }
                 ConsoleHeader(state: state, selectedTab: $selectedTab)
-                LiveStatusStrip(state: state)
+                if selectedTab != .overrides { LiveStatusStrip(state: state) }
                 Group {
                     switch selectedTab {
                     case .live: LiveConsole(state: state)
@@ -219,24 +219,25 @@ private struct LiveConsole: View {
 private struct OverrideConsole: View {
     @EnvironmentObject private var store: RemoteStore
     let state: RemoteLiveStateV2
-    @State private var confirmBaseline = false
-    @State private var confirmDynamic = false
     var body: some View {
-        VStack(spacing: 10) {
-            RemoteCard(title: "COLORS") {
-                ColorPadMatrix(state: state).environmentObject(store)
-            }
-            .frame(height: 122)
-            EffectDeck(state: state).environmentObject(store)
+        GeometryReader { proxy in
+            VStack(spacing: 9) {
+                RemoteCard(title: "SINGLE COLORS") {
+                    ColorPadMatrix(state: state).environmentObject(store)
+                }
+                .frame(height: max(145, proxy.size.height * 0.275))
+                RemoteCard(title: "COLOR COMBINATIONS") {
+                    ColorComboMatrix(state: state).environmentObject(store)
+                }
+                .frame(height: max(126, proxy.size.height * 0.235))
+                HStack(spacing: 9) {
+                    EnergyOverridePanel(state: state).environmentObject(store).frame(width: max(230, proxy.size.width * 0.20))
+                    EffectDeck(state: state).environmentObject(store)
+                    CompactMasterActions(state: state).environmentObject(store).frame(width: max(190, proxy.size.width * 0.17))
+                }
                 .frame(maxHeight: .infinity)
-            HStack(spacing: 10) {
-                EnergyOverridePanel(state: state).environmentObject(store)
-                MasterActions(state: state, confirmBaseline: $confirmBaseline, confirmDynamic: $confirmDynamic).environmentObject(store)
             }
-            .frame(height: 168)
         }
-        .alert("Revert to Baseline?", isPresented: $confirmBaseline) { Button("Revert", role: .destructive) { store.perform("revert_baseline") }; Button("Cancel", role: .cancel) {} } message: { Text("The physical frame returns to the established baseline show. Transport is unchanged.") }
-        .alert("Enable Dynamic Composer?", isPresented: $confirmDynamic) { Button("Enable Dynamic") { store.perform("enable_dynamic_composer") }; Button("Cancel", role: .cancel) {} } message: { Text("Enable Dynamic Composer deliberately for the current production show.") }
     }
 }
 
@@ -245,10 +246,49 @@ private struct ColorPadMatrix: View {
     let state: RemoteLiveStateV2
     private var colors: [RemoteControlOption] { state.control.colors.contains(where: { $0.id == "rainbow" }) ? state.control.colors : state.control.colors + [RemoteControlOption(id: "rainbow", label: "Rainbow")] }
     var body: some View {
-        HStack(spacing: 7) {
-            ConsoleColorPad(label: "AUTO", tint: .gray, active: state.overrides.color == nil) { store.perform("set_color", value: "none") }
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 6), spacing: 7) {
+            ConsoleColorPad(label: "AUTO", tint: .gray, active: state.overrides.color == nil && state.overrides.colorCombo == nil) { store.perform("set_color", value: "none") }
             ForEach(colors) { color in ConsoleColorPad(label: color.label.uppercased(), tint: colorTint(color.id), active: state.overrides.color == color.id) { store.perform("set_color", value: color.id) } }
         }
+    }
+}
+
+private struct ColorComboMatrix: View {
+    @EnvironmentObject private var store: RemoteStore
+    let state: RemoteLiveStateV2
+    var body: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+            ForEach(state.control.colorCombinations ?? []) { combo in
+                ColorComboPad(combo: combo, active: state.overrides.colorCombo == combo.id) {
+                    store.perform("set_color_combo", value: combo.id)
+                }
+                .disabled(!combo.available)
+            }
+        }
+    }
+}
+
+private struct ColorComboPad: View {
+    let combo: RemoteColorComboCapability; let active: Bool; let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                GeometryReader { proxy in
+                    HStack(spacing: 0) {
+                        colorTint(combo.colors.first ?? "").frame(width: proxy.size.width / 2)
+                        colorTint(combo.colors.dropFirst().first ?? "").frame(width: proxy.size.width / 2)
+                    }
+                }
+                Color.black.opacity(0.17)
+                Text(combo.label.uppercased()).font(.caption.bold().monospaced()).foregroundStyle(.white).shadow(color: .black, radius: 2)
+            }
+            .frame(maxWidth: .infinity, minHeight: 43)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(active ? .white : RemoteTheme.border, lineWidth: active ? 3 : 1))
+            .shadow(color: active ? .white.opacity(0.38) : .black.opacity(0.25), radius: active ? 7 : 2, y: 2)
+        }
+        .opacity(combo.available ? 1 : 0.36)
+        .accessibilityLabel(combo.available ? combo.label : "\(combo.label), \(combo.reasonIfUnavailable ?? "unavailable")")
     }
 }
 
@@ -268,13 +308,16 @@ private struct EnergyFader: View {
     let state: RemoteLiveStateV2
     private var level: Double { ["low": 1.0, "mid": 2.0, "high": 3.0][state.overrides.energy ?? ""] ?? 0 }
     var body: some View {
-        HStack(spacing: 12) {
-            Text(String(format: "%.2f", level / 3)).font(.title3.bold().monospaced()).foregroundStyle(RemoteTheme.warning).frame(width: 52)
-            Button { setLevel(level - 1) } label: { Image(systemName: "minus").frame(width: 42, height: 42) }.buttonStyle(HardwareButtonStyle(tint: RemoteTheme.panelRaised))
-            Slider(value: Binding(get: { level }, set: setLevel), in: 0...3, step: 1).tint(RemoteTheme.warning)
-                .accessibilityLabel("Energy override")
-            Button { setLevel(level + 1) } label: { Image(systemName: "plus").frame(width: 42, height: 42) }.buttonStyle(HardwareButtonStyle(tint: RemoteTheme.panelRaised))
-            Text("1.00").font(.title3.bold().monospaced()).foregroundStyle(RemoteTheme.warning).frame(width: 52)
+        VStack(spacing: 3) {
+            Text(state.overrides.energy?.uppercased() ?? "AUTO").font(.caption.bold().monospaced()).foregroundStyle(RemoteTheme.warning)
+            HStack(spacing: 8) {
+                Text("HIGH").font(.caption2.bold().monospaced()).foregroundStyle(.secondary).rotationEffect(.degrees(-90)).frame(width: 26)
+                Slider(value: Binding(get: { level }, set: setLevel), in: 0...3, step: 1).tint(RemoteTheme.warning)
+                    .rotationEffect(.degrees(-90)).frame(width: 128, height: 44).background(RemoteTheme.background).clipShape(Capsule())
+                    .accessibilityLabel("Energy override vertical fader")
+                Text("AUTO").font(.caption2.bold().monospaced()).foregroundStyle(.secondary).rotationEffect(.degrees(-90)).frame(width: 26)
+            }
+            Text(String(format: "%.2f", level / 3)).font(.caption.bold().monospaced()).foregroundStyle(RemoteTheme.warning)
         }
     }
     private func setLevel(_ value: Double) {
@@ -287,27 +330,25 @@ private struct EnergyOverridePanel: View {
     @EnvironmentObject private var store: RemoteStore
     let state: RemoteLiveStateV2
     var body: some View {
-        RemoteCard(title: "ENERGY OVERRIDE") {
-            PhrasePadMatrix(state: state).environmentObject(store)
-            EnergyFader(state: state).environmentObject(store)
+        RemoteCard(title: "ENERGY / PHRASE") {
+            HStack(spacing: 8) {
+                PhrasePadMatrix(state: state).environmentObject(store).frame(maxWidth: .infinity)
+                EnergyFader(state: state).environmentObject(store).frame(width: 130)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-private struct MasterActions: View {
+private struct CompactMasterActions: View {
     @EnvironmentObject private var store: RemoteStore
     let state: RemoteLiveStateV2
-    @Binding var confirmBaseline: Bool
-    @Binding var confirmDynamic: Bool
     var body: some View {
         RemoteCard(title: "CONTROL") {
-            HStack(spacing: 8) {
-                Button("RELEASE\nALL") { store.perform("release_all") }.buttonStyle(ConsoleActionStyle(tint: .gray))
-                if state.overrides.blackout { Button("HOLD\nRELEASE") { store.perform("blackout_off") }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.danger)) }
-                else { Button("BLACKOUT\n(HOLD)") { store.perform("blackout_on") }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.danger)) }
-                Button("REVERT\nBASELINE") { confirmBaseline = true }.buttonStyle(ConsoleActionStyle(tint: .gray))
-                Button("ENABLE\nDYNAMIC") { confirmDynamic = true }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.accent))
+            VStack(spacing: 8) {
+                Button("RELEASE ALL") { store.perform("release_all") }.buttonStyle(ConsoleActionStyle(tint: .gray))
+                if state.overrides.blackout { Button("RELEASE BLACKOUT") { store.perform("blackout_off") }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.danger)) }
+                else { Button("BLACKOUT (HOLD)") { store.perform("blackout_on") }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.danger)) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -320,13 +361,13 @@ private struct EffectDeck: View {
     var body: some View {
         RemoteCard(title: "EFFECTS") {
             VStack(spacing: 10) {
-                EffectRow(title: "HOLD EFFECTS", effects: state.control.momentaryEffects, activeIDs: state.overrides.momentaryEffects, hold: true).environmentObject(store)
+                EffectRow(title: "HOLD EFFECTS", effects: state.control.momentaryEffects, activeIDs: state.overrides.momentaryEffects, hold: true, compact: true).environmentObject(store)
                 HStack(spacing: 9) {
                     Rectangle().fill(RemoteTheme.border).frame(height: 1)
                     Text("ONE-SHOT EFFECTS").font(.caption.bold().monospaced()).foregroundStyle(.secondary).fixedSize()
                     Rectangle().fill(RemoteTheme.border).frame(height: 1)
                 }
-                EffectRow(title: nil, effects: state.control.cueShots, activeIDs: [], hold: false).environmentObject(store)
+                EffectRow(title: nil, effects: state.control.cueShots, activeIDs: [], hold: false, compact: true).environmentObject(store)
             }
         }
     }
@@ -334,15 +375,15 @@ private struct EffectDeck: View {
 
 private struct EffectRow: View {
     @EnvironmentObject private var store: RemoteStore
-    let title: String?; let effects: [RemoteEffectCapability]; let activeIDs: [String]; let hold: Bool
+    let title: String?; let effects: [RemoteEffectCapability]; let activeIDs: [String]; let hold: Bool; let compact: Bool
     var body: some View {
         VStack(spacing: 7) {
             if let title { Text(title).font(.caption.bold().monospaced()).foregroundStyle(.secondary) }
             HStack(spacing: 10) {
                 ForEach(effects) { effect in
                     if effect.isAvailable {
-                        if hold { MomentaryEffectPad(effect: effect, active: activeIDs.contains(effect.id) || store.isMomentaryEngaged(effect.id)).environmentObject(store) }
-                        else { Button { store.perform("trigger_cue", value: effect.id) } label: { EffectPadFace(effect: effect, active: false) }.buttonStyle(HardwarePerformancePadStyle(active: false)) }
+                        if hold { MomentaryEffectPad(effect: effect, active: activeIDs.contains(effect.id) || store.isMomentaryEngaged(effect.id), compact: compact).environmentObject(store) }
+                        else { Button { store.perform("trigger_cue", value: effect.id) } label: { EffectPadFace(effect: effect, active: false, compact: compact) }.buttonStyle(HardwarePerformancePadStyle(active: false)) }
                     } else { UnavailableEffectPad(effect: effect) }
                 }
             }
@@ -394,6 +435,8 @@ private struct StatusConsole: View {
 private struct SettingsConsole: View {
     @EnvironmentObject private var store: RemoteStore
     let state: RemoteLiveStateV2
+    @State private var confirmBaseline = false
+    @State private var confirmDynamic = false
     var body: some View {
         HStack(spacing: 10) {
             RemoteCard(title: "CONNECTION PREFERENCES") {
@@ -415,7 +458,17 @@ private struct SettingsConsole: View {
                     Button("FORGET THIS PAIRING", role: .destructive) { store.forgetConnection() }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.danger))
                 }
             }
-        }.frame(maxHeight: .infinity)
+            RemoteCard(title: "PRODUCTION MODE") {
+                VStack(alignment: .leading, spacing: 14) {
+                    ConsoleLine(label: "CURRENT", value: productionLabel(state.show.configuredProductionMode), tone: state.show.dynamicComposerActive ? .green : RemoteTheme.warning)
+                    Button("REVERT TO BASELINE") { confirmBaseline = true }.buttonStyle(ConsoleActionStyle(tint: .gray))
+                    Button("ENABLE DYNAMIC COMPOSER") { confirmDynamic = true }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.accent))
+                }
+            }
+        }
+        .frame(maxHeight: .infinity)
+        .alert("Revert to Baseline?", isPresented: $confirmBaseline) { Button("Revert", role: .destructive) { store.perform("revert_baseline") }; Button("Cancel", role: .cancel) {} } message: { Text("The physical frame returns to the established baseline show. Transport is unchanged.") }
+        .alert("Enable Dynamic Composer?", isPresented: $confirmDynamic) { Button("Enable Dynamic") { store.perform("enable_dynamic_composer") }; Button("Cancel", role: .cancel) {} } message: { Text("Enable Dynamic Composer deliberately for the current production show.") }
     }
 }
 
@@ -437,9 +490,9 @@ private struct UnpairedSurface: View {
 
 private struct MomentaryEffectPad: View {
     @EnvironmentObject private var store: RemoteStore
-    let effect: RemoteEffectCapability; let active: Bool
+    let effect: RemoteEffectCapability; let active: Bool; let compact: Bool
     var body: some View {
-        EffectPadFace(effect: effect, active: active)
+        EffectPadFace(effect: effect, active: active, compact: compact)
             .background(active ? RemoteTheme.accent.opacity(0.24) : RemoteTheme.padOff)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(active ? RemoteTheme.accent : RemoteTheme.border, lineWidth: active ? 2 : 1))
@@ -453,14 +506,14 @@ private struct MomentaryEffectPad: View {
 }
 
 private struct EffectPadFace: View {
-    let effect: RemoteEffectCapability; let active: Bool
+    let effect: RemoteEffectCapability; let active: Bool; let compact: Bool
     var body: some View {
         VStack(spacing: 8) {
             Text(effect.label.uppercased().replacingOccurrences(of: " ", with: "\n"))
                 .font(.subheadline.bold().monospaced()).multilineTextAlignment(.center).lineLimit(2)
-            Image(systemName: effectIcon(effect.id)).font(.title2).foregroundStyle(active ? RemoteTheme.accent : .white.opacity(0.88))
+            Image(systemName: effectIcon(effect.id)).font(compact ? .body : .title2).foregroundStyle(active ? RemoteTheme.accent : .white.opacity(0.88))
         }
-        .foregroundStyle(.white).frame(maxWidth: .infinity, minHeight: 74)
+        .foregroundStyle(.white).frame(maxWidth: .infinity, minHeight: compact ? 42 : 74)
     }
 }
 

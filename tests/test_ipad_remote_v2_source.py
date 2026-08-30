@@ -15,7 +15,7 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
         for symbol in (
             "struct RemoteLiveStateV2", "let stateRevision: Int", "let eventSequence: Int",
             "struct RemoteShowState", "struct RemoteDmxHealth", "struct RemoteFixtureGroup",
-            "struct RemoteOverrideState", "struct RemoteWarning",
+            "struct RemoteOverrideState", "RemoteColorComboCapability", "colorCombinations", "struct RemoteWarning",
         ):
             self.assertIn(symbol, self.models)
         self.assertIn("decoder.keyDecodingStrategy = .convertFromSnakeCase", self.store)
@@ -86,6 +86,7 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
         surface = self.view[self.view.index("private struct ConsoleSurface"):self.view.index("private struct ConsoleHeader")]
         self.assertLess(surface.index("ConsoleHeader"), surface.index("LiveStatusStrip"))
         self.assertEqual(1, self.view.count("ConsoleTabBar(selectedTab: $selectedTab)"))
+        self.assertIn("if selectedTab != .overrides { LiveStatusStrip(state: state) }", self.view)
         orientations = (ROOT / "ipad-remote/BeatBeamRemote/Info.plist").read_text(encoding="utf-8")
         self.assertIn("UIInterfaceOrientationLandscapeLeft", orientations)
         self.assertIn("UIInterfaceOrientationLandscapeRight", orientations)
@@ -96,11 +97,14 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
             self.assertIn(text, self.view)
         self.assertNotIn("setBlackoutEnabled", self.view)
         self.assertNotIn("setAutoShowEnabled", self.view)
-        for symbol in ("COLORS", "Rainbow", "ENERGY OVERRIDE", "ENERGY", "HOLD EFFECTS", "ONE-SHOT EFFECTS", "EffectDeck", "ColorPerformancePadStyle", "HardwarePerformancePadStyle", 'store.perform("release_all")', 'store.perform("blackout_on")', 'store.perform("revert_baseline")', 'store.perform("enable_dynamic_composer")'):
+        for symbol in ("SINGLE COLORS", "COLOR COMBINATIONS", "ColorComboMatrix", "ColorComboPad", "Rainbow", "ENERGY / PHRASE", "vertical fader", "HOLD EFFECTS", "ONE-SHOT EFFECTS", "EffectDeck", "ColorPerformancePadStyle", "HardwarePerformancePadStyle", 'store.perform("set_color_combo"', 'store.perform("release_all")', 'store.perform("blackout_on")'):
             self.assertIn(symbol, self.view)
+        override = self.view[self.view.index("private struct OverrideConsole"):self.view.index("private struct ColorPadMatrix")]
+        self.assertNotIn("revert_baseline", override)
+        self.assertNotIn("enable_dynamic_composer", override)
 
     def test_status_and_settings_keep_reconnect_and_pairing_operational(self):
-        for symbol in ("BEATBEAM CONNECTION", "RECONNECT", "SCAN QR", "PAIR / RE-PAIR", "SYSTEM", "VIRTUALDJ", "SONGANALYZER", "CONNECTION PREFERENCES", "FORGET THIS PAIRING"):
+        for symbol in ("BEATBEAM CONNECTION", "RECONNECT", "SCAN QR", "PAIR / RE-PAIR", "SYSTEM", "VIRTUALDJ", "SONGANALYZER", "CONNECTION PREFERENCES", "FORGET THIS PAIRING", "PRODUCTION MODE", "REVERT TO BASELINE", "ENABLE DYNAMIC COMPOSER"):
             self.assertIn(symbol, self.view)
         self.assertIn("store.showConfiguration = true", self.view)
         self.assertIn("store.showScanner = true", self.view)
