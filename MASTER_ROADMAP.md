@@ -2622,6 +2622,25 @@ beschikbaar als fallback; dit is geen verwijdering van de safety path.
 
 **Hoofdrichting:** minder knop-heavy; de gebruiker moet in één oogopslag kunnen zien wat BeatBeam doet.
 
+### Manual Color Combo + Color-first Override V1
+
+`GEREED — BEATBEAM_IPAD_COLOR_CONTROL_SURFACE_V1_TECHNICAL_PASS`.
+Manual Color Combo V1 is een additive manual-override-state: exact acht vaste
+presetparen, geen RGB-interpolatie en een stabiele A/B-verdeling uitsluitend
+over ingeschakelde kleurcapabele slots in bestaande `slot_order`. RGB-only
+fixtures projecteren de exacte RGB-componenten van WHITE met een afwezige
+W-kanaalwaarde; dimmer blijft onafhankelijk. Single en combo zijn wederzijds
+exclusief; AUTO en Release All wissen beide, Blackout blijft dominant en een
+combo herneemt na release. De bestaande Remote V2/LIVE_CONTROL-ack,
+state-revision, SSE en polling-route blijft de authority; no-DMX blijft een
+volwaardige control-testmodus.
+
+De iPad OVERRIDE is vast landscape/no-scroll en Color-first (2×6 singles,
+2×4 combos), zonder track/BPM/phrase/production strip. Effects zijn secundair,
+Energy is een verticale fader, Release All/Blackout compact en production mode
+acties staan alleen in SETTINGS. De technische build/install- en no-DMX-gates
+zijn PASS; `BEATBEAM_IPAD_COLOR_CONTROL_UI = HOLD_USER_REVIEW`.
+
 ## 5.1 Live visualisatie
 
 - `TODO` Centrale Live Show-weergave ontwerpen.

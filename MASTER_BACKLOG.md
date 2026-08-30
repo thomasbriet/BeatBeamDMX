@@ -16,6 +16,7 @@
 | Show Simulator V1 review | `HOLD_USER_REVIEW` | Beoordeel timeline, cue/event/section-jumps en de gesimuleerde 2D/3D Preview Map. | Technische pass is gereed; Simulator heeft hard nul fysieke authority. |
 | VirtualDJ-native SongAnalyzer V1 review | `HOLD_USER_REVIEW` | Beoordeel SongAnalyzer-kolom en Analyze/Reanalyze/Retry als dagelijkse workflow. | Technische live/headless pass is gereed; bredere usabilityreview ontbreekt. |
 | Dynamic Composer advanced effects V2 review | `HOLD_USER_REVIEW` | Beoordeel dimmermotieven, verzadigde paletten, kleur-/participatievariatie en gecontroleerde RETURN-herkenning in Beta-productie. | De productie-gate is lokaal persistent `DYNAMIC_COMPOSER_ENABLED`; manual/blackout en de fail-closed `existing_autoshow`-fallback behouden voorrang. |
+| iPad Color-first Override V1 review | `HOLD_USER_REVIEW` | Beoordeel single colors, twee-kleur-combos, verticale Energy-fader, compacte safety-actions en vaste landscape op de fysieke iPad. | Technische route is PASS, inclusief no-DMX Remote V2; menselijke performance/UX-review ontbreekt. |
 
 ## NEXT
 
@@ -56,6 +57,7 @@
 - `BEATBEAM_SHOW_SIMULATOR_V1_TECHNICAL_PASS`: musical timeline, cue/event/section navigation, isolated previewframes en native 2D/3D Preview Map datasource; 215-track deterministic corpusprojectie en packaged runtime-smoke groen.
 - `DYNAMIC_COMPOSER_ADVANCED_EFFECT_VARIATION_V2_TECHNICAL_PASS`: first-class dimmermotieven, saturated discrete color animation, fixture-participatie en component-aware anti-repeat; 222-track/2.284-section corpus 0 invalid/renderer failures en packaged Beta-smoke groen. De expliciete productie-enablement staat in het volgende checkpoint.
 - `DYNAMIC_COMPOSER_BETA_PRODUCTION_ENABLEMENT_PASS` (2026-08-28): Beta lokaal persistent op `DYNAMIC_COMPOSER_ENABLED`; live smoke 161 Dynamic Composer-frames/8 s, geen nieuwe dispatch failures en exacte composer-intent → `current_values` → RGB-DMX presetcongruentie. Baseline-fallback en manual/blackout-precedence beschikbaar.
+- `BEATBEAM_MANUAL_COLOR_COMBO_V1_TECHNICAL_PASS` en `BEATBEAM_IPAD_COLOR_FIRST_OVERRIDE_V1_TECHNICAL_PASS`: acht deterministische Manual-presetsparen, exact-preset capability-projectie, mutual exclusion met single color, AUTO/Release All/Blackout semantics, LIVE_CONTROL/Remote V2 en no-DMX runtimeacceptatie. De iPad-layout is Color-first met vaste landscape; human UI review blijft HOLD.
 - FILL micro-evidence/tooling en het 36-item blinded reviewpakket.
 
 ## LEGACY / CLOSED

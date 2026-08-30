@@ -19,6 +19,7 @@
 - `DYNAMIC_COMPOSER_PRODUCTION_MODE = DYNAMIC_COMPOSER_ENABLED` is lokaal persistent geactiveerd na bounded live acceptatie. Exacte track/deck/generation/readiness, transport, renderergezondheid, manual override en blackout blijven de selector fail-closed naar baseline sturen.
 - Dynamic Composer, live intensity, event envelopes en variatie voeden daarmee uitsluitend onder deze expliciete productie-gate de bestaande renderer; Preview Map is niet de fysieke authority.
 - Bestaande handmatige veiligheid (phrase/color/energy/strobe, one-shot, chase, snake, all-on, sweep en blackout) blijft downstream van dezelfde bestaande renderer; dit is geen open infrastructuurtaak.
+- `BEATBEAM_MANUAL_COLOR_COMBO_V1_TECHNICAL_PASS` en `BEATBEAM_IPAD_COLOR_FIRST_OVERRIDE_V1_TECHNICAL_PASS`: acht vaste, additive Manual Color Combos gebruiken uitsluitend de bestaande exact-presets via een stabiele A/B-verdeling over kleurcapabele slots. Remote V2/LIVE_CONTROL, no-DMX-rendering en de vaste iPad Color-first Override zijn technisch bewezen; fysieke DMX blijft niet nodig voor de control-test. `BEATBEAM_IPAD_COLOR_CONTROL_UI = HOLD_USER_REVIEW`.
 
 ## Technical PASS
 
@@ -50,6 +51,7 @@
 8. **Show Simulator V1:** beoordeel timeline, navigatie en gesimuleerde 2D/3D Preview Map in de native app. `BEATBEAM_SHOW_SIMULATOR_V1 = HOLD_USER_REVIEW`; dit heeft geen live- of DMX-authority.
 9. **VirtualDJ-native SongAnalyzer V1:** beoordeel dagelijks gebruik van SongAnalyzer-kolom, Analyze/Reanalyze/Retry en lazy browsed/loaded status. De technische live flow is pass; bredere usability blijft `HOLD_USER_REVIEW`.
 10. **Dynamic Composer effects V2:** beoordeel opeenvolgende secties op muzikale dimmervariatie, felle/verzadigde kleuren, gecontroleerde RETURN-herkenning en visuele rust. `DYNAMIC_COMPOSER_ADVANCED_EFFECT_VARIATION_V2 = HOLD_USER_REVIEW`; de Beta-productie-gate is actief, maar manual/blackout en de baseline-fallback behouden voorrang.
+11. **iPad Color-first Override V1:** beoordeel op de fysieke iPad de grootte/hiërarchie van single colors en combos, secundaire effects, verticale Energy-fader, compacte Release All/Blackout, Settings-production controls en vaste landscape zonder scrollen. `BEATBEAM_IPAD_COLOR_CONTROL_UI = HOLD_USER_REVIEW`.
 
 ## Active / Next
 
