@@ -262,6 +262,9 @@ class RemoteLiveControlTests(unittest.TestCase):
     def command(self, action, value=None, command_id="command-1", **extra):
         return beatbeam_app.remote_live_control_command("control-token", {"command_id": command_id, "action": action, "value": value, **extra})
 
+    def command_as(self, token, action, value=None, command_id="command-1", **extra):
+        return beatbeam_app.remote_live_control_command(token, {"command_id": command_id, "action": action, "value": value, **extra})
+
     def test_live_control_allowlist_ack_and_idempotent_manual_color(self):
         first = self.command("set_color", "red")
         duplicate = self.command("set_color", "red")
@@ -284,14 +287,83 @@ class RemoteLiveControlTests(unittest.TestCase):
         self.assertIn(("blackout",), beatbeam_app.DMX.calls)
 
     def test_momentary_lease_is_client_owned_and_expiry_releases(self):
-        self.assertTrue(self.command("momentary_press", "par_chase", command_id="press")["accepted"])
+        press = self.command("momentary_press", "par_chase", command_id="press")
+        self.assertTrue(press["accepted"])
+        self.assertTrue(press["momentary_lease"]["active"])
+        self.assertEqual("par_chase", press["momentary_lease"]["effect"])
+        self.assertTrue(press["momentary_lease"]["lease_id"])
         self.assertIn("par_chase", beatbeam_app.REMOTE_MOMENTARY_LEASES)
         before = len(beatbeam_app.DMX.calls)
-        self.assertTrue(self.command("momentary_renew", "par_chase", command_id="renew")["accepted"])
+        self.assertTrue(self.command("momentary_renew", "par_chase", command_id="renew", lease_id=press["momentary_lease"]["lease_id"])["accepted"])
         self.assertGreater(len(beatbeam_app.DMX.calls), before)
         beatbeam_app._reap_remote_momentary_leases(now=beatbeam_app.REMOTE_MOMENTARY_LEASES["par_chase"]["expires_at"] + 1)
         self.assertNotIn("par_chase", beatbeam_app.REMOTE_MOMENTARY_LEASES)
         self.assertFalse(beatbeam_app.DMX.calls[-1][1]["auto_show"]["override_par_chase"])
+
+    def test_all_hold_effects_share_the_same_press_hold_release_lease_lifecycle(self):
+        for index, effect in enumerate(beatbeam_app.REMOTE_MOMENTARY_EFFECT_KEYS):
+            with self.subTest(effect=effect):
+                press = self.command("momentary_press", effect, command_id=f"{effect}-press")
+                self.assertTrue(press["accepted"])
+                lease = press["momentary_lease"]
+                self.assertEqual("active", lease["status"])
+                self.assertEqual(effect, lease["effect"])
+                self.assertTrue(lease["lease_id"])
+                self.assertIn(effect, beatbeam_app.REMOTE_MOMENTARY_LEASES)
+                self.assertTrue(self.command("momentary_renew", effect, command_id=f"{effect}-renew", lease_id=lease["lease_id"])["accepted"])
+                release = self.command("momentary_release", effect, command_id=f"{effect}-release", lease_id=lease["lease_id"])
+                self.assertTrue(release["accepted"])
+                self.assertEqual("released", release["momentary_lease"]["status"])
+                self.assertFalse(release["momentary_lease"]["active"])
+                self.assertNotIn(effect, beatbeam_app.REMOTE_MOMENTARY_LEASES)
+                self.assertFalse(beatbeam_app.DMX.config["auto_show"][beatbeam_app.REMOTE_MOMENTARY_EFFECT_KEYS[effect]])
+
+    def test_momentary_release_is_idempotent_for_touch_cancel_fast_tap_and_expiry_cleanup(self):
+        press = self.command("momentary_press", "manual_strobe", command_id="fast-press")
+        lease_id = press["momentary_lease"]["lease_id"]
+        # The release is the same bounded operation used for touch-up and touch-cancel.
+        release = self.command("momentary_release", "manual_strobe", command_id="touch-cancel", lease_id=lease_id)
+        self.assertTrue(release["accepted"]); self.assertEqual("released", release["momentary_lease"]["status"])
+        duplicate = self.command("momentary_release", "manual_strobe", command_id="late-touch-up", lease_id=lease_id)
+        self.assertTrue(duplicate["accepted"]); self.assertEqual("already_released", duplicate["momentary_lease"]["status"])
+
+        press = self.command("momentary_press", "manual_strobe", command_id="network-loss-press")
+        expires_at = beatbeam_app.REMOTE_MOMENTARY_LEASES["manual_strobe"]["expires_at"]
+        beatbeam_app._reap_remote_momentary_leases(now=expires_at + 1)
+        expired = self.command("momentary_release", "manual_strobe", command_id="expired-release", lease_id=press["momentary_lease"]["lease_id"])
+        self.assertTrue(expired["accepted"]); self.assertEqual("already_released", expired["momentary_lease"]["status"])
+
+    def test_momentary_renew_after_expiry_is_benign_and_never_reactivates_the_effect(self):
+        press = self.command("momentary_press", "all_on", command_id="press")
+        lease_id = press["momentary_lease"]["lease_id"]
+        beatbeam_app._reap_remote_momentary_leases(now=beatbeam_app.REMOTE_MOMENTARY_LEASES["all_on"]["expires_at"] + 1)
+        renew = self.command("momentary_renew", "all_on", command_id="late-renew", lease_id=lease_id)
+        self.assertTrue(renew["accepted"])
+        self.assertEqual("expired", renew["momentary_lease"]["status"])
+        self.assertFalse(renew["momentary_lease"]["active"])
+        self.assertNotIn("all_on", beatbeam_app.REMOTE_MOMENTARY_LEASES)
+
+    def test_momentary_lease_rejects_wrong_client_and_wrong_lease_identity(self):
+        beatbeam_app.REMOTE_ACCESS_CONFIG["remote_credentials"]["other-control-token"] = {
+            "scope": "REMOTE_READ", "scopes": ["REMOTE_READ", "LIVE_CONTROL"], "client_id": "ipad-b"
+        }
+        press = self.command("momentary_press", "audience_sweep", command_id="press")
+        lease_id = press["momentary_lease"]["lease_id"]
+        wrong_client = self.command_as("other-control-token", "momentary_release", "audience_sweep", command_id="wrong-client", lease_id=lease_id)
+        self.assertFalse(wrong_client["accepted"]); self.assertIn("another client", wrong_client["error"])
+        wrong_lease = self.command("momentary_release", "audience_sweep", command_id="wrong-lease", lease_id="not-the-lease")
+        self.assertFalse(wrong_lease["accepted"]); self.assertIn("does not match", wrong_lease["error"])
+        self.assertIn("audience_sweep", beatbeam_app.REMOTE_MOMENTARY_LEASES)
+
+    def test_momentary_controls_do_not_require_physical_dmx_connection(self):
+        # The fake renderer intentionally has no physical connection property;
+        # the LIVE_CONTROL lease path must still update authoritative intent.
+        press = self.command("momentary_press", "par_snake", command_id="offline-press")
+        self.assertTrue(press["accepted"])
+        self.assertTrue(beatbeam_app.DMX.config["auto_show"]["override_par_snake"])
+        release = self.command("momentary_release", "par_snake", command_id="offline-release", lease_id=press["momentary_lease"]["lease_id"])
+        self.assertTrue(release["accepted"])
+        self.assertFalse(beatbeam_app.DMX.config["auto_show"]["override_par_snake"])
 
     def test_read_scope_cannot_control_and_stale_revision_rejects(self):
         self.assertFalse(beatbeam_app.remote_live_control_token_is_valid("read-token"))

@@ -37,6 +37,29 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
         self.assertIn("releaseActiveMomentaries", self.store)
         self.assertIn("LIVE_CONTROL", self.store)
 
+    def test_momentary_hold_lifecycle_is_single_flight_lease_identified_and_non_modal_for_cleanup(self):
+        for symbol in (
+            "momentaryStarts", "momentaryLeaseIDs", "momentaryReleasePending",
+            "completeMomentaryStart", "releaseMomentary", "renewMomentary",
+            '"lease_id"', "suppressBenignMomentaryError",
+            "shouldSuppressMomentaryLifecycleError", "momentary effect has no active lease",
+        ):
+            self.assertIn(symbol, self.store)
+        self.assertIn("guard momentaryStarts.insert(effect).inserted else { return }", self.store)
+        self.assertIn("if momentaryReleasePending.remove(effect) != nil", self.store)
+        self.assertIn("guard outcome.accepted, outcome.momentaryLease?.active == true else", self.store)
+        self.assertIn("RemoteMomentaryLease", self.models)
+
+    def test_momentary_holds_use_the_responsive_input_and_control_transport_path(self):
+        for symbol in (
+            "controlSession", "networkServiceType = .responsiveData",
+            "locallyPressedMomentaryEffects", "isMomentaryEngaged",
+        ):
+            self.assertIn(symbol, self.store)
+        self.assertIn("onLongPressGesture(minimumDuration: 0", self.view)
+        self.assertIn("store.isMomentaryEngaged(effect.id)", self.view)
+        self.assertNotIn("simultaneousGesture(DragGesture", self.view)
+
     def test_connection_state_and_authoritative_snapshot_reconciliation_exist(self):
         for state in ("notPaired", "connecting", "connected", "reconnecting", "offline", "authFailed", "serverIncompatible"):
             self.assertIn(state, self.store)

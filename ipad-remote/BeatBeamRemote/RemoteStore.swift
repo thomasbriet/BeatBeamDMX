@@ -60,6 +60,7 @@ final class RemoteStore: ObservableObject {
     @Published var showScanner = false
     @Published var transientMessage: String?
     @Published private(set) var pendingActions: Set<String> = []
+    @Published private(set) var locallyPressedMomentaryEffects: Set<String> = []
 
     private let defaults = UserDefaults.standard
     private let storedHostKey = "BeatBeamRemote.V2Host"
@@ -71,7 +72,13 @@ final class RemoteStore: ObservableObject {
     private var failedRefreshes = 0
     private var newestRevision = -1
     private var newestSequence = -1
+    // A gesture can emit several changed callbacks before its first network
+    // acknowledgement.  Keep one state record per effect from touch-down,
+    // rather than using the renewal task itself as the only active marker.
+    private var momentaryStarts: Set<String> = []
     private var momentaryRenewals: [String: Task<Void, Never>] = [:]
+    private var momentaryLeaseIDs: [String: String] = [:]
+    private var momentaryReleasePending: Set<String> = []
     private let fallbackPollIntervalNanoseconds: UInt64 = 2_500_000_000
     private let streamRetryDelayNanoseconds: UInt64 = 900_000_000
     private lazy var session: URLSession = {
@@ -80,6 +87,20 @@ final class RemoteStore: ObservableObject {
         configuration.timeoutIntervalForRequest = 12
         configuration.timeoutIntervalForResource = 3600
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.allowsConstrainedNetworkAccess = true
+        configuration.allowsExpensiveNetworkAccess = true
+        return URLSession(configuration: configuration)
+    }()
+    // The event stream stays open for the life of a connected remote.  HOLD
+    // controls use a separate responsive session so touch-down never queues
+    // behind polling/SSE transport work.
+    private lazy var controlSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 3
+        configuration.timeoutIntervalForResource = 3
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.httpMaximumConnectionsPerHost = 2
         configuration.allowsConstrainedNetworkAccess = true
         configuration.allowsExpensiveNetworkAccess = true
         return URLSession(configuration: configuration)
@@ -153,68 +174,133 @@ final class RemoteStore: ObservableObject {
     }
 
     func perform(_ action: String, value: String? = nil) {
-        Task { await sendControl(action, value: value) }
+        Task { _ = await sendControl(action, value: value) }
     }
 
     func beginMomentary(_ effect: String) {
-        guard momentaryRenewals[effect] == nil else { return }
-        Task {
-            let accepted = await sendControl("momentary_press", value: effect)
-            guard accepted else { return }
-            momentaryRenewals[effect] = Task { [weak self] in
-                while let self, !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 900_000_000)
-                    guard !Task.isCancelled else { break }
-                    guard await self.sendControl("momentary_renew", value: effect) else { break }
-                }
-            }
+        // Insert before awaiting so repeated onChanged callbacks cannot create
+        // overlapping press/renewal lifecycles for the same HOLD pad.
+        guard momentaryStarts.insert(effect).inserted else { return }
+        locallyPressedMomentaryEffects.insert(effect)
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome = await self.sendControl("momentary_press", value: effect)
+            self.completeMomentaryStart(effect, outcome: outcome)
         }
     }
 
     func endMomentary(_ effect: String) {
+        locallyPressedMomentaryEffects.remove(effect)
         momentaryRenewals.removeValue(forKey: effect)?.cancel()
-        perform("momentary_release", value: effect)
+        if let leaseID = momentaryLeaseIDs.removeValue(forKey: effect) {
+            momentaryStarts.remove(effect)
+            releaseMomentary(effect, leaseID: leaseID)
+        } else if momentaryStarts.contains(effect) {
+            // Touch-up raced the press response.  The start completion will
+            // immediately release the exact lease it receives.
+            momentaryReleasePending.insert(effect)
+        }
     }
 
     func releaseActiveMomentaries(reason: String = "") {
-        let effects = Array(momentaryRenewals.keys)
-        momentaryRenewals.values.forEach { $0.cancel() }
-        momentaryRenewals.removeAll()
-        for effect in effects { perform("momentary_release", value: effect) }
+        let effects = Set(momentaryStarts).union(momentaryRenewals.keys).union(momentaryLeaseIDs.keys)
+        for effect in effects { endMomentary(effect) }
     }
 
-    private func sendControl(_ action: String, value: String? = nil) async -> Bool {
-        guard credential != nil, host != nil else { showConfiguration = true; return false }
+    func isMomentaryEngaged(_ effect: String) -> Bool {
+        locallyPressedMomentaryEffects.contains(effect)
+    }
+
+    private struct ControlOutcome {
+        let accepted: Bool
+        let momentaryLease: RemoteMomentaryLease?
+    }
+
+    private func completeMomentaryStart(_ effect: String, outcome: ControlOutcome) {
+        guard momentaryStarts.contains(effect) else { return }
+        guard outcome.accepted, let lease = outcome.momentaryLease, lease.active, let leaseID = lease.leaseId else {
+            momentaryStarts.remove(effect)
+            momentaryReleasePending.remove(effect)
+            locallyPressedMomentaryEffects.remove(effect)
+            return
+        }
+        momentaryLeaseIDs[effect] = leaseID
+        momentaryStarts.remove(effect)
+        if momentaryReleasePending.remove(effect) != nil {
+            momentaryLeaseIDs.removeValue(forKey: effect)
+            releaseMomentary(effect, leaseID: leaseID)
+            return
+        }
+        momentaryRenewals[effect]?.cancel()
+        momentaryRenewals[effect] = Task { [weak self] in
+            while let self, !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                guard !Task.isCancelled else { break }
+                guard await self.renewMomentary(effect) else { break }
+            }
+        }
+    }
+
+    private func renewMomentary(_ effect: String) async -> Bool {
+        guard let leaseID = momentaryLeaseIDs[effect] else { return false }
+        let outcome = await sendControl("momentary_renew", value: effect, leaseID: leaseID, suppressBenignMomentaryError: true)
+        guard outcome.accepted, outcome.momentaryLease?.active == true else {
+            momentaryRenewals.removeValue(forKey: effect)?.cancel()
+            momentaryLeaseIDs.removeValue(forKey: effect)
+            locallyPressedMomentaryEffects.remove(effect)
+            return false
+        }
+        return true
+    }
+
+    private func releaseMomentary(_ effect: String, leaseID: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            _ = await self.sendControl("momentary_release", value: effect, leaseID: leaseID, suppressBenignMomentaryError: true)
+        }
+    }
+
+    private func sendControl(_ action: String, value: String? = nil, leaseID: String? = nil, suppressBenignMomentaryError: Bool = false) async -> ControlOutcome {
+        guard credential != nil, host != nil else { showConfiguration = true; return ControlOutcome(accepted: false, momentaryLease: nil) }
         let pending = "\(action):\(value ?? "")"
         pendingActions.insert(pending)
         defer { pendingActions.remove(pending) }
         do {
             var request = try authenticatedRequest(path: "/api/remote-v2/control", method: "POST")
-            let body: [String: Any] = [
+            request.networkServiceType = .responsiveData
+            var body: [String: Any] = [
                 "command_id": UUID().uuidString, "action": action, "value": value ?? NSNull(),
             ]
+            if let leaseID { body["lease_id"] = leaseID }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await controlSession.data(for: request)
             guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
             if (200..<300).contains(http.statusCode) {
                 let acknowledgement = try decoder().decode(RemoteControlAcknowledgement.self, from: data)
                 apply(acknowledgement.effectiveState)
-                guard acknowledgement.accepted else { transientMessage = acknowledgement.error ?? "Opdracht geweigerd door BeatBeam."; return false }
-                return true
+                guard acknowledgement.accepted else {
+                    if !shouldSuppressMomentaryLifecycleError(action: action, error: acknowledgement.error, enabled: suppressBenignMomentaryError) { transientMessage = acknowledgement.error ?? "Opdracht geweigerd door BeatBeam." }
+                    return ControlOutcome(accepted: false, momentaryLease: acknowledgement.momentaryLease)
+                }
+                return ControlOutcome(accepted: true, momentaryLease: acknowledgement.momentaryLease)
             }
             if http.statusCode == 409 {
                 // A conflict is a typed command rejection, never a success ack.
                 let rejection = try decoder().decode(RemoteControlRejection.self, from: data)
                 apply(rejection.effectiveState)
-                transientMessage = rejection.error ?? "Opdracht geweigerd door BeatBeam."
-                return false
+                if !shouldSuppressMomentaryLifecycleError(action: action, error: rejection.error, enabled: suppressBenignMomentaryError) { transientMessage = rejection.error ?? "Opdracht geweigerd door BeatBeam." }
+                return ControlOutcome(accepted: false, momentaryLease: rejection.momentaryLease)
             }
             try validateHTTP(http, data: data)
-            return false
+            return ControlOutcome(accepted: false, momentaryLease: nil)
         } catch {
             applyConnectionError(error)
-            return false
+            return ControlOutcome(accepted: false, momentaryLease: nil)
         }
+    }
+
+    private func shouldSuppressMomentaryLifecycleError(action: String, error: String?, enabled: Bool) -> Bool {
+        enabled && ["momentary_release", "momentary_renew"].contains(action) && error == "momentary effect has no active lease"
     }
 
     private func applyPairingInput(_ raw: String) {

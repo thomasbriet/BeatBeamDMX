@@ -17604,17 +17604,31 @@ def _remote_auto_show_update(updates):
     return DMX.update_config({"auto_show": auto_show})
 
 
-def _release_remote_momentary_effect(effect, owner=None):
+def _remote_momentary_lease_payload(effect, lease, status):
+    """Return the client-visible identity/status for one bounded HOLD lease."""
+    return {
+        "effect": effect,
+        "lease_id": (lease or {}).get("lease_id"),
+        "active": status == "active",
+        "status": status,
+    }
+
+
+def _release_remote_momentary_effect(effect, owner=None, lease_id=None):
     key = REMOTE_MOMENTARY_EFFECT_KEYS.get(effect)
     if not key:
-        return False
+        return "unsupported", None
     with REMOTE_CONTROL_LOCK:
         lease = REMOTE_MOMENTARY_LEASES.get(effect)
-        if lease is None or (owner is not None and lease.get("owner") != owner):
-            return False
+        if lease is None:
+            return "already_released", None
+        if owner is not None and lease.get("owner") != owner:
+            return "wrong_client", lease
+        if lease_id and lease.get("lease_id") != lease_id:
+            return "wrong_lease", lease
         REMOTE_MOMENTARY_LEASES.pop(effect, None)
     _remote_auto_show_update({key: False})
-    return True
+    return "released", lease
 
 
 def _reap_remote_momentary_leases(now=None):
@@ -17632,13 +17646,16 @@ def _remote_control_client_id(token):
     return str(credential.get("client_id") or "")
 
 
-def _remote_control_ack(command_id, accepted, error=None):
+def _remote_control_ack(command_id, accepted, error=None, momentary_lease=None):
     state = remote_live_state_v2()
-    return {
+    result = {
         "accepted": bool(accepted), "command_id": command_id,
         "new_state_revision": state["state_revision"],
         "effective_state": state, "error": error,
     }
+    if momentary_lease is not None:
+        result["momentary_lease"] = momentary_lease
+    return result
 
 
 def remote_live_control_command(token, payload):
@@ -17664,6 +17681,7 @@ def remote_live_control_command(token, payload):
             return _remote_control_ack(command_id, False, "invalid_expected_state_revision")
     try:
         value = (payload or {}).get("value")
+        momentary_lease = None
         if action == "set_color":
             color = live_override_color_name(value)
             if str(value or "none").strip().lower() not in LIVE_OVERRIDE_COLORS:
@@ -17682,23 +17700,37 @@ def remote_live_control_command(token, payload):
         elif action in {"momentary_press", "momentary_renew", "momentary_release"}:
             effect = str(value or "").strip().lower()
             key = REMOTE_MOMENTARY_EFFECT_KEYS.get(effect)
+            requested_lease_id = str((payload or {}).get("lease_id") or "").strip() or None
             if not key:
                 raise ValueError("unsupported momentary effect")
-            with REMOTE_CONTROL_LOCK:
-                lease = REMOTE_MOMENTARY_LEASES.get(effect)
-                if action == "momentary_release":
-                    if lease and lease.get("owner") != owner:
-                        raise ValueError("momentary effect is owned by another client")
-                elif lease and lease.get("owner") != owner:
-                    raise ValueError("momentary effect is leased by another client")
-                elif action == "momentary_renew" and not lease:
-                    raise ValueError("momentary effect has no active lease")
-                if action != "momentary_release":
-                    REMOTE_MOMENTARY_LEASES[effect] = {"owner": owner, "expires_at": time.monotonic() + REMOTE_MOMENTARY_LEASE_SECONDS}
             if action == "momentary_release":
-                _release_remote_momentary_effect(effect, owner)
+                release_status, released_lease = _release_remote_momentary_effect(effect, owner, requested_lease_id)
+                if release_status == "wrong_client":
+                    raise ValueError("momentary effect is owned by another client")
+                if release_status == "wrong_lease":
+                    raise ValueError("momentary effect lease does not match")
+                momentary_lease = _remote_momentary_lease_payload(effect, released_lease, release_status)
             else:
-                _remote_auto_show_update({key: True})
+                with REMOTE_CONTROL_LOCK:
+                    lease = REMOTE_MOMENTARY_LEASES.get(effect)
+                    if lease and lease.get("owner") != owner:
+                        raise ValueError("momentary effect is leased by another client")
+                    if action == "momentary_press":
+                        if lease is None:
+                            lease = {"owner": owner, "lease_id": secrets.token_urlsafe(18)}
+                            REMOTE_MOMENTARY_LEASES[effect] = lease
+                        lease["expires_at"] = time.monotonic() + REMOTE_MOMENTARY_LEASE_SECONDS
+                    elif lease is None:
+                        # Renewal after a network gap/expiry is not an error and
+                        # must never recreate an effect without a new touch-down.
+                        momentary_lease = _remote_momentary_lease_payload(effect, None, "expired")
+                    else:
+                        if requested_lease_id and lease.get("lease_id") != requested_lease_id:
+                            raise ValueError("momentary effect lease does not match")
+                        lease["expires_at"] = time.monotonic() + REMOTE_MOMENTARY_LEASE_SECONDS
+                if momentary_lease is None:
+                    _remote_auto_show_update({key: True})
+                    momentary_lease = _remote_momentary_lease_payload(effect, lease, "active")
         elif action == "trigger_cue":
             cue = one_shot_cue_name(value)
             if cue == "none": raise ValueError("unsupported cue shot")
@@ -17717,7 +17749,7 @@ def remote_live_control_command(token, payload):
             DMX.set_production_show_mode(DYNAMIC_COMPOSER_ENABLED)
         else:
             raise ValueError("LIVE_CONTROL action is not allowlisted")
-        result = _remote_control_ack(command_id, True)
+        result = _remote_control_ack(command_id, True, momentary_lease=momentary_lease)
     except Exception as exc:
         result = _remote_control_ack(command_id, False, str(exc))
     with REMOTE_CONTROL_LOCK:

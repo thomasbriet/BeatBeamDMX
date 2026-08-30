@@ -341,7 +341,7 @@ private struct EffectRow: View {
             HStack(spacing: 10) {
                 ForEach(effects) { effect in
                     if effect.isAvailable {
-                        if hold { MomentaryEffectPad(effect: effect, active: activeIDs.contains(effect.id)).environmentObject(store) }
+                        if hold { MomentaryEffectPad(effect: effect, active: activeIDs.contains(effect.id) || store.isMomentaryEngaged(effect.id)).environmentObject(store) }
                         else { Button { store.perform("trigger_cue", value: effect.id) } label: { EffectPadFace(effect: effect, active: false) }.buttonStyle(HardwarePerformancePadStyle(active: false)) }
                     } else { UnavailableEffectPad(effect: effect) }
                 }
@@ -443,7 +443,11 @@ private struct MomentaryEffectPad: View {
             .background(active ? RemoteTheme.accent.opacity(0.24) : RemoteTheme.padOff)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(active ? RemoteTheme.accent : RemoteTheme.border, lineWidth: active ? 2 : 1))
-            .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in store.beginMomentary(effect.id) }.onEnded { _ in store.endMomentary(effect.id) })
+            .contentShape(Rectangle())
+            .onLongPressGesture(minimumDuration: 0, maximumDistance: .infinity, pressing: { pressed in
+                if pressed { store.beginMomentary(effect.id) }
+                else { store.endMomentary(effect.id) }
+            }, perform: {})
             .onDisappear { store.endMomentary(effect.id) }.accessibilityLabel("Hold \(effect.label)")
     }
 }

@@ -84,10 +84,13 @@ struct RemoteControlCapabilities: Decodable, Equatable {
     let cueShots: [RemoteEffectCapability]; let momentaryLeaseSeconds: Double
 }
 struct RemoteControlAcknowledgement: Decodable {
-    let accepted: Bool; let commandId: String?; let newStateRevision: Int; let effectiveState: RemoteLiveStateV2; let error: String?
+    let accepted: Bool; let commandId: String?; let newStateRevision: Int; let effectiveState: RemoteLiveStateV2; let error: String?; let momentaryLease: RemoteMomentaryLease?
 }
 struct RemoteControlRejection: Decodable {
-    let accepted: Bool; let commandId: String?; let newStateRevision: Int; let effectiveState: RemoteLiveStateV2; let error: String?
+    let accepted: Bool; let commandId: String?; let newStateRevision: Int; let effectiveState: RemoteLiveStateV2; let error: String?; let momentaryLease: RemoteMomentaryLease?
+}
+struct RemoteMomentaryLease: Decodable, Equatable {
+    let effect: String; let leaseId: String?; let active: Bool; let status: String
 }
 struct RemoteConnectionHost: Codable, Equatable {
     let origin: URL
