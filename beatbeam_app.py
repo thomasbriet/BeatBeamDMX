@@ -3442,6 +3442,9 @@ def mode_capabilities(mode):
     return {
         "dimmer": "intensity" in channel_types,
         "strobe": "strobe" in channel_types,
+        "fog": any(str(channel.get("control") or "") == "fog" for channel in mode["channels"]),
+        "macro": any(str(channel.get("control") or "") == "macro" for channel in mode["channels"]),
+        "amber": "amber" in color_components,
         "program": any(
             channel_type in channel_types
             for channel_type in ("program", "color_program", "auto_mode")
@@ -10139,6 +10142,9 @@ class DmxController:
         self.last_slot_trigger_signatures = {}
         self.last_slot_rhythm_signatures = {}
         self.last_slot_strobe_outputs = {}
+        # A manual combo's last valid VirtualDJ beat parity.  It is only used
+        # while transport is stale; a fresh frame always derives parity anew.
+        self.manual_combo_last_valid_beat_parity = 0
         self.outro_behavior_state = None
         self.active_one_shot_cue = None
         self.track_preview_summaries = {}
@@ -13329,13 +13335,19 @@ class DmxController:
         rgbw = LIVE_OVERRIDE_COLORS[color_name]
         return [rgbw] * 8
 
-    def _live_override_combo_rgbw_for_slot(self, override_combo, slot_context):
+    def _live_override_combo_rgbw_for_slot(self, override_combo, slot_context, osc):
         combo = MANUAL_COLOR_COMBOS.get(live_override_color_combo_name(override_combo))
         if not combo or not slot_context.get("color_capable"):
             return None
-        # This ordinal is only over enabled colour-capable slots in slot_order.
-        # It is stable between frames and never depends on beat/time.
-        return manual_color_preset_rgbw(combo[int(slot_context.get("color_index", 0)) % 2])
+        # Partition membership is fixed by color_index.  Only the exact A/B
+        # ownership changes, from the active authoritative beat parity.
+        if not bool(osc.get("stale")) and osc.get("beat_value") is not None:
+            try:
+                self.manual_combo_last_valid_beat_parity = int(math.floor(float(osc["beat_value"]))) % 2
+            except (TypeError, ValueError):
+                pass
+        partition = int(slot_context.get("color_index", 0)) % 2
+        return manual_color_preset_rgbw(combo[(partition + self.manual_combo_last_valid_beat_parity) % 2])
 
     def _slot_key_base_for_fixture(self, fixture_id):
         label_base = fixture_preset(fixture_id)["label_base"].lower()
@@ -15732,7 +15744,7 @@ class DmxController:
         override_combo = live_override_color_combo_name(auto_show.get("override_color_combo"))
         override_color = live_override_color_name(auto_show.get("override_color"))
         if override_combo != "none":
-            override_rgbw = self._live_override_combo_rgbw_for_slot(override_combo, slot_context)
+            override_rgbw = self._live_override_combo_rgbw_for_slot(override_combo, slot_context, osc)
             if override_rgbw is not None:
                 effective["_auto_show_rgbw"] = override_rgbw
                 effective["_force_rgbw_override"] = True

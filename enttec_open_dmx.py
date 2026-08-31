@@ -394,6 +394,16 @@ def values_for_fixture(
     }
     extra_values = dict(extra_values or {})
 
+    def native_value(channel, value):
+        """Map BeatBeam's semantic 0..255 value to a profile's DMX domain."""
+        semantic = clamp_dmx(value)
+        try:
+            native_max = int(channel.get("native_max", 255))
+        except (TypeError, ValueError):
+            native_max = 255
+        native_max = max(0, min(255, native_max))
+        return clamp_dmx(round(semantic * native_max / 255))
+
     for channel in mode["channels"]:
         absolute = start_address + channel["offset"] - 1
         channel_type = channel["type"]
@@ -414,13 +424,11 @@ def values_for_fixture(
                         "white": zone_white,
                         "coolwhite": zone_white,
                     }
-                    values[absolute] = clamp_dmx(
-                        zone_components.get(channel.get("component", ""), 0)
-                    )
+                    values[absolute] = native_value(channel, zone_components.get(channel.get("component", ""), 0))
                     continue
-            values[absolute] = component_values.get(channel.get("component", ""), 0)
+            values[absolute] = native_value(channel, component_values.get(channel.get("component", ""), 0))
         elif channel_type == "intensity":
-            values[absolute] = clamp_dmx(dimmer)
+            values[absolute] = native_value(channel, dimmer)
         elif channel_type == "pan":
             values[absolute] = clamp_dmx(pan)
         elif channel_type == "tilt":
@@ -442,7 +450,7 @@ def values_for_fixture(
         elif channel_type == "color_speed":
             values[absolute] = clamp_dmx(speed if color_speed is None else color_speed)
         elif channel_type == "strobe":
-            values[absolute] = clamp_dmx(strobe)
+            values[absolute] = native_value(channel, strobe)
         elif channel_type == "pan_tilt_speed":
             values[absolute] = clamp_dmx(pan_tilt_speed)
         elif channel_type == "custom":
@@ -453,7 +461,7 @@ def values_for_fixture(
                 or f"custom_{channel.get('offset', absolute)}"
             )
             default_value = channel.get("default", 0)
-            values[absolute] = clamp_dmx(extra_values.get(control_id, default_value))
+            values[absolute] = native_value(channel, extra_values.get(control_id, default_value))
 
     return values
 

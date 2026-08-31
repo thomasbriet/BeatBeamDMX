@@ -421,6 +421,29 @@
           ]
         }
       ]
+    },
+    {
+      "id": "beamz_blaze_series_rgba_fogger",
+      "manufacturer": "BeamZ",
+      "model": "BLAZE Series 160.538 / 160.540 / 160.542",
+      "source": "BeamZ BLAZE Series 160.538 / 160.540 / 160.542 manual V1.1",
+      "model_variants": ["160.538", "160.540", "160.542"],
+      "modes": [
+        {
+          "name": "8ch",
+          "footprint": 8,
+          "channels": [
+            { "offset": 1, "name": "Fog", "type": "custom", "control": "fog", "default": 0, "native_max": 255 },
+            { "offset": 2, "name": "Master Dimmer", "type": "intensity", "native_max": 255 },
+            { "offset": 3, "name": "Red", "type": "color", "component": "red", "native_max": 100 },
+            { "offset": 4, "name": "Green", "type": "color", "component": "green", "native_max": 100 },
+            { "offset": 5, "name": "Blue", "type": "color", "component": "blue", "native_max": 100 },
+            { "offset": 6, "name": "Amber", "type": "color", "component": "amber", "native_max": 100 },
+            { "offset": 7, "name": "Strobe Mode", "type": "strobe", "native_max": 100 },
+            { "offset": 8, "name": "Macro Mode", "type": "custom", "control": "macro", "default": 0, "native_max": 100 }
+          ]
+        }
+      ]
     }
   ]
 }
