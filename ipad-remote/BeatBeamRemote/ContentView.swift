@@ -33,7 +33,13 @@ struct ContentView: View {
         ZStack {
             LinearGradient(colors: [Color(red: 0.045, green: 0.060, blue: 0.090), RemoteTheme.background], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
             if let state = store.liveState {
-                ConsoleSurface(state: state, selectedTab: $selectedTab).environmentObject(store)
+                switch BBRemotePresentationMode.current {
+                case .legacySwiftUI:
+                    ConsoleSurface(state: state, selectedTab: $selectedTab).environmentObject(store)
+                case .uiKitV1:
+                    UIKitControlSurfaceHost(store: store, state: state)
+                        .ignoresSafeArea(.keyboard)
+                }
             } else {
                 UnpairedSurface().environmentObject(store)
             }

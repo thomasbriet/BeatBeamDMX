@@ -6,7 +6,17 @@ import UIKit
 private enum RemoteKeychain {
     static let service = "nl.beatbeam.remote"
 
+    private static func simulatorDefaultsKey(account: String) -> String {
+        "\(service).SimulatorCredential.\(account)"
+    }
+
     static func save(_ value: String, account: String) throws {
+#if targetEnvironment(simulator)
+        // Simulator binaries do not receive the physical provisioning profile's
+        // application-identifier entitlement. Keep acceptance pairing local to
+        // this simulated device; production/device builds remain Keychain-only.
+        UserDefaults.standard.set(value, forKey: simulatorDefaultsKey(account: account))
+#else
         let data = Data(value.utf8)
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                     kSecAttrAccount as String: account]
@@ -16,9 +26,13 @@ private enum RemoteKeychain {
         item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(item as CFDictionary, nil)
         guard status == errSecSuccess else { throw NSError(domain: "BeatBeamRemote.Keychain", code: Int(status)) }
+#endif
     }
 
     static func load(account: String) -> String? {
+#if targetEnvironment(simulator)
+        return UserDefaults.standard.string(forKey: simulatorDefaultsKey(account: account))
+#else
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                     kSecAttrAccount as String: account, kSecReturnData as String: true,
                                     kSecMatchLimit as String: kSecMatchLimitOne]
@@ -26,11 +40,16 @@ private enum RemoteKeychain {
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+#endif
     }
 
     static func delete(account: String) {
+#if targetEnvironment(simulator)
+        UserDefaults.standard.removeObject(forKey: simulatorDefaultsKey(account: account))
+#else
         SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                        kSecAttrAccount as String: account] as CFDictionary)
+#endif
     }
 }
 
