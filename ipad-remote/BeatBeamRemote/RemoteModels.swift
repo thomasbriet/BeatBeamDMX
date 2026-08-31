@@ -53,6 +53,7 @@ struct RemoteOutputPreview: Decodable, Equatable {
 struct RemoteOutputFixture: Decodable, Equatable, Identifiable {
     let id: String; let label: String; let role: String; let active: Bool
     let dimmer: Int; let red: Int; let green: Int; let blue: Int; let white: Int; let strobe: Int
+    let effectiveIntensity: Double?; let resolvedRed: Int?; let resolvedGreen: Int?; let resolvedBlue: Int?; let resolvedWhite: Int?
     let pan: Int?; let tilt: Int?
 }
 struct RemoteFixtureGroup: Decodable, Equatable, Identifiable {

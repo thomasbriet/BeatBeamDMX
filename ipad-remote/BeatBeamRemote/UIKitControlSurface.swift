@@ -471,18 +471,39 @@ private final class BBLiveSurface: UIView, BBRemoteStateRendering {
 private final class BBFixtureTile: UIView {
     init(fixture: RemoteOutputFixture, blackout: Bool) {
         super.init(frame: .zero)
-        let swatch = UIView()
-        let white = CGFloat(fixture.white)
-        let color = blackout ? UIColor.black : UIColor(red: min(255, CGFloat(fixture.red) + white) / 255, green: min(255, CGFloat(fixture.green) + white) / 255, blue: min(255, CGFloat(fixture.blue) + white) / 255, alpha: max(0.20, CGFloat(fixture.dimmer) / 255))
-        swatch.backgroundColor = color
-        swatch.layer.cornerRadius = 4; swatch.layer.borderWidth = 1; swatch.layer.borderColor = UIColor.white.withAlphaComponent(0.22).cgColor
-        swatch.heightAnchor.constraint(greaterThanOrEqualToConstant: 46).isActive = true
+        let meter = UIView()
+        let resolvedWhite = CGFloat(fixture.resolvedWhite ?? fixture.white)
+        let resolvedRed = CGFloat(fixture.resolvedRed ?? fixture.red)
+        let resolvedGreen = CGFloat(fixture.resolvedGreen ?? fixture.green)
+        let resolvedBlue = CGFloat(fixture.resolvedBlue ?? fixture.blue)
+        let intensity = blackout ? 0 : min(1, max(0, CGFloat(fixture.effectiveIntensity ?? Double(fixture.dimmer) / 255)))
+        let fill = UIView()
+        fill.backgroundColor = UIColor(
+            red: min(255, resolvedRed + resolvedWhite) / 255,
+            green: min(255, resolvedGreen + resolvedWhite) / 255,
+            blue: min(255, resolvedBlue + resolvedWhite) / 255,
+            alpha: 1
+        )
+        meter.backgroundColor = BBUIKitTokens.recessed
+        meter.layer.cornerRadius = 4
+        meter.layer.borderWidth = 1
+        meter.layer.borderColor = UIColor.white.withAlphaComponent(0.22).cgColor
+        meter.clipsToBounds = true
+        fill.translatesAutoresizingMaskIntoConstraints = false
+        meter.addSubview(fill)
+        NSLayoutConstraint.activate([
+            fill.leadingAnchor.constraint(equalTo: meter.leadingAnchor),
+            fill.trailingAnchor.constraint(equalTo: meter.trailingAnchor),
+            fill.bottomAnchor.constraint(equalTo: meter.bottomAnchor),
+            fill.heightAnchor.constraint(equalTo: meter.heightAnchor, multiplier: intensity),
+        ])
+        meter.heightAnchor.constraint(greaterThanOrEqualToConstant: 46).isActive = true
         let title = UILabel(); title.text = fixture.label.uppercased(); title.font = BBUIKitTokens.labelFont(10); title.textColor = .white; title.textAlignment = .center; title.adjustsFontSizeToFitWidth = true
         let value = UILabel(); value.text = blackout ? "BLACKOUT" : "DIM \(fixture.dimmer) · RGB \(fixture.red)/\(fixture.green)/\(fixture.blue)"; value.font = BBUIKitTokens.labelFont(8); value.textColor = BBUIKitTokens.secondary; value.textAlignment = .center; value.adjustsFontSizeToFitWidth = true
-        let stack = UIStackView(arrangedSubviews: [swatch, title, value]); stack.axis = .vertical; stack.spacing = 5
+        let stack = UIStackView(arrangedSubviews: [meter, title, value]); stack.axis = .vertical; stack.spacing = 5
         addSubview(stack); stack.bbPinEdges(to: self, insets: UIEdgeInsets(top: 7, left: 7, bottom: 7, right: 7))
         backgroundColor = BBUIKitTokens.recessed; layer.cornerRadius = 5; layer.borderWidth = 1; layer.borderColor = BBUIKitTokens.border.cgColor
-        isAccessibilityElement = true; accessibilityLabel = "\(fixture.label), dimmer \(fixture.dimmer), red \(fixture.red), green \(fixture.green), blue \(fixture.blue)"
+        isAccessibilityElement = true; accessibilityLabel = "\(fixture.label), intensity \(Int((intensity * 100).rounded())) percent, dimmer \(fixture.dimmer), red \(fixture.red), green \(fixture.green), blue \(fixture.blue)"
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

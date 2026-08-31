@@ -2930,3 +2930,13 @@ behandelde een lege trusted-family-set als dictionary en riep .values() aan;
 dit veroorzaakte AttributeError: 'set' object has no attribute 'values' in
 phrase_analysis. De failure diagnostics bewezen de oorzaak; menselijke
 muzikale acceptatie van M23A loopt door. M23A blijft BEZIG.
+
+## 13.8 Authoritative fixture-intensity visualization contract
+
+De renderer publiceert per fixture een read-only `effective_intensity`: de
+daadwerkelijk gerenderde intensiteit na lokale dimmer/effect en masterdimmer.
+De resolved RGBW-waarden blijven de ongeattenueerde kleuridentiteit. Native
+Preview Map en iPad LIVE consumeren uitsluitend deze twee velden: kleur wordt
+niet uit reeds gedimde RGB-luminantie afgeleid en intensiteit wordt niet opnieuw
+geschaald. Deze projectie verandert geen DMX-, master-, effect- of
+blackout-semantiek en heeft geen fysieke fixture-authority.

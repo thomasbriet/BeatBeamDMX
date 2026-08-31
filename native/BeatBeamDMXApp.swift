@@ -1008,6 +1008,11 @@ struct SlotPreview: Decodable {
     let green: Int
     let blue: Int
     let white: Int
+    let resolvedRed: Int?
+    let resolvedGreen: Int?
+    let resolvedBlue: Int?
+    let resolvedWhite: Int?
+    let effectiveIntensity: Double?
     let spotRed: Int?
     let spotGreen: Int?
     let spotBlue: Int?
@@ -9475,7 +9480,7 @@ struct StageFixtureNode: View {
     @ViewBuilder
     private func genericMovingHeadBody(brightness: CGFloat) -> some View {
         Circle()
-            .fill(displayColor.opacity(max(0.14, 0.24 + brightness * 0.30)))
+            .fill(displayColor.opacity(0.24 + brightness * 0.30))
             .frame(width: fixtureSize + 12 + brightness * 22, height: fixtureSize + 12 + brightness * 22)
             .blur(radius: 6 + brightness * 7)
 
@@ -9509,7 +9514,7 @@ struct StageFixtureNode: View {
         }
 
         Circle()
-            .trim(from: 0, to: max(0.02, brightness))
+            .trim(from: 0, to: brightness)
             .stroke(
                 displayColor.opacity(0.95),
                 style: StrokeStyle(lineWidth: 3, lineCap: .round)
@@ -9600,7 +9605,7 @@ struct StageFixtureNode: View {
         }
 
         Circle()
-            .trim(from: 0, to: max(0.04, brightness))
+            .trim(from: 0, to: brightness)
             .stroke(
                 displayColor.opacity(0.95),
                 style: StrokeStyle(lineWidth: 3, lineCap: .round)
@@ -9620,9 +9625,9 @@ struct StageFixtureNode: View {
         let base = slotPreviewBaseColor(preview)
         if preview.strobeActive {
             let highlight = slotPreviewStrobeFactor(preview, at: animationTime)
-            return base.opacity(max(0.30, min(1.0, brightness + CGFloat(highlight) * 0.22)))
+            return base.opacity(min(1.0, brightness + CGFloat(highlight) * 0.22))
         }
-        return base.opacity(max(0.24, brightness))
+        return base.opacity(brightness)
     }
 
     private var spotDisplayColor: Color {
@@ -9632,7 +9637,7 @@ struct StageFixtureNode: View {
 
     private var spotBrightness: CGFloat {
         guard let preview, preview.enabled else { return 0 }
-        let base = slotPreviewSpotBrightnessFraction(preview)
+        let base = effectiveSpotPreviewBrightness(preview, at: animationTime)
         if preview.strobeActive {
             return base * CGFloat(slotPreviewStrobeFactor(preview, at: animationTime))
         }
@@ -9664,26 +9669,26 @@ struct StageFixtureNode: View {
                         let t = emitters.count <= 1 ? 0.5 : CGFloat(index) / CGFloat(emitters.count - 1)
                         ZStack {
                             Capsule(style: .continuous)
-                                .fill(emitter.color.opacity(0.34 + emitter.intensity * 0.66))
+                                .fill(emitter.color.opacity(emitter.intensity * (0.34 + emitter.intensity * 0.66)))
                                 .frame(width: metrics.ledDiameter * 0.76, height: metrics.ledDiameter * 1.62)
                                 .blur(radius: 1.1)
 
                             Capsule(style: .continuous)
-                                .fill(emitter.color.opacity(0.42 + emitter.intensity * 0.48))
+                                .fill(emitter.color.opacity(emitter.intensity * (0.42 + emitter.intensity * 0.48)))
                                 .frame(width: metrics.ledDiameter * 0.44, height: metrics.ledDiameter * 1.02)
                                 .blur(radius: 0.45)
 
                             Capsule(style: .continuous)
-                                .fill(Color.white.opacity(0.08 + emitter.intensity * 0.16))
+                                .fill(Color.white.opacity(emitter.intensity * (0.08 + emitter.intensity * 0.16)))
                                 .frame(width: metrics.ledDiameter * 0.18, height: metrics.ledDiameter * 0.48)
                                 .blur(radius: 0.18)
                         }
                         .overlay(
                             Capsule(style: .continuous)
-                                .stroke(Color.white.opacity(0.08 + emitter.intensity * 0.10), lineWidth: 0.4)
+                                .stroke(Color.white.opacity(emitter.intensity * (0.08 + emitter.intensity * 0.10)), lineWidth: 0.4)
                                 .frame(width: metrics.ledDiameter * 0.76, height: metrics.ledDiameter * 1.62)
                         )
-                        .shadow(color: emitter.color.opacity(0.36 + emitter.intensity * 0.42), radius: 4.6, x: 0, y: 0)
+                        .shadow(color: emitter.color.opacity(emitter.intensity * (0.36 + emitter.intensity * 0.42)), radius: 4.6, x: 0, y: 0)
                             .position(
                                 x: 6 + t * max(1, size.width - 12),
                                 y: size.height * 0.5
@@ -11555,8 +11560,10 @@ final class Stage3DSceneController: ObservableObject {
             beamKind: beamKind
         )
 
-        let washBrightness = max(0.02, effectivePreviewBrightness(preview, at: animationTime))
-        let spotBrightness = max(0.02, effectiveSpotPreviewBrightness(preview, at: animationTime))
+        // Keep fixture geometry visible through its body node, but never add a
+        // minimum emitted beam: authoritative zero intensity means no light.
+        let washBrightness = effectivePreviewBrightness(preview, at: animationTime)
+        let spotBrightness = effectiveSpotPreviewBrightness(preview, at: animationTime)
         let beeEffectMode = slotPreviewResolvedBeeEffectMode(preview)
         let beeSpread = slotPreviewBeeSpread(preview)
         let beeBackgroundLevel = slotPreviewBeeBackgroundLevel(preview)
@@ -15302,18 +15309,20 @@ private func wallWashEmitterPreviews(
 ) -> [WallWashEmitterPreview] {
     guard let preview, preview.enabled else {
         return Array(
-            repeating: WallWashEmitterPreview(red: 255, green: 255, blue: 255, white: 0, intensity: 0.12),
+            repeating: WallWashEmitterPreview(red: 255, green: 255, blue: 255, white: 0, intensity: 0),
             count: 24
         )
     }
 
     let flashScale = wallWashFlashScale(preview: preview, animationTime: animationTime)
+    let intensity = effectivePreviewBrightness(preview, at: animationTime)
     let fallback = Array(
         repeating: makeWallWashEmitterPreview(
-            red: preview.red,
-            green: preview.green,
-            blue: preview.blue,
-            white: preview.white,
+            red: preview.resolvedRed ?? preview.red,
+            green: preview.resolvedGreen ?? preview.green,
+            blue: preview.resolvedBlue ?? preview.blue,
+            white: preview.resolvedWhite ?? preview.white,
+            intensity: intensity,
             flashScale: flashScale
         ),
         count: 24
@@ -15328,11 +15337,11 @@ private func wallWashEmitterPreviews(
 
     switch mode {
     case "p001":
-        return wallWashZoneEmitterPreviews(channelValues: channelValues, zoneCount: 8, totalEmitters: 24, flashScale: flashScale)
+        return wallWashZoneEmitterPreviews(channelValues: channelValues, zoneCount: 8, totalEmitters: 24, intensity: intensity, flashScale: flashScale)
     case "l001":
-        return wallWashZoneEmitterPreviews(channelValues: channelValues, zoneCount: 4, totalEmitters: 24, flashScale: flashScale)
+        return wallWashZoneEmitterPreviews(channelValues: channelValues, zoneCount: 4, totalEmitters: 24, intensity: intensity, flashScale: flashScale)
     case "e001":
-        return wallWashZoneEmitterPreviews(channelValues: channelValues, zoneCount: 2, totalEmitters: 24, flashScale: flashScale)
+        return wallWashZoneEmitterPreviews(channelValues: channelValues, zoneCount: 2, totalEmitters: 24, intensity: intensity, flashScale: flashScale)
     case "c001":
         guard channelValues.count >= 3 else { return fallback }
         return Array(
@@ -15340,6 +15349,7 @@ private func wallWashEmitterPreviews(
                 red: channelValues[0],
                 green: channelValues[1],
                 blue: channelValues[2],
+                intensity: intensity,
                 flashScale: flashScale
             ),
             count: 24
@@ -15351,6 +15361,7 @@ private func wallWashEmitterPreviews(
                 red: channelValues[1],
                 green: channelValues[2],
                 blue: channelValues[3],
+                intensity: intensity,
                 flashScale: flashScale
             ),
             count: 24
@@ -15364,6 +15375,7 @@ private func wallWashZoneEmitterPreviews(
     channelValues: [Int],
     zoneCount: Int,
     totalEmitters: Int,
+    intensity: CGFloat,
     flashScale: CGFloat
 ) -> [WallWashEmitterPreview] {
     guard zoneCount > 0, totalEmitters > 0 else { return [] }
@@ -15378,6 +15390,7 @@ private func wallWashZoneEmitterPreviews(
             red: channelValues[offset],
             green: channelValues[offset + 1],
             blue: channelValues[offset + 2],
+            intensity: intensity,
             flashScale: flashScale
         )
         for _ in 0..<emittersPerZone {
@@ -15386,7 +15399,7 @@ private func wallWashZoneEmitterPreviews(
     }
 
     while emitters.count < totalEmitters {
-        emitters.append(emitters.last ?? WallWashEmitterPreview(red: 255, green: 255, blue: 255, white: 0, intensity: 0.12))
+        emitters.append(emitters.last ?? WallWashEmitterPreview(red: 255, green: 255, blue: 255, white: 0, intensity: 0))
     }
     if emitters.count > totalEmitters {
         emitters.removeLast(emitters.count - totalEmitters)
@@ -15394,14 +15407,13 @@ private func wallWashZoneEmitterPreviews(
     return emitters
 }
 
-private func makeWallWashEmitterPreview(red: Int, green: Int, blue: Int, white: Int = 0, flashScale: CGFloat) -> WallWashEmitterPreview {
-    let baseIntensity = CGFloat(max(red, green, blue, white)) / 255.0
+private func makeWallWashEmitterPreview(red: Int, green: Int, blue: Int, white: Int = 0, intensity: CGFloat, flashScale: CGFloat) -> WallWashEmitterPreview {
     return WallWashEmitterPreview(
         red: red,
         green: green,
         blue: blue,
         white: white,
-        intensity: max(0.08, min(1.0, baseIntensity * flashScale))
+        intensity: max(0, min(1, intensity * flashScale))
     )
 }
 
@@ -15421,7 +15433,7 @@ private func wallWashProjectionPoints(
             green: Int((bucket.reduce(CGFloat.zero) { $0 + CGFloat($1.green) * $1.intensity } / weightedIntensity).rounded()),
             blue: Int((bucket.reduce(CGFloat.zero) { $0 + CGFloat($1.blue) * $1.intensity } / weightedIntensity).rounded()),
             white: Int((bucket.reduce(CGFloat.zero) { $0 + CGFloat($1.white) * $1.intensity } / weightedIntensity).rounded()),
-            intensity: bucket.map(\.intensity).max() ?? 0.12
+            intensity: bucket.map(\.intensity).max() ?? 0
         )
         return WallWashProjectionPoint(
             t: groupCount == 1 ? 0.5 : CGFloat(index) / CGFloat(groupCount - 1),
@@ -15611,7 +15623,12 @@ private func slotPreviewResolvedPatternRotation(_ preview: SlotPreview, at time:
 }
 
 private func slotPreviewBaseColor(_ preview: SlotPreview) -> Color {
-    dmxPreviewColor(red: preview.red, green: preview.green, blue: preview.blue, white: preview.white)
+    dmxPreviewColor(
+        red: preview.resolvedRed ?? preview.red,
+        green: preview.resolvedGreen ?? preview.green,
+        blue: preview.resolvedBlue ?? preview.blue,
+        white: preview.resolvedWhite ?? preview.white
+    )
 }
 
 private func slotPreviewSpotBaseColor(_ preview: SlotPreview) -> Color {
@@ -15636,11 +15653,14 @@ private func slotPreviewBeamColor(_ preview: SlotPreview) -> Color {
 }
 
 private func slotPreviewColor(_ preview: SlotPreview) -> Color {
-    slotPreviewBaseColor(preview).opacity(max(0.20, slotBrightnessFraction(preview)))
+    slotPreviewBaseColor(preview).opacity(slotBrightnessFraction(preview))
 }
 
 private func slotBrightnessFraction(_ preview: SlotPreview?) -> CGFloat {
     guard let preview else { return 0 }
+    if let effective = preview.effectiveIntensity {
+        return max(0, min(1, CGFloat(effective)))
+    }
     return max(0, min(1, CGFloat(preview.brightness) / 255.0))
 }
 
@@ -15676,7 +15696,7 @@ private func effectivePreviewBrightness(_ preview: SlotPreview?, at time: TimeIn
 }
 
 private func effectiveSpotPreviewBrightness(_ preview: SlotPreview?, at time: TimeInterval) -> CGFloat {
-    let base = slotPreviewSpotBrightnessFraction(preview)
+    let base = slotBrightnessFraction(preview)
     guard let preview, preview.enabled, preview.strobeActive, preview.strobe > 0 else {
         return base
     }

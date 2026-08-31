@@ -10114,6 +10114,10 @@ class DmxController:
         # Exact post-authority frame. It is valid without an Enttec sink and is
         # deliberately distinct from `last_sent`.
         self.current_final_values = {}
+        # Read-only per-fixture intensity captured in the renderer after its
+        # dimmer envelope and Master cap. UI clients consume this instead of
+        # deriving brightness from colour bytes.
+        self.current_rendered_slot_intensities = {}
         self.current_slot_previews = {}
         self.physical_dmx_trace_history = deque(maxlen=PHYSICAL_DMX_TRACE_HISTORY_MAX_BEATS)
         self._physical_dmx_trace_key = None
@@ -10240,6 +10244,7 @@ class DmxController:
         return {
             "active_slot": "head",
             "blackout_active": False,
+            "master_dimmer": 1.0,
             "production_show_mode": BASELINE_ONLY,
             "auto_show": DmxController.default_auto_show_config(),
             "slot_order": ["head", "par"],
@@ -10493,6 +10498,7 @@ class DmxController:
             "blue": 255,
             "white": 255,
             "brightness": 255,
+            "effective_intensity": 1.0,
             "strobe": 0,
             "strobe_active": False,
             "strobe_external": False,
@@ -11623,6 +11629,16 @@ class DmxController:
             live_values = dict(self.current_values)
             rendered_final_values = dict(self.current_final_values)
             slot_previews = dict(self.current_slot_previews)
+            slot_previews = {
+                slot_id: {
+                    **preview,
+                    "effective_intensity": clamp_unit(
+                        self.current_rendered_slot_intensities.get(slot_id, 0.0)
+                    ),
+                }
+                for slot_id, preview in slot_previews.items()
+                if isinstance(preview, dict)
+            }
             slot_previews = self._apply_virtualdj_beat_pulse_preview_overlay_locked(slot_previews)
             values = dict(sorted(live_values.items()))
             return {
@@ -11643,6 +11659,7 @@ class DmxController:
                 "last_rendered": self.last_rendered,
                 "active_slot": config["active_slot"],
                 "blackout_active": config["blackout_active"],
+                "master_dimmer": config["master_dimmer"],
                 "production_show_mode": config["production_show_mode"],
                 "auto_show": auto_show,
                 "preview_auto_show": preview_auto_show,
@@ -12097,6 +12114,7 @@ class DmxController:
         cleaned = {
             "active_slot": str(config.get("active_slot", defaults["active_slot"])),
             "blackout_active": bool(config.get("blackout_active", False)),
+            "master_dimmer": 1.0,
             "production_show_mode": self._operator_production_show_mode(
                 config.get("production_show_mode", defaults["production_show_mode"])
             ),
@@ -12104,6 +12122,12 @@ class DmxController:
             "slot_order": [],
             "slots": {},
         }
+        try:
+            cleaned["master_dimmer"] = clamp_unit(
+                float(config.get("master_dimmer", defaults["master_dimmer"]))
+            )
+        except (TypeError, ValueError):
+            cleaned["master_dimmer"] = defaults["master_dimmer"]
         seen = set()
         for slot_id in raw_order:
             slot_id = str(slot_id)
@@ -13675,11 +13699,13 @@ class DmxController:
     def _render_values_with_context(self, now, config, osc, auto_show, advance_motion=True):
         if config["blackout_active"]:
             self.conflicts = []
+            self.current_rendered_slot_intensities = {}
             return {}
         osc = self._behavior_osc(osc, auto_show)
         self._observe_structure_behavior_source(auto_show)
         self._log_auto_show_transition(auto_show, osc)
         merged_values = {}
+        rendered_slot_intensities = {}
         owners = {}
         conflicts = []
         for slot_id in config["slot_order"]:
@@ -13690,12 +13716,25 @@ class DmxController:
                 slot_id, slot_config, osc, auto_show, full_config=config
             )
             self._log_slot_trigger_state(slot_id, effective_slot_config, auto_show, osc)
-            slot_values = self._render_slot_values(
+            slot_values, pre_master_intensity = self._render_slot_values(
                 slot_id,
                 effective_slot_config,
                 osc,
                 now,
                 advance_motion=advance_motion,
+                include_effective_intensity=True,
+            )
+            try:
+                master_dimmer = clamp_unit(float(config.get("master_dimmer", 1.0)))
+            except (TypeError, ValueError):
+                master_dimmer = 1.0
+            rendered_slot_intensities[slot_id] = clamp_unit(
+                pre_master_intensity * master_dimmer
+            )
+            slot_values = self._apply_master_dimmer_to_slot_values(
+                slot_config,
+                slot_values,
+                master_dimmer,
             )
             for channel, value in slot_values.items():
                 previous_owner = owners.get(channel)
@@ -13710,7 +13749,44 @@ class DmxController:
                 owners[channel] = slot_id
                 merged_values[channel] = value
         self.conflicts = conflicts
+        self.current_rendered_slot_intensities = rendered_slot_intensities
         return merged_values
+
+    def _apply_master_dimmer_to_slot_values(self, slot_config, values, master_dimmer):
+        """Cap only luminous channels using fixture-profile semantics.
+
+        A native intensity channel owns brightness when present, so RGB(W/A)
+        bytes stay exact and preserve hue. Without native intensity, the same
+        factor is applied proportionally to all profile-declared color channels.
+        Fog, strobe rate, movement, programs, macros and speed are untouched.
+        """
+        try:
+            factor = clamp_unit(float(master_dimmer))
+        except (TypeError, ValueError):
+            factor = 1.0
+        if factor >= 1.0:
+            return values
+
+        fixture = find_fixture(FIXTURE_LIBRARY, slot_config["fixture"])
+        mode = find_mode(fixture, slot_config["mode"])
+        address = int(slot_config["address"])
+        has_native_intensity = any(
+            channel.get("type") == "intensity" for channel in mode.get("channels", [])
+        )
+        output = dict(values)
+        for channel in mode.get("channels", []):
+            channel_type = channel.get("type")
+            control = str(channel.get("control") or "")
+            luminous = (
+                channel_type == "intensity"
+                or (channel_type == "custom" and control == "spot_dimmer")
+                or (channel_type == "color" and not has_native_intensity)
+            )
+            if not luminous:
+                continue
+            absolute = address + int(channel["offset"]) - 1
+            output[absolute] = clamp_dmx(round(int(output.get(absolute, 0)) * factor))
+        return output
 
     def _structure_behavior_state(self, osc):
         source_getter = getattr(self.osc, "structure_behavior_source", None)
@@ -13895,7 +13971,8 @@ class DmxController:
             multiplier = 1.0
         return clamp_dmx(round(brightness * multiplier))
 
-    def _render_slot_values(self, slot_id, config, osc, now, advance_motion=True):
+    def _render_slot_values(self, slot_id, config, osc, now, advance_motion=True,
+                            include_effective_intensity=False):
         fixture = find_fixture(FIXTURE_LIBRARY, config["fixture"])
         mode = find_mode(fixture, config["mode"])
         address = int(config["address"])
@@ -13982,7 +14059,7 @@ class DmxController:
             strobe,
             osc,
         )
-        return values_for_fixture(
+        values = values_for_fixture(
             mode,
             address,
             output_rgbw,
@@ -14000,6 +14077,9 @@ class DmxController:
             zone_rgb=output_zone_rgb,
             extra_values=resolved_extra_values,
         )
+        if include_effective_intensity:
+            return values, clamp_unit(float(brightness) / 255.0)
+        return values
 
     def _preview_for_slot(self, slot_id, config, osc, now, full_config=None, auto_show=None):
         full_config = full_config or self._clean_full_config(dict(self.config))
@@ -14065,6 +14145,13 @@ class DmxController:
         )
         return {
             "enabled": bool(effective_config["enabled"]),
+            # The presentation colour identity is deliberately separate from
+            # the dimmer-scaled legacy RGB preview values below.  Native and
+            # remote maps apply effective_intensity only once.
+            "resolved_red": rgbw[0],
+            "resolved_green": rgbw[1],
+            "resolved_blue": rgbw[2],
+            "resolved_white": rgbw[3],
             "red": output_rgbw[0],
             "green": output_rgbw[1],
             "blue": output_rgbw[2],
@@ -17537,6 +17624,7 @@ def _remote_live_output_preview(dmx_state):
     renderer = dmx_state.get("renderer_health") if isinstance(dmx_state.get("renderer_health"), dict) else {}
     rendered_available = bool(renderer.get("healthy")) and bool(renderer.get("active"))
     blackout = bool(dmx_state.get("blackout_active"))
+    slot_previews = dmx_state.get("slot_previews") if isinstance(dmx_state.get("slot_previews"), dict) else {}
 
     def byte_for(channel):
         value = values.get(channel, values.get(str(channel), 0))
@@ -17574,16 +17662,38 @@ def _remote_live_output_preview(dmx_state):
                 pan = value
             elif channel_type == "tilt":
                 tilt = value
-        # RGB-only fixtures do not necessarily have a separate dimmer channel.
-        if not channels["dimmer"]:
+        # Only synthesize brightness for profiles that genuinely have no
+        # native dimmer. A native zero is authoritative (for example Master
+        # Dimmer at 0%) and must never be filled back from RGB.
+        if not capabilities.get("dimmer"):
             channels["dimmer"] = max(channels["red"], channels["green"], channels["blue"], channels["white"])
+        preview = slot_previews.get(slot_id) if isinstance(slot_previews.get(slot_id), dict) else {}
+        try:
+            effective_intensity = clamp_unit(float(preview.get("effective_intensity")))
+        except (TypeError, ValueError):
+            # Compatibility for an older in-memory state during a rolling
+            # backend update. New render frames always provide the shared
+            # renderer-derived semantic projection above.
+            effective_intensity = channels["dimmer"] / 255.0
         if blackout:
             channels = {key: 0 for key in channels}
+            effective_intensity = 0.0
+        def resolved_component(name):
+            try:
+                return max(0, min(255, int(round(float(preview.get(f"resolved_{name}", channels[name]))))))
+            except (TypeError, ValueError):
+                return channels[name]
         role = "moving" if capabilities.get("pan") or capabilities.get("tilt") else _remote_live_role(slot)
         fixtures.append({
             "id": str(slot_id), "label": str(slot.get("label") or slot_id), "role": role,
             "active": bool(channels["dimmer"] or channels["strobe"]),
-            **channels, "pan": pan, "tilt": tilt,
+            **channels,
+            "effective_intensity": effective_intensity,
+            "resolved_red": resolved_component("red"),
+            "resolved_green": resolved_component("green"),
+            "resolved_blue": resolved_component("blue"),
+            "resolved_white": resolved_component("white"),
+            "pan": pan, "tilt": tilt,
         })
     return {
         "rendered_available": rendered_available,
@@ -17838,6 +17948,14 @@ def remote_live_control_command(token, payload):
             if str(value or "none").strip().lower() not in {"none", "low", "mid", "high"}:
                 raise ValueError("unsupported energy override")
             _remote_auto_show_update({"override_energy": energy})
+        elif action == "set_master_dimmer":
+            try:
+                master_dimmer = float(value)
+            except (TypeError, ValueError):
+                raise ValueError("master dimmer must be a number from 0 to 1")
+            if not math.isfinite(master_dimmer):
+                raise ValueError("master dimmer must be finite")
+            DMX.update_config({"master_dimmer": clamp_unit(master_dimmer)})
         elif action in {"momentary_press", "momentary_renew", "momentary_release"}:
             effect = str(value or "").strip().lower()
             key = REMOTE_MOMENTARY_EFFECT_KEYS.get(effect)
