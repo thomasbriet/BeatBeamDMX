@@ -61,7 +61,7 @@ private struct ConsoleSurface: View {
 
     var body: some View {
         GeometryReader { proxy in
-            VStack(spacing: 10) {
+            VStack(spacing: 8) {
                 if state.overrides.blackout { BlackoutAuthorityBanner() }
                 ConsoleHeader(state: state, selectedTab: $selectedTab)
                 if selectedTab != .overrides { LiveStatusStrip(state: state) }
@@ -75,7 +75,7 @@ private struct ConsoleSurface: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(12).frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+            .padding(8).frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
         }
     }
 }
@@ -216,24 +216,39 @@ private struct LiveConsole: View {
     }
 }
 
+private enum OverrideLayout {
+    static let panelGap: CGFloat = 7
+    static let gridGap: CGFloat = 7
+    static let cardInset: CGFloat = 9
+    static let smokeWidth: CGFloat = 126
+}
+
 private struct OverrideConsole: View {
     @EnvironmentObject private var store: RemoteStore
     let state: RemoteLiveStateV2
     var body: some View {
         GeometryReader { proxy in
-            VStack(spacing: 9) {
+            let colorBankHeight = min(244, max(204, proxy.size.height * 0.27))
+            let comboBankHeight = min(190, max(150, proxy.size.height * 0.20))
+            VStack(spacing: OverrideLayout.panelGap) {
                 RemoteCard(title: "SINGLE COLORS") {
                     ColorPadMatrix(state: state).environmentObject(store)
                 }
-                .frame(height: max(145, proxy.size.height * 0.275))
+                .frame(height: colorBankHeight)
                 RemoteCard(title: "COLOR COMBINATIONS") {
                     ColorComboMatrix(state: state).environmentObject(store)
                 }
-                .frame(height: max(126, proxy.size.height * 0.235))
-                HStack(spacing: 9) {
-                    EnergyOverridePanel(state: state).environmentObject(store).frame(width: max(230, proxy.size.width * 0.20))
-                    EffectDeck(state: state).environmentObject(store)
-                    CompactMasterActions(state: state).environmentObject(store).frame(width: max(190, proxy.size.width * 0.17))
+                .frame(height: comboBankHeight)
+                HStack(spacing: OverrideLayout.panelGap) {
+                    EnergyOverridePanel(state: state)
+                        .environmentObject(store)
+                        .frame(width: min(318, max(254, proxy.size.width * 0.22)))
+                    VStack(spacing: OverrideLayout.panelGap) {
+                        EffectDeck(state: state).environmentObject(store)
+                        CompactMasterActions(state: state)
+                            .environmentObject(store)
+                            .frame(height: 62)
+                    }
                 }
                 .frame(maxHeight: .infinity)
             }
@@ -246,9 +261,28 @@ private struct ColorPadMatrix: View {
     let state: RemoteLiveStateV2
     private var colors: [RemoteControlOption] { state.control.colors.contains(where: { $0.id == "rainbow" }) ? state.control.colors : state.control.colors + [RemoteControlOption(id: "rainbow", label: "Rainbow")] }
     var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 6), spacing: 7) {
-            ConsoleColorPad(label: "AUTO", tint: .gray, active: state.overrides.color == nil && state.overrides.colorCombo == nil) { store.perform("set_color", value: "none") }
-            ForEach(colors) { color in ConsoleColorPad(label: color.label.uppercased(), tint: colorTint(color.id), active: state.overrides.color == color.id) { store.perform("set_color", value: color.id) } }
+        GeometryReader { proxy in
+            let colorCount = colors.count + 1
+            let columns = 6
+            let rowCount = max(1, Int(ceil(Double(colorCount) / Double(columns))))
+            let gridWidth = max(0, proxy.size.width - OverrideLayout.smokeWidth - OverrideLayout.gridGap)
+            let padHeight = min(
+                (gridWidth - CGFloat(columns - 1) * OverrideLayout.gridGap) / CGFloat(columns),
+                (proxy.size.height - CGFloat(rowCount - 1) * OverrideLayout.gridGap) / CGFloat(rowCount)
+            )
+            HStack(spacing: OverrideLayout.gridGap) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: OverrideLayout.gridGap), count: columns), spacing: OverrideLayout.gridGap) {
+                    ConsoleColorPad(label: "AUTO", tint: .gray, active: state.overrides.color == nil && state.overrides.colorCombo == nil, height: padHeight) { store.perform("set_color", value: "none") }
+                    ForEach(colors) { color in
+                        ConsoleColorPad(label: color.label.uppercased(), tint: colorTint(color.id), active: state.overrides.color == color.id, height: padHeight) {
+                            store.perform("set_color", value: color.id)
+                        }
+                    }
+                }
+                .frame(width: gridWidth)
+                SmokeSetupPad().frame(width: OverrideLayout.smokeWidth).frame(maxHeight: .infinity)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
@@ -257,19 +291,35 @@ private struct ColorComboMatrix: View {
     @EnvironmentObject private var store: RemoteStore
     let state: RemoteLiveStateV2
     var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
-            ForEach(state.control.colorCombinations ?? []) { combo in
-                ColorComboPad(combo: combo, active: state.overrides.colorCombo == combo.id) {
-                    store.perform("set_color_combo", value: combo.id)
+        GeometryReader { proxy in
+            let combos = state.control.colorCombinations ?? []
+            let columns = 8
+            let rowCount = max(1, Int(ceil(Double(combos.count) / Double(columns))))
+            let gridWidth = proxy.size.width
+            let padHeight = min(
+                (gridWidth - CGFloat(columns - 1) * OverrideLayout.gridGap) / CGFloat(columns),
+                (proxy.size.height - CGFloat(rowCount - 1) * OverrideLayout.gridGap) / CGFloat(rowCount)
+            )
+            VStack {
+                Spacer(minLength: 0)
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: OverrideLayout.gridGap), count: columns), spacing: OverrideLayout.gridGap) {
+                    ForEach(combos) { combo in
+                        ColorComboPad(combo: combo, active: state.overrides.colorCombo == combo.id, height: padHeight) {
+                            store.perform("set_color_combo", value: combo.id)
+                        }
+                        .disabled(!combo.available)
+                    }
                 }
-                .disabled(!combo.available)
+                .frame(width: gridWidth)
+                Spacer(minLength: 0)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
 
 private struct ColorComboPad: View {
-    let combo: RemoteColorComboCapability; let active: Bool; let action: () -> Void
+    let combo: RemoteColorComboCapability; let active: Bool; let height: CGFloat; let action: () -> Void
     var body: some View {
         Button(action: action) {
             ZStack {
@@ -280,9 +330,9 @@ private struct ColorComboPad: View {
                     }
                 }
                 Color.black.opacity(0.17)
-                Text(combo.label.uppercased()).font(.caption.bold().monospaced()).foregroundStyle(.white).shadow(color: .black, radius: 2)
+                Text(combo.label.uppercased()).font(.caption2.bold().monospaced()).minimumScaleFactor(0.7).lineLimit(1).foregroundStyle(.white).shadow(color: .black, radius: 2)
             }
-            .frame(maxWidth: .infinity, minHeight: 43)
+            .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
             .clipShape(RoundedRectangle(cornerRadius: 7))
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(active ? .white : RemoteTheme.border, lineWidth: active ? 3 : 1))
             .shadow(color: active ? .white.opacity(0.38) : .black.opacity(0.25), radius: active ? 7 : 2, y: 2)
@@ -296,7 +346,7 @@ private struct PhrasePadMatrix: View {
     @EnvironmentObject private var store: RemoteStore
     let state: RemoteLiveStateV2
     var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 2), spacing: 8) {
             ConsoleMiniPad(label: "AUTO", active: state.overrides.phrase == nil) { store.perform("set_phrase", value: "none") }
             ForEach(state.control.phrases) { phrase in ConsoleMiniPad(label: phrase.label.uppercased(), active: state.overrides.phrase == phrase.id) { store.perform("set_phrase", value: phrase.id) } }
         }
@@ -306,22 +356,62 @@ private struct PhrasePadMatrix: View {
 private struct EnergyFader: View {
     @EnvironmentObject private var store: RemoteStore
     let state: RemoteLiveStateV2
-    private var level: Double { ["low": 1.0, "mid": 2.0, "high": 3.0][state.overrides.energy ?? ""] ?? 0 }
+    @State private var displayedLevel: Double?
+    @State private var isTracking = false
+    private var authoritativeLevel: Double { ["low": 1.0, "mid": 2.0, "high": 3.0][state.overrides.energy ?? ""] ?? 0 }
+    private var level: Double { displayedLevel ?? authoritativeLevel }
     var body: some View {
-        VStack(spacing: 3) {
-            Text(state.overrides.energy?.uppercased() ?? "AUTO").font(.caption.bold().monospaced()).foregroundStyle(RemoteTheme.warning)
-            HStack(spacing: 8) {
-                Text("HIGH").font(.caption2.bold().monospaced()).foregroundStyle(.secondary).rotationEffect(.degrees(-90)).frame(width: 26)
-                Slider(value: Binding(get: { level }, set: setLevel), in: 0...3, step: 1).tint(RemoteTheme.warning)
-                    .rotationEffect(.degrees(-90)).frame(width: 128, height: 44).background(RemoteTheme.background).clipShape(Capsule())
-                    .accessibilityLabel("Energy override vertical fader")
-                Text("AUTO").font(.caption2.bold().monospaced()).foregroundStyle(.secondary).rotationEffect(.degrees(-90)).frame(width: 26)
+        GeometryReader { proxy in
+            let railHeight = max(168, proxy.size.height - 60)
+            let capSize: CGFloat = 36
+            let capPosition = capSize / 2 + (1 - level / 3) * (railHeight - capSize)
+            VStack(spacing: 5) {
+                HStack(spacing: 5) {
+                    Text("ENERGY").font(.caption.bold().monospaced()).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Text(state.overrides.energy?.uppercased() ?? "AUTO").font(.caption.bold().monospaced()).foregroundStyle(RemoteTheme.warning)
+                }
+                ZStack(alignment: .top) {
+                    RoundedRectangle(cornerRadius: 12).fill(RemoteTheme.background).overlay(RoundedRectangle(cornerRadius: 12).stroke(RemoteTheme.border))
+                    VStack(spacing: 0) {
+                        Text("HIGH").font(.caption2.bold().monospaced()).foregroundStyle(.secondary)
+                        Spacer()
+                        Text("MID").font(.caption2.bold().monospaced()).foregroundStyle(.secondary)
+                        Spacer()
+                        Text("LOW").font(.caption2.bold().monospaced()).foregroundStyle(.secondary)
+                        Spacer()
+                        Text("AUTO").font(.caption2.bold().monospaced()).foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 8)
+                    .padding(.leading, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Capsule().fill(RemoteTheme.warning.opacity(0.28)).frame(width: 8, height: railHeight - 28).padding(.top, 14)
+                    Circle().fill(LinearGradient(colors: [.white, RemoteTheme.warning], startPoint: .top, endPoint: .bottom))
+                        .overlay(Circle().stroke(.black.opacity(0.55), lineWidth: 2))
+                        .shadow(color: .black.opacity(0.55), radius: 3, y: 2)
+                        .frame(width: capSize, height: capSize).position(x: proxy.size.width / 2, y: capPosition)
+                }
+                .frame(height: railHeight)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                    isTracking = true
+                    setLevel(for: value.location.y, railHeight: railHeight)
+                }.onEnded { value in
+                    setLevel(for: value.location.y, railHeight: railHeight)
+                    isTracking = false
+                    displayedLevel = nil
+                })
+                .accessibilityLabel("Energy override custom vertical fader")
             }
-            Text(String(format: "%.2f", level / 3)).font(.caption.bold().monospaced()).foregroundStyle(RemoteTheme.warning)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
-    private func setLevel(_ value: Double) {
-        let id = ["none", "low", "mid", "high"][max(0, min(3, Int(value.rounded())))]
+    private func setLevel(for y: CGFloat, railHeight: CGFloat) {
+        let clamped = min(max(y, 0), railHeight)
+        let next = Double(Int(((1 - clamped / railHeight) * 3).rounded()))
+        guard displayedLevel != next else { return }
+        displayedLevel = next
+        let id = ["none", "low", "mid", "high"][Int(next)]
         if (state.overrides.energy ?? "none") != id { store.perform("set_energy", value: id) }
     }
 }
@@ -331,9 +421,9 @@ private struct EnergyOverridePanel: View {
     let state: RemoteLiveStateV2
     var body: some View {
         RemoteCard(title: "ENERGY / PHRASE") {
-            HStack(spacing: 8) {
-                PhrasePadMatrix(state: state).environmentObject(store).frame(maxWidth: .infinity)
-                EnergyFader(state: state).environmentObject(store).frame(width: 130)
+            HStack(spacing: OverrideLayout.gridGap) {
+                PhrasePadMatrix(state: state).environmentObject(store).frame(maxWidth: .infinity, maxHeight: .infinity)
+                EnergyFader(state: state).environmentObject(store).frame(width: 142)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -345,7 +435,7 @@ private struct CompactMasterActions: View {
     let state: RemoteLiveStateV2
     var body: some View {
         RemoteCard(title: "CONTROL") {
-            VStack(spacing: 8) {
+            HStack(spacing: OverrideLayout.gridGap) {
                 Button("RELEASE ALL") { store.perform("release_all") }.buttonStyle(ConsoleActionStyle(tint: .gray))
                 if state.overrides.blackout { Button("RELEASE BLACKOUT") { store.perform("blackout_off") }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.danger)) }
                 else { Button("BLACKOUT (HOLD)") { store.perform("blackout_on") }.buttonStyle(ConsoleActionStyle(tint: RemoteTheme.danger)) }
@@ -360,16 +450,37 @@ private struct EffectDeck: View {
     let state: RemoteLiveStateV2
     var body: some View {
         RemoteCard(title: "EFFECTS") {
-            VStack(spacing: 10) {
-                EffectRow(title: "HOLD EFFECTS", effects: state.control.momentaryEffects, activeIDs: state.overrides.momentaryEffects, hold: true, compact: true).environmentObject(store)
-                HStack(spacing: 9) {
+            VStack(spacing: 6) {
+                EffectRow(title: "HOLD EFFECTS", effects: state.control.momentaryEffects, activeIDs: state.overrides.momentaryEffects, hold: true, compact: true)
+                    .environmentObject(store)
+                    .frame(maxHeight: .infinity)
+                HStack(spacing: OverrideLayout.gridGap) {
                     Rectangle().fill(RemoteTheme.border).frame(height: 1)
                     Text("ONE-SHOT EFFECTS").font(.caption.bold().monospaced()).foregroundStyle(.secondary).fixedSize()
                     Rectangle().fill(RemoteTheme.border).frame(height: 1)
                 }
-                EffectRow(title: nil, effects: state.control.cueShots, activeIDs: [], hold: false, compact: true).environmentObject(store)
+                EffectRow(title: nil, effects: state.control.cueShots, activeIDs: [], hold: false, compact: true)
+                    .environmentObject(store)
+                    .frame(maxHeight: .infinity)
             }
         }
+    }
+}
+
+private struct SmokeSetupPad: View {
+    var body: some View {
+        Button(action: {}) {
+            VStack(spacing: 7) {
+                Image(systemName: "cloud.fill").font(.title2)
+                Text("SMOKE").font(.headline.bold().monospaced())
+                Text("SETUP\nPENDING").font(.caption2.bold().monospaced()).multilineTextAlignment(.center).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .buttonStyle(HardwarePerformancePadStyle(active: false))
+        .disabled(true)
+        .opacity(0.68)
+        .accessibilityLabel("Smoke unavailable until DMX channels are configured")
     }
 }
 
@@ -377,9 +488,9 @@ private struct EffectRow: View {
     @EnvironmentObject private var store: RemoteStore
     let title: String?; let effects: [RemoteEffectCapability]; let activeIDs: [String]; let hold: Bool; let compact: Bool
     var body: some View {
-        VStack(spacing: 7) {
+        VStack(spacing: 5) {
             if let title { Text(title).font(.caption.bold().monospaced()).foregroundStyle(.secondary) }
-            HStack(spacing: 10) {
+            HStack(spacing: OverrideLayout.gridGap) {
                 ForEach(effects) { effect in
                     if effect.isAvailable {
                         if hold { MomentaryEffectPad(effect: effect, active: activeIDs.contains(effect.id) || store.isMomentaryEngaged(effect.id), compact: compact).environmentObject(store) }
@@ -387,7 +498,9 @@ private struct EffectRow: View {
                     } else { UnavailableEffectPad(effect: effect) }
                 }
             }
+            .frame(maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -508,12 +621,12 @@ private struct MomentaryEffectPad: View {
 private struct EffectPadFace: View {
     let effect: RemoteEffectCapability; let active: Bool; let compact: Bool
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: compact ? 4 : 8) {
             Text(effect.label.uppercased().replacingOccurrences(of: " ", with: "\n"))
                 .font(.subheadline.bold().monospaced()).multilineTextAlignment(.center).lineLimit(2)
             Image(systemName: effectIcon(effect.id)).font(compact ? .body : .title2).foregroundStyle(active ? RemoteTheme.accent : .white.opacity(0.88))
         }
-        .foregroundStyle(.white).frame(maxWidth: .infinity, minHeight: compact ? 42 : 74)
+            .foregroundStyle(.white).frame(maxWidth: .infinity, minHeight: compact ? 38 : 74)
     }
 }
 
@@ -528,12 +641,12 @@ private struct UnavailableEffectPad: View {
 }
 
 private struct ConsoleColorPad: View {
-    let label: String; let tint: Color; let active: Bool; let action: () -> Void
-    var body: some View { Button(action: action) { Text(label).font(.caption.bold().monospaced()).frame(maxWidth: .infinity, minHeight: 70) }.buttonStyle(ColorPerformancePadStyle(tint: tint, active: active)) }
+    let label: String; let tint: Color; let active: Bool; let height: CGFloat; let action: () -> Void
+    var body: some View { Button(action: action) { Text(label).font(.caption.bold().monospaced()).frame(maxWidth: .infinity, minHeight: height, maxHeight: height) }.buttonStyle(ColorPerformancePadStyle(tint: tint, active: active)) }
 }
 private struct ConsoleMiniPad: View {
     let label: String; let active: Bool; let action: () -> Void
-    var body: some View { Button(action: action) { Text(label).font(.caption2.bold().monospaced()).frame(maxWidth: .infinity, minHeight: 26) }.buttonStyle(HardwarePerformancePadStyle(active: active)) }
+    var body: some View { Button(action: action) { Text(label).font(.caption.bold().monospaced()).lineLimit(1).minimumScaleFactor(0.72).frame(maxWidth: .infinity, minHeight: 44, maxHeight: .infinity) }.buttonStyle(HardwarePerformancePadStyle(active: active)) }
 }
 private struct BlackoutAuthorityBanner: View {
     var body: some View {
@@ -551,8 +664,8 @@ private struct RemoteCard<Content: View>: View {
     @ViewBuilder let content: Content
     init(title: String? = nil, @ViewBuilder content: () -> Content) { self.title = title; self.content = content() }
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) { if let title { Text(title).font(.caption.bold().monospaced()).foregroundStyle(.secondary) }; content }
-            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 6) { if let title { Text(title).font(.caption.bold().monospaced()).foregroundStyle(.secondary) }; content }
+            .padding(OverrideLayout.cardInset).frame(maxWidth: .infinity, alignment: .leading)
             .background(LinearGradient(colors: [RemoteTheme.panelRaised.opacity(0.72), RemoteTheme.panel], startPoint: .top, endPoint: .bottom))
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(RemoteTheme.border))

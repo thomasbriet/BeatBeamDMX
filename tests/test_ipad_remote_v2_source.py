@@ -97,11 +97,24 @@ class IpadRemoteV2SourceTests(unittest.TestCase):
             self.assertIn(text, self.view)
         self.assertNotIn("setBlackoutEnabled", self.view)
         self.assertNotIn("setAutoShowEnabled", self.view)
-        for symbol in ("SINGLE COLORS", "COLOR COMBINATIONS", "ColorComboMatrix", "ColorComboPad", "Rainbow", "ENERGY / PHRASE", "vertical fader", "HOLD EFFECTS", "ONE-SHOT EFFECTS", "EffectDeck", "ColorPerformancePadStyle", "HardwarePerformancePadStyle", 'store.perform("set_color_combo"', 'store.perform("release_all")', 'store.perform("blackout_on")'):
+        for symbol in ("SINGLE COLORS", "COLOR COMBINATIONS", "ColorComboMatrix", "ColorComboPad", "gridWidth", "Rainbow", "ENERGY / PHRASE", "vertical fader", "HOLD EFFECTS", "ONE-SHOT EFFECTS", "SmokeSetupPad", "SMOKE", "EffectDeck", "ColorPerformancePadStyle", "HardwarePerformancePadStyle", 'store.perform("set_color_combo"', 'store.perform("release_all")', 'store.perform("blackout_on")'):
             self.assertIn(symbol, self.view)
         override = self.view[self.view.index("private struct OverrideConsole"):self.view.index("private struct ColorPadMatrix")]
         self.assertNotIn("revert_baseline", override)
         self.assertNotIn("enable_dynamic_composer", override)
+
+    def test_override_uses_a_fixed_dense_color_console_with_adjacent_safe_smoke_pad(self):
+        override = self.view[self.view.index("private struct OverrideConsole"):self.view.index("private struct PhrasePadMatrix")]
+        for symbol in ("OverrideLayout", "colorBankHeight", "comboBankHeight", "let columns = 6", "let columns = 8", "SmokeSetupPad().frame(width: OverrideLayout.smokeWidth)"):
+            self.assertIn(symbol, override)
+        self.assertNotIn("ScrollView", override)
+        self.assertIn(".disabled(true)", self.view[self.view.index("private struct SmokeSetupPad"):self.view.index("private struct EffectRow")])
+
+    def test_energy_control_is_custom_vertical_fader_with_direct_clamped_drag(self):
+        fader = self.view[self.view.index("private struct EnergyFader"):self.view.index("private struct EnergyOverridePanel")]
+        for symbol in ("DragGesture(minimumDistance: 0)", "setLevel(for:", "let clamped", "min(max(y, 0), railHeight)", "accessibilityLabel(\"Energy override custom vertical fader\")"):
+            self.assertIn(symbol, fader)
+        self.assertNotIn("Slider(", fader)
 
     def test_status_and_settings_keep_reconnect_and_pairing_operational(self):
         for symbol in ("BEATBEAM CONNECTION", "RECONNECT", "SCAN QR", "PAIR / RE-PAIR", "SYSTEM", "VIRTUALDJ", "SONGANALYZER", "CONNECTION PREFERENCES", "FORGET THIS PAIRING", "PRODUCTION MODE", "REVERT TO BASELINE", "ENABLE DYNAMIC COMPOSER"):
