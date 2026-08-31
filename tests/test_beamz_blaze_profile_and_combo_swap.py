@@ -46,6 +46,21 @@ class ManualComboBeatSwapTests(unittest.TestCase):
         self.assertEqual(MANUAL_COLOR_PRESETS["red"], self.rgbw("red_lime", self.context_b, 101))
         self.assertEqual(MANUAL_COLOR_PRESETS["red"], self.rgbw("red_lime", self.context_a, 102))
 
+    def test_expanded_combo_vocabulary_uses_only_approved_exact_manual_presets(self):
+        self.assertEqual(
+            {
+                "blue_orange": ("blue", "orange"), "purple_yellow": ("purple", "yellow"),
+                "pink_cyan": ("pink", "cyan"), "orange_cyan": ("orange", "cyan"),
+                "pink_blue": ("pink", "blue"), "red_lime": ("red", "lime"),
+                "cyan_white": ("cyan", "white"), "orange_white": ("orange", "white"),
+                "red_blue": ("red", "blue"), "red_yellow": ("red", "yellow"),
+                "red_white": ("red", "white"), "green_blue": ("green", "blue"),
+                "green_purple": ("green", "purple"), "green_white": ("green", "white"),
+                "blue_yellow": ("blue", "yellow"), "purple_white": ("purple", "white"),
+            },
+            MANUAL_COLOR_COMBOS,
+        )
+
     def test_every_combo_remains_exact_and_stale_transport_freezes_last_phase(self):
         for combo, colors in MANUAL_COLOR_COMBOS.items():
             with self.subTest(combo=combo):

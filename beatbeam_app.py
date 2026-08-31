@@ -1782,6 +1782,14 @@ MANUAL_COLOR_COMBOS = {
     "red_lime": ("red", "lime"),
     "cyan_white": ("cyan", "white"),
     "orange_white": ("orange", "white"),
+    "red_blue": ("red", "blue"),
+    "red_yellow": ("red", "yellow"),
+    "red_white": ("red", "white"),
+    "green_blue": ("green", "blue"),
+    "green_purple": ("green", "purple"),
+    "green_white": ("green", "white"),
+    "blue_yellow": ("blue", "yellow"),
+    "purple_white": ("purple", "white"),
 }
 
 # Existing palette identities remain musical selection metadata. Their physical
