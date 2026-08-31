@@ -15,6 +15,9 @@
   gerichte normale cache/lifecycle-heranalyses.
 - Een bounded production show-selector met fail-closed same-frame baseline en
   een interne, niet-configureerbare `BASELINE_ONLY` runtime-default.
+- Een fabrikant-gebaseerd 8ch fixtureprofiel voor BeamZ BLAZE Series
+  160.538 / 160.540 / 160.542 (manual V1.1), met veilige Fog/Macro-defaults,
+  native RGBA-maxima en zonder fictief White-kanaal.
 
 ### Changed
 - Rich Musical Events moduleren de continuous Dynamic Composer-state tijdelijk; zonder current RME blijft de composer actief en valt de Preview Map niet meer terug op de complete baseline-scène.
@@ -25,6 +28,9 @@
 - Preview/runtime-observability exposeert continuous state, event envelope,
   live intensity, composition signature en selectorbesluit zonder production-
   of fysieke DMX-authority te wijzigen.
+- Manual Color Combos gebruiken nu een stabiele kleurcapabele A/B-partitie die
+  alleen op authoritative beat-parity wisselt, bij stale transport bevriest en
+  bij verse authority zonder vrije timer hervat.
 
 ## [1.2.0-wishlist]
 

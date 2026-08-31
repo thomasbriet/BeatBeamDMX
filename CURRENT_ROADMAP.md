@@ -20,6 +20,7 @@
 - Dynamic Composer, live intensity, event envelopes en variatie voeden daarmee uitsluitend onder deze expliciete productie-gate de bestaande renderer; Preview Map is niet de fysieke authority.
 - Bestaande handmatige veiligheid (phrase/color/energy/strobe, one-shot, chase, snake, all-on, sweep en blackout) blijft downstream van dezelfde bestaande renderer; dit is geen open infrastructuurtaak.
 - `BEATBEAM_MANUAL_COLOR_COMBO_V1_TECHNICAL_PASS` en `BEATBEAM_IPAD_COLOR_FIRST_OVERRIDE_V1_TECHNICAL_PASS`: acht vaste, additive Manual Color Combos gebruiken uitsluitend de bestaande exact-presets via een stabiele A/B-verdeling over kleurcapabele slots. Remote V2/LIVE_CONTROL, no-DMX-rendering en de vaste iPad Color-first Override zijn technisch bewezen; fysieke DMX blijft niet nodig voor de control-test. `BEATBEAM_IPAD_COLOR_CONTROL_UI = HOLD_USER_REVIEW`.
+- `BEAMZ_BLAZE_PROFILE_TECHNICAL_PASS` en `MANUAL_COLOR_COMBO_BEAT_SWAP_PASS` (2026-08-31): het BeamZ BLAZE Series 160.538 / 160.540 / 160.542-profiel volgt de fabrikantmanual V1.1 in 8ch (Fog, Master Dimmer, RGBA, Strobe, Macro), met native maxima 255/255/100. Fog en Macro staan standaard uit; Amber blijft bij bestaande RGB-manual-presets nul. De acht Manual Color Combos houden een stabiele kleurcapabele A/B-verdeling en wisselen uitsluitend op authoritative beat-parity, ook no-DMX. Runtimeacceptatie inclusief stale-freeze, resume, blackout/release en installed/source-hash is groen. `BEAMZ_BLAZE_PHYSICAL_OUTPUT = HOLD_HARDWARE_TEST` zolang geen fysieke BLAZE is aangesloten.
 
 ## Technical PASS
 

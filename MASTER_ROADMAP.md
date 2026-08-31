@@ -2635,6 +2635,10 @@ combo herneemt na release. De bestaande Remote V2/LIVE_CONTROL-ack,
 state-revision, SSE en polling-route blijft de authority; no-DMX blijft een
 volwaardige control-testmodus.
 
+De combofase is nooit een vrije timer: de stabiele A/B-partitie wisselt alleen
+wanneer de authoritative beat-parity wisselt. Bij stale transport blijft de
+laatst geldige fase staan; verse authority hervat direct vanaf de actuele beat.
+
 De iPad OVERRIDE is vast landscape/no-scroll en Color-first (2×6 singles,
 2×4 combos), zonder track/BPM/phrase/production strip. Effects zijn secundair,
 Energy is een verticale fader, Release All/Blackout compact en production mode
