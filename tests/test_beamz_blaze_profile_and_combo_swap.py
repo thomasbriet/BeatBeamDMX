@@ -45,6 +45,15 @@ class ManualComboBeatSwapTests(unittest.TestCase):
         self.assertEqual(MANUAL_COLOR_PRESETS["lime"], self.rgbw("red_lime", self.context_a, 101))
         self.assertEqual(MANUAL_COLOR_PRESETS["red"], self.rgbw("red_lime", self.context_b, 101))
         self.assertEqual(MANUAL_COLOR_PRESETS["red"], self.rgbw("red_lime", self.context_a, 102))
+        self.assertEqual(MANUAL_COLOR_PRESETS["lime"], self.rgbw("red_lime", self.context_a, 103))
+
+    def test_new_combo_swaps_for_four_authoritative_beats_without_local_timing(self):
+        self.assertEqual(MANUAL_COLOR_PRESETS["green"], self.rgbw("green_blue", self.context_a, 200))
+        self.assertEqual(MANUAL_COLOR_PRESETS["blue"], self.rgbw("green_blue", self.context_b, 200))
+        self.assertEqual(MANUAL_COLOR_PRESETS["blue"], self.rgbw("green_blue", self.context_a, 201))
+        self.assertEqual(MANUAL_COLOR_PRESETS["green"], self.rgbw("green_blue", self.context_b, 201))
+        self.assertEqual(MANUAL_COLOR_PRESETS["green"], self.rgbw("green_blue", self.context_a, 202))
+        self.assertEqual(MANUAL_COLOR_PRESETS["blue"], self.rgbw("green_blue", self.context_a, 203))
 
     def test_expanded_combo_vocabulary_uses_only_approved_exact_manual_presets(self):
         self.assertEqual(

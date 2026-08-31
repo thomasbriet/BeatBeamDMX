@@ -304,10 +304,10 @@ class RemoteLiveControlTests(unittest.TestCase):
         self.assertFalse(denied["accepted"]); self.assertIn("allowlisted", denied["error"])
 
     def test_color_combo_is_live_control_scoped_and_mutually_exclusive_with_single_color(self):
-        combo = self.command("set_color_combo", "blue_orange", command_id="combo")
+        combo = self.command("set_color_combo", "green_blue", command_id="combo")
         self.assertTrue(combo["accepted"])
         auto_show = beatbeam_app.DMX.calls[-1][1]["auto_show"]
-        self.assertEqual("blue_orange", auto_show["override_color_combo"])
+        self.assertEqual("green_blue", auto_show["override_color_combo"])
         self.assertEqual("none", auto_show["override_color"])
         single = self.command("set_color", "white", command_id="single")
         self.assertTrue(single["accepted"])
