@@ -22,6 +22,19 @@ change. BUILD/BREAK/ARRIVAL/RELEASE/DROP/RETURN/DEPARTURE/TRANSITION zijn
 optionele bounded modifiers; RME is nooit de continuous backbone. Rekordbox is
 uitsluitend `LEGACY / HISTORICAL / RESEARCH CONTEXT`.
 
+## USB Remote Transport V1 — accepted architecture
+
+Vanaf Beta 1.2 heeft BeatBeam Remote een fysiek bewezen directe USB-transportlaag:
+**USB-first → automatische LAN/Wi-Fi fallback → automatische USB-reacquire**.
+USB transporteert uitsluitend versioned bounded NDJSON (handshake, heartbeat,
+sequence/revision, command-ID/ack en stale-state rejection); de bestaande
+BeatBeam-backend blijft de enige Remote-, override-, safety-, show-, renderer- en
+DMX-authority. Commands worden nooit blind op twee transports verstuurd. Bij
+transportverlies eindigen alleen USB-owned momentary leases; Smoke Hold-release
+bij USB-loss is fysiek/functioneel geaccepteerd. V1 gebruikt op de Mac Homebrew
+`libusbmuxd`/`iproxy`; een toekomstige packaging/diagnostics-pass mag die
+dependency verbeteren, maar dit blokkeert de huidige eigen live-opstelling niet.
+
 | Historisch onderwerp | Gereconcilieerde status |
 | --- | --- |
 | M22A runtime, transport en rich-analysis handoff | `COMPLETED`; de oude open runtimepass is superseded door de actuele lifecycle- en coverage-passes. |

@@ -40,6 +40,7 @@
 | Item | Status | Doel | Blokker |
 | --- | --- | --- | --- |
 | Release/distributie | `DEFERRED` | Ondertekende distributie, updatekanaal en eventuele release-automation. | Geen remote/releasekanaal bestaat. |
+| USB Remote helper productization | `DEFERRED` | Onderzoek dependency-health UX, installatie/verpakking/licensing van Homebrew `libusbmuxd`/`iproxy`, en eventueel verdere network diagnostics. | USB-first/LAN-fallback V1 is fysiek geaccepteerd; geen blocker voor de huidige live-opstelling. |
 | VirtualDJ library-wide status/batch | `UNSUPPORTED_OR_DEFERRED` | Alleen via een later officieel ondersteunde arbitrary-track/batchroute. | Huidige officiële API ondersteunt uitsluitend browsed/loaded metadatawrite; geen browserautomatisering of databasehack. |
 
 ## DONE RECENTLY
@@ -61,6 +62,7 @@
 - `BEAMZ_BLAZE_PROFILE_TECHNICAL_PASS` en `MANUAL_COLOR_COMBO_BEAT_SWAP_PASS`: fabrikant-gebaseerd BeamZ BLAZE Series 160.538 / 160.540 / 160.542 8ch-profiel met native 255/255/100-schaling, veilige Fog/Macro-defaults en RGB-manual-compatibiliteit zonder fictief White-kanaal. De stabiele Manual Combo A/B-partities wisselen op de authoritative beat, bevriezen bij stale transport en hervatten zonder vrije timer. No-DMX runtimeacceptatie, blackout/release en source/install-identiteit zijn groen; `BEAMZ_BLAZE_PHYSICAL_OUTPUT = HOLD_HARDWARE_TEST`.
 - `BEATBEAM_IPAD_OVERRIDE_REFINEMENT_V2_TECHNICAL_PASS`: 16 exact-preset, backend-authoritatieve Manual Color Combos in een vaste 2×8-bank, Smoke veilig disabled direct naast de Purple/Rainbow-kolom en een custom brede direct-tap/drag Energy-fader. Effects en Release/Blackout zijn compacter zonder lease-, pairing-, Settings- of Status-regressie. De app is gesigneerd, op de fysieke iPad geïnstalleerd en visueel gecontroleerd; human performance/UX-review blijft `HOLD_USER_REVIEW`.
 - `BEATBEAM_RENDERED_INTENSITY_VISUALIZATION_V1_PASS`: één renderer-authoritatieve, read-only `effective_intensity`-projectie per fixture naast resolved RGBW-identiteit. Native Preview Map en iPad LIVE volgen hetzelfde post-render/post-master resultaat zonder RGB-luminance-afleiding of double-scaling. Master 100/50/0, kleuridentiteit en blackout zijn technisch en visueel geaccepteerd; fysieke BLAZE-output blijft `HOLD_HARDWARE_TEST`.
+- `BEATBEAM_USB_REMOTE_TRANSPORT_V1_PASS`, `BEATBEAM_REMOTE_USB_TO_LAN_FAILOVER_V1_PASS`, `BEATBEAM_REMOTE_USB_REACQUIRE_V1_PASS` en `BEATBEAM_USB_REMOTE_SAFETY_V1_PASS`: USB-first iPad Remote via owned `iproxy`/libusbmuxd, automatische LAN/Wi-Fi fallback/reacquire, één backend-authority, geen duplicate dispatch en veilige USB-owned Smoke/momentary lease release. Fysiek geaccepteerd op de eigen Mac+iPad-opstelling.
 - FILL micro-evidence/tooling en het 36-item blinded reviewpakket.
 
 ## LEGACY / CLOSED

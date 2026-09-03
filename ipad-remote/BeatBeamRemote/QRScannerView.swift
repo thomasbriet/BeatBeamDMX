@@ -21,7 +21,8 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     private var didEmitCode = false
     private var isSessionConfigured = false
     private let overlayLabel = UILabel()
-    private let actionButton = UIButton(type: .system)
+    private let actionLabel = UILabel()
+    private let actionButton = BBHardwareButton(symbol: "gearshape.fill", accessibilityLabel: "Open camera settings")
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -74,21 +75,30 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         overlayLabel.numberOfLines = 3
         view.addSubview(overlayLabel)
 
+        actionLabel.translatesAutoresizingMaskIntoConstraints = false
+        actionLabel.text = "OPEN SETTINGS"
+        actionLabel.font = BBUIKitTokens.labelFont(10)
+        actionLabel.textColor = BBUIKitTokens.secondary
+        actionLabel.textAlignment = .center
+        actionLabel.isHidden = true
+        view.addSubview(actionLabel)
+
         actionButton.translatesAutoresizingMaskIntoConstraints = false
-        actionButton.configuration = .filled()
-        actionButton.configuration?.baseBackgroundColor = .systemOrange
-        actionButton.configuration?.baseForegroundColor = .white
+        actionButton.activeColor = BBUIKitTokens.warning
         actionButton.isHidden = true
         view.addSubview(actionButton)
 
         NSLayoutConstraint.activate([
             overlayLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             overlayLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
-            overlayLabel.bottomAnchor.constraint(equalTo: actionButton.topAnchor, constant: -16),
+            overlayLabel.bottomAnchor.constraint(equalTo: actionLabel.topAnchor, constant: -16),
             overlayLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 56),
 
+            actionLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            actionLabel.bottomAnchor.constraint(equalTo: actionButton.topAnchor, constant: -5),
             actionButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             actionButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
+            actionButton.widthAnchor.constraint(equalToConstant: 120),
             actionButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
         ])
     }
@@ -149,6 +159,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         view.layer.insertSublayer(layer, at: 0)
         isSessionConfigured = true
         overlayLabel.text = "Scan de BeatBeam QR-code"
+        actionLabel.isHidden = true
         actionButton.isHidden = true
     }
 
@@ -161,7 +172,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
 
     private func showPermissionDenied() {
         overlayLabel.text = "Camera-toegang staat uit. Geef BeatBeam Remote toegang tot de camera in Instellingen."
-        actionButton.setTitle("Open Instellingen", for: .normal)
+        actionLabel.isHidden = false
         actionButton.isHidden = false
         actionButton.removeTarget(nil, action: nil, for: .allEvents)
         actionButton.addTarget(self, action: #selector(openSettings), for: .touchUpInside)

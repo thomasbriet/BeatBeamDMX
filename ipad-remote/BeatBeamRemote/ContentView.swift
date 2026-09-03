@@ -286,7 +286,7 @@ private struct ColorPadMatrix: View {
                     }
                 }
                 .frame(width: gridWidth)
-                SmokeSetupPad().frame(width: OverrideLayout.smokeWidth).frame(maxHeight: .infinity)
+                SmokeSetupPad(smoke: state.smoke).frame(width: OverrideLayout.smokeWidth).frame(maxHeight: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -474,19 +474,22 @@ private struct EffectDeck: View {
 }
 
 private struct SmokeSetupPad: View {
+    @EnvironmentObject private var store: RemoteStore
+    let smoke: RemoteSmokeState?
     var body: some View {
         Button(action: {}) {
             VStack(spacing: 7) {
                 Image(systemName: "cloud.fill").font(.title2)
                 Text("SMOKE").font(.headline.bold().monospaced())
-                Text("SETUP\nPENDING").font(.caption2.bold().monospaced()).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                Text("HOLD\n\(smoke?.outputPercent ?? 50)%").font(.caption2.bold().monospaced()).multilineTextAlignment(.center).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .buttonStyle(HardwarePerformancePadStyle(active: false))
-        .disabled(true)
-        .opacity(0.68)
-        .accessibilityLabel("Smoke unavailable until DMX channels are configured")
+        .buttonStyle(HardwarePerformancePadStyle(active: smoke?.active == true))
+        .disabled(smoke?.supported != true)
+        .opacity(smoke?.supported == true ? 1 : 0.55)
+        .gesture(DragGesture(minimumDistance: 0).onChanged { _ in store.beginSmokeHold() }.onEnded { _ in store.endSmokeHold() })
+        .accessibilityLabel(smoke?.supported == true ? "Hold smoke" : (smoke?.reasonIfUnavailable ?? "Smoke unavailable"))
     }
 }
 

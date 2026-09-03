@@ -143,6 +143,7 @@ REMOTE_CONTROL_LOCK = threading.RLock()
 REMOTE_CONTROL_RESULTS = {}
 REMOTE_MOMENTARY_LEASES = {}
 REMOTE_MOMENTARY_LEASE_SECONDS = 3.0
+REMOTE_SMOKE_HOLD_LEASE = None
 REMOTE_CONTROL_RESULT_LIMIT = 128
 SIMULATOR_SMART_CUE_DATA_PATHS = (
     ROOT / "smart-cue-review" / "SMART_CUE_REVIEW_DATA.json",
@@ -6582,6 +6583,20 @@ def live_override_energy_label(value):
     return labels.get(live_override_energy_name(value), "Auto")
 
 
+def live_fx_speed_mode(value):
+    key = str(value or "auto").strip().lower()
+    return key if key in {"auto", "slow", "mid", "fast"} else "auto"
+
+
+def live_fx_speed_label(value):
+    return {
+        "auto": "Auto",
+        "slow": "Slow",
+        "mid": "Mid",
+        "fast": "Fast",
+    }[live_fx_speed_mode(value)]
+
+
 ONE_SHOT_CUES = {
     "audience_riser": {
         "label": "Audience Rise",
@@ -6609,6 +6624,51 @@ ONE_SHOT_CUES = {
     },
 }
 
+# Timing is resolved once, at activation. MID preserves the previous authored
+# duration; SLOW and FAST stretch/compact only effects whose identity is an
+# animated musical development. White Hit and Color Burst keep fixed lifetimes.
+ONE_SHOT_FX_SPEED_POLICY = {
+    "audience_riser": {"slow": 24.0, "mid": 16.0, "fast": 8.0},
+    "snap_fan": {"slow": 8.0, "mid": 4.0, "fast": 2.0},
+    "mirror_bounce": {"slow": 16.0, "mid": 8.0, "fast": 4.0},
+    "par_chase_burst": {"slow": 16.0, "mid": 8.0, "fast": 4.0},
+}
+
+COLOR_BURST_STEPS_PER_BEAT = {
+    "slow": 2,
+    "mid": 4,
+    "fast": 8,
+}
+
+# Effects compose over the already-resolved show/manual color by default.  This
+# table is deliberately small and explicit: adding a new effect cannot
+# accidentally introduce a default RGB/RGBW replacement downstream.
+EFFECT_COLOR_OWNERSHIP = {
+    "manual_strobe": False,
+    "audience_sweep": False,
+    "all_on": False,
+    "par_chase": False,
+    "par_snake": False,
+    "audience_riser": False,
+    "white_hit": True,
+    "color_burst": True,
+    "snap_fan": False,
+    "mirror_bounce": False,
+    "par_chase_burst": False,
+}
+
+# Retained as the validated FAST-rate compatibility constant. Runtime selection
+# uses COLOR_BURST_STEPS_PER_BEAT and never render cadence.
+COLOR_BURST_SUBDIVISIONS_PER_BEAT = COLOR_BURST_STEPS_PER_BEAT["fast"]
+COLOR_BURST_PRESET_SEQUENCE = (
+    "red", "cyan", "yellow", "purple", "white",
+    "green", "orange", "blue", "lime", "pink",
+)
+
+
+def effect_owns_color(effect_id):
+    return bool(EFFECT_COLOR_OWNERSHIP.get(str(effect_id or "").strip().lower(), False))
+
 
 def one_shot_cue_name(value):
     key = str(value or "").strip().lower()
@@ -6627,6 +6687,18 @@ def one_shot_cue_definition(value):
     if cue_name == "none":
         return None
     return ONE_SHOT_CUES[cue_name]
+
+
+def one_shot_duration_beats(value, fx_speed):
+    cue_name = one_shot_cue_name(value)
+    cue = one_shot_cue_definition(cue_name)
+    if cue is None:
+        return 0.0
+    policy = ONE_SHOT_FX_SPEED_POLICY.get(cue_name)
+    if policy is None:
+        return max(0.25, float(cue.get("duration_beats") or 1.0))
+    resolved = live_fx_speed_mode(fx_speed)
+    return max(0.25, float(policy[resolved if resolved != "auto" else "mid"]))
 
 
 def apply_live_energy_override(level, value, *, low_target, mid_target, high_target, mix=0.68):
@@ -10114,6 +10186,9 @@ class DmxController:
         # Exact post-authority frame. It is valid without an Enttec sink and is
         # deliberately distinct from `last_sent`.
         self.current_final_values = {}
+        # Smoke is a deliberately separate, ephemeral manual authority.  It
+        # never becomes Auto Show state and is always reset on process start.
+        self.manual_smoke_active = False
         # Read-only per-fixture intensity captured in the renderer after its
         # dimmer envelope and Master cap. UI clients consume this instead of
         # deriving brightness from colour bytes.
@@ -10157,8 +10232,15 @@ class DmxController:
         # A manual combo's last valid VirtualDJ beat parity.  It is only used
         # while transport is stale; a fresh frame always derives parity anew.
         self.manual_combo_last_valid_beat_parity = 0
+        # AUTO speed uses a three-band Schmitt trigger. This is presentation
+        # and activation authority only; it never changes show Energy itself.
+        self.resolved_auto_fx_speed = "mid"
         self.outro_behavior_state = None
         self.active_one_shot_cue = None
+        # This is intentionally ephemeral: a physical venue-target test owns
+        # only the final pan/tilt bytes for one fixture.  It never modifies the
+        # persisted show configuration or broadens into colour/dimmer/effects.
+        self.venue_target_test_authority = None
         self.track_preview_summaries = {}
         self.track_show_plans = {}
         self.track_path_plan_cache = {}
@@ -10245,7 +10327,9 @@ class DmxController:
             "active_slot": "head",
             "blackout_active": False,
             "master_dimmer": 1.0,
+            "smoke_output_percent": 50,
             "production_show_mode": BASELINE_ONLY,
+            "venue_geometry": default_venue_geometry_config(),
             "auto_show": DmxController.default_auto_show_config(),
             "slot_order": ["head", "par"],
             "slots": {
@@ -10271,6 +10355,7 @@ class DmxController:
             "override_color": "none",
             "override_color_combo": "none",
             "override_energy": "none",
+            "override_fx_speed": "auto",
             "override_manual_strobe": False,
             "override_audience_sweep": False,
             "override_all_on": False,
@@ -11492,7 +11577,9 @@ class DmxController:
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
             self.current_values = values
-            self.current_final_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
+            self.current_final_values = self._apply_manual_smoke_overlay_locked(
+                self._apply_virtualdj_beat_pulse_overlay_locked(values), config
+            )
             self.current_slot_previews = slot_previews
             self._schedule_save_locked()
             stop_beat_pulse_test = bool(config["blackout_active"])
@@ -17838,6 +17925,34 @@ def _remote_manual_color_combo_capability(dmx_state):
     }
 
 
+def _remote_live_one_shot_state(auto_show):
+    """Expose the renderer's existing one-shot beat envelope read-only.
+
+    The remote receives the same authoritative cue id and progress the renderer
+    is currently consuming.  It never schedules, prolongs, or locally owns a
+    cue lifetime.
+    """
+    if not isinstance(auto_show, dict) or not auto_show.get("one_shot_active"):
+        return None
+    cue_id = one_shot_cue_name(auto_show.get("one_shot_cue"))
+    cue = one_shot_cue_definition(cue_id)
+    if cue is None:
+        return None
+    duration_beats = max(
+        0.25,
+        float(auto_show.get("one_shot_duration_beats") or cue.get("duration_beats") or 1.0),
+    )
+    progress = clamp_unit(auto_show.get("one_shot_progress") or 0.0)
+    return {
+        "id": cue_id,
+        "label": cue["label"],
+        "duration_beats": duration_beats,
+        "progress": progress,
+        "remaining_beats": max(0.0, duration_beats * (1.0 - progress)),
+        "fx_speed": auto_show.get("one_shot_fx_speed"),
+    }
+
+
 def _remote_auto_show_update(updates):
     """Apply only the existing manual override fields, never raw DMX config."""
     with DMX.lock:
@@ -17883,6 +17998,41 @@ def _reap_remote_momentary_leases(now=None):
     return expired
 
 
+def _remote_smoke_lease_payload(lease, status):
+    return {
+        "effect": "smoke",
+        "lease_id": (lease or {}).get("lease_id"),
+        "active": status == "active",
+        "status": status,
+    }
+
+
+def _release_remote_smoke_hold(owner=None, lease_id=None, reason="released"):
+    global REMOTE_SMOKE_HOLD_LEASE
+    with REMOTE_CONTROL_LOCK:
+        lease = REMOTE_SMOKE_HOLD_LEASE
+        if lease is None:
+            return "already_released", None
+        if owner is not None and lease.get("owner") != owner:
+            return "wrong_client", lease
+        if lease_id and lease.get("lease_id") != lease_id:
+            return "wrong_lease", lease
+        REMOTE_SMOKE_HOLD_LEASE = None
+    release = getattr(DMX, "release_manual_smoke", None)
+    if callable(release):
+        release(reason)
+    return "released", lease
+
+
+def _reap_remote_smoke_hold(now=None):
+    now = time.monotonic() if now is None else float(now)
+    with REMOTE_CONTROL_LOCK:
+        expired = REMOTE_SMOKE_HOLD_LEASE is not None and float(REMOTE_SMOKE_HOLD_LEASE.get("expires_at") or 0.0) <= now
+    if expired:
+        _release_remote_smoke_hold(reason="lease_expired")
+    return bool(expired)
+
+
 def _remote_control_client_id(token):
     credential = remote_live_control_credential(token) or {}
     return str(credential.get("client_id") or "")
@@ -17902,7 +18052,9 @@ def _remote_control_ack(command_id, accepted, error=None, momentary_lease=None):
 
 def remote_live_control_command(token, payload):
     """The only remote write path: bounded, idempotent live-performance intent."""
+    global REMOTE_SMOKE_HOLD_LEASE
     _reap_remote_momentary_leases()
+    _reap_remote_smoke_hold()
     command_id = str((payload or {}).get("command_id") or "").strip()
     action = str((payload or {}).get("action") or "").strip().lower()
     owner = _remote_control_client_id(token)
@@ -17948,6 +18100,11 @@ def remote_live_control_command(token, payload):
             if str(value or "none").strip().lower() not in {"none", "low", "mid", "high"}:
                 raise ValueError("unsupported energy override")
             _remote_auto_show_update({"override_energy": energy})
+        elif action == "set_fx_speed":
+            fx_speed = live_fx_speed_mode(value)
+            if str(value or "auto").strip().lower() not in {"auto", "slow", "mid", "fast"}:
+                raise ValueError("unsupported FX speed mode")
+            _remote_auto_show_update({"override_fx_speed": fx_speed})
         elif action == "set_master_dimmer":
             try:
                 master_dimmer = float(value)
@@ -17956,6 +18113,48 @@ def remote_live_control_command(token, payload):
             if not math.isfinite(master_dimmer):
                 raise ValueError("master dimmer must be finite")
             DMX.update_config({"master_dimmer": clamp_unit(master_dimmer)})
+        elif action == "set_smoke_output":
+            try:
+                smoke_output = float(value)
+            except (TypeError, ValueError):
+                raise ValueError("smoke output must be a number from 0 to 100")
+            if not math.isfinite(smoke_output):
+                raise ValueError("smoke output must be finite")
+            DMX.update_config({"smoke_output_percent": max(0, min(100, smoke_output))})
+        elif action in {"smoke_hold_start", "smoke_hold_renew", "smoke_hold_end"}:
+            requested_lease_id = str((payload or {}).get("lease_id") or "").strip() or None
+            if action == "smoke_hold_end":
+                release_status, released_lease = _release_remote_smoke_hold(owner, requested_lease_id, "remote_release")
+                if release_status == "wrong_client": raise ValueError("smoke hold is owned by another client")
+                if release_status == "wrong_lease": raise ValueError("smoke hold lease does not match")
+                momentary_lease = _remote_smoke_lease_payload(released_lease, release_status)
+            else:
+                with REMOTE_CONTROL_LOCK:
+                    lease = REMOTE_SMOKE_HOLD_LEASE
+                    if lease and lease.get("owner") != owner:
+                        raise ValueError("smoke hold is leased by another client")
+                    if action == "smoke_hold_start":
+                        if lease is None:
+                            lease = {"owner": owner, "lease_id": secrets.token_urlsafe(18)}
+                            REMOTE_SMOKE_HOLD_LEASE = lease
+                        lease["expires_at"] = time.monotonic() + REMOTE_MOMENTARY_LEASE_SECONDS
+                    elif lease is None:
+                        momentary_lease = _remote_smoke_lease_payload(None, "expired")
+                    else:
+                        if requested_lease_id and lease.get("lease_id") != requested_lease_id:
+                            raise ValueError("smoke hold lease does not match")
+                        lease["expires_at"] = time.monotonic() + REMOTE_MOMENTARY_LEASE_SECONDS
+                if momentary_lease is None:
+                    try:
+                        DMX.start_manual_smoke_hold()
+                    except Exception:
+                        # A rejected capability/blackout must never leave a
+                        # dead lease that prevents a later valid HOLD.
+                        with REMOTE_CONTROL_LOCK:
+                            if REMOTE_SMOKE_HOLD_LEASE is lease:
+                                REMOTE_SMOKE_HOLD_LEASE = None
+                        raise
+                    momentary_lease = _remote_smoke_lease_payload(lease, "active")
         elif action in {"momentary_press", "momentary_renew", "momentary_release"}:
             effect = str(value or "").strip().lower()
             key = REMOTE_MOMENTARY_EFFECT_KEYS.get(effect)
@@ -17997,8 +18196,13 @@ def remote_live_control_command(token, payload):
         elif action == "release_all":
             with REMOTE_CONTROL_LOCK:
                 REMOTE_MOMENTARY_LEASES.clear()
+                REMOTE_SMOKE_HOLD_LEASE = None
+            release = getattr(DMX, "release_manual_smoke", None)
+            if callable(release):
+                release("release_all")
             _remote_auto_show_update({"override_phrase": "none", "override_color": "none", "override_color_combo": "none", "override_energy": "none", **{key: False for key in REMOTE_MOMENTARY_EFFECT_KEYS.values()}})
         elif action == "blackout_on":
+            _release_remote_smoke_hold(reason="blackout")
             DMX.blackout()
         elif action == "blackout_off":
             DMX.update_config({"blackout_active": False})
@@ -18026,6 +18230,7 @@ def remote_live_state_v2():
     typed state already used by the native Mac Live Show.
     """
     _reap_remote_momentary_leases()
+    _reap_remote_smoke_hold()
     state = full_state()
     dmx_state = state.get("dmx") if isinstance(state.get("dmx"), dict) else {}
     live_ui = state.get("live_ui") if isinstance(state.get("live_ui"), dict) else {}
@@ -18036,6 +18241,7 @@ def remote_live_state_v2():
     output_preview = _remote_live_output_preview(dmx_state)
     effect_capabilities = _remote_live_effect_capabilities(dmx_state)
     combo_capability = _remote_manual_color_combo_capability(dmx_state)
+    smoke = dmx_state.get("manual_smoke") if isinstance(dmx_state.get("manual_smoke"), dict) else {}
     active_deck = next((deck for deck in (live_ui.get("decks") or []) if isinstance(deck, dict) and deck.get("is_active")), None)
     musical_source = preview if preview.get("continuous_musical_state") else auto_show
     continuous = musical_source.get("continuous_musical_state") if isinstance(musical_source.get("continuous_musical_state"), dict) else {}
@@ -18056,6 +18262,12 @@ def remote_live_state_v2():
                 "par_snake": auto_show.get("override_par_snake"),
             }.items() if active
         ],
+        "one_shot": _remote_live_one_shot_state(auto_show),
+        "fx_speed": {
+            "mode": live_fx_speed_mode(auto_show.get("fx_speed_mode")),
+            "resolved": live_fx_speed_mode(auto_show.get("fx_speed_resolved") or "mid"),
+        },
+        "master_dimmer": clamp_unit(dmx_state.get("master_dimmer", 1.0)),
         "blackout": bool(dmx_state.get("blackout_active")),
         "automatic": not bool(auto_show.get("override_active")) and not bool(dmx_state.get("blackout_active")),
     }
@@ -18138,6 +18350,7 @@ def remote_live_state_v2():
         "fixtures": _remote_live_fixture_groups(dmx_state),
         "output": output_preview,
         "overrides": overrides,
+        "smoke": smoke,
         "control": {
             "scope": REMOTE_LIVE_CONTROL_SCOPE,
             "colors": [{"id": key, "label": live_override_color_label(key)} for key in (*MANUAL_COLOR_PRESETS, "rainbow")],
@@ -18148,6 +18361,7 @@ def remote_live_state_v2():
             ],
             "phrases": [{"id": key, "label": label} for key, label in AUTO_SHOW_PHRASE_OVERRIDES.items() if key != "none"],
             "energies": [{"id": key, "label": live_override_energy_label(key)} for key in ("low", "mid", "high")],
+            "fx_speeds": [{"id": key, "label": live_fx_speed_label(key)} for key in ("auto", "slow", "mid", "fast")],
             "momentary_effects": [effect for effect in effect_capabilities if effect["kind"] == "momentary"],
             "cue_shots": [effect for effect in effect_capabilities if effect["kind"] == "one_shot"],
             "momentary_lease_seconds": REMOTE_MOMENTARY_LEASE_SECONDS,
@@ -18570,8 +18784,203 @@ class AppHandler(BaseHTTPRequestHandler):
 
 
 def shutdown():
+    global USB_REMOTE_BRIDGE
+    if USB_REMOTE_BRIDGE is not None:
+        USB_REMOTE_BRIDGE.stop()
+        USB_REMOTE_BRIDGE = None
     DMX.shutdown()
     TRANSPORT.stop()
+
+
+class BeatBeamUSBRemoteBridge:
+    """Beta-only localhost↔iPad USB transport bridge.
+
+    This class never renders DMX and never derives state. It relays the exact
+    Remote V2 projection and invokes the existing allowlisted control function.
+    iproxy is a child only when this instance successfully started it.
+    """
+    protocol = "beatbeam-usb-remote-v1"
+    maximum_frame_bytes = 64 * 1024
+    local_port = 9876
+    ipad_port = 8790
+
+    def __init__(self):
+        self._stop = threading.Event()
+        self._thread = None
+        self._socket = None
+        self._iproxy = None
+        self._sequence = 0
+        self._buffer = b""
+        self._token = secrets.token_urlsafe(32)
+        self.diagnostic = "starting"
+
+    def start(self):
+        # Register a non-persistent, scoped internal credential. It is never
+        # sent across USB and lets the bridge use the same public command gate.
+        credentials = REMOTE_ACCESS_CONFIG.setdefault("remote_credentials", {})
+        credentials[self._token] = {
+            "scope": REMOTE_READ_SCOPE,
+            "scopes": [REMOTE_READ_SCOPE, REMOTE_LIVE_CONTROL_SCOPE],
+            "created_at": int(time.time()),
+            "client_name": "BeatBeam USB bridge",
+            "client_id": "usb-bridge-" + secrets.token_urlsafe(9),
+        }
+        self._thread = threading.Thread(target=self._run, name="BeatBeamUSBRemoteBridge", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._close_session()
+        if self._thread and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2.0)
+        if self._iproxy is not None:
+            with suppress(Exception):
+                self._iproxy.terminate()
+                self._iproxy.wait(timeout=1.5)
+            if self._iproxy.poll() is None:
+                with suppress(Exception): self._iproxy.kill()
+            self._iproxy = None
+        credentials = (REMOTE_ACCESS_CONFIG or {}).get("remote_credentials") or {}
+        credentials.pop(self._token, None)
+
+    def _run(self):
+        delay = 0.5
+        while not self._stop.is_set():
+            try:
+                self._ensure_iproxy()
+                self._connect_and_relay()
+                delay = 0.5
+            except Exception as exc:
+                self.diagnostic = f"USB unavailable: {str(exc)[:120]}"
+                self._close_session()
+                self._stop.wait(delay)
+                delay = min(delay * 2, 5.0)
+
+    def _ensure_iproxy(self):
+        if self._iproxy is not None and self._iproxy.poll() is None:
+            return
+        self._iproxy = None
+        executable = "/opt/homebrew/bin/iproxy"
+        if not os.path.isfile(executable) or not os.access(executable, os.X_OK):
+            found = shutil.which("iproxy")
+            if not found:
+                raise RuntimeError("iproxy unavailable")
+            executable = found
+        # Direct executable/argument invocation: no shell interpolation.
+        process = subprocess.Popen(
+            [executable, f"{self.local_port}:{self.ipad_port}"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(0.15)
+        if process.poll() is not None:
+            # An occupied port may be a user-owned route. Never kill or reuse
+            # it: V1 considers USB available only through our owned child.
+            self._iproxy = None
+            raise RuntimeError("localhost USB route is occupied by an unowned process")
+        self._iproxy = process
+
+    def _connect_and_relay(self):
+        sock = socket.create_connection(("127.0.0.1", self.local_port), timeout=2.0)
+        sock.settimeout(0.25)
+        self._socket = sock
+        self._buffer = b""
+        self._send({"protocol": self.protocol, "type": "hello", "payload": {"role": "bridge"}})
+        deadline = time.monotonic() + 3.0
+        handshaken = False
+        last_state = 0.0
+        last_ping = 0.0
+        while not self._stop.is_set():
+            now = time.monotonic()
+            if not handshaken and now >= deadline:
+                raise RuntimeError("USB handshake timed out")
+            if handshaken and now - last_state >= 0.25:
+                self._sequence += 1
+                self._send({"protocol": self.protocol, "type": "state", "sequence": self._sequence,
+                            "payload": remote_live_state_v2()})
+                last_state = now
+            if handshaken and now - last_ping >= 1.0:
+                self._send({"protocol": self.protocol, "type": "ping"})
+                last_ping = now
+            try:
+                data = sock.recv(4096)
+                if not data:
+                    raise RuntimeError("USB peer closed")
+                for frame in self._consume(data):
+                    frame_type = self._validate_frame(frame)
+                    if frame_type == "hello_ack":
+                        handshaken = True; self.diagnostic = "USB active"
+                    elif frame_type == "command":
+                        self._handle_command(frame)
+                    elif frame_type == "ping":
+                        self._send({"protocol": self.protocol, "type": "pong"})
+                    elif frame_type not in {"pong", "error"}:
+                        raise RuntimeError("unknown USB frame type")
+            except socket.timeout:
+                continue
+
+    def _consume(self, data):
+        if len(self._buffer) + len(data) > self.maximum_frame_bytes:
+            raise RuntimeError("USB frame buffer overflow")
+        self._buffer += data
+        frames = []
+        while b"\n" in self._buffer:
+            raw, self._buffer = self._buffer.split(b"\n", 1)
+            if not raw or len(raw) > self.maximum_frame_bytes:
+                raise RuntimeError("invalid USB frame size")
+            try:
+                frame = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("malformed USB JSON") from exc
+            frames.append(frame)
+        return frames
+
+    def _validate_frame(self, frame):
+        if not isinstance(frame, dict) or frame.get("protocol") != self.protocol:
+            raise RuntimeError("USB protocol mismatch")
+        frame_type = frame.get("type")
+        if not isinstance(frame_type, str):
+            raise RuntimeError("USB frame missing type")
+        return frame_type
+
+    def _handle_command(self, frame):
+        command_id = frame.get("id")
+        action = frame.get("command")
+        payload = frame.get("payload") or {}
+        if not isinstance(command_id, str) or not command_id or not isinstance(action, str) or not isinstance(payload, dict):
+            raise RuntimeError("invalid USB command")
+        # Existing backend command names/values only; no URL or DMX payload is
+        # exposed to the iPad transport.
+        result = remote_live_control_command(self._token, {
+            "command_id": command_id,
+            "action": action,
+            "value": payload.get("value"),
+            "lease_id": payload.get("lease_id"),
+        })
+        self._send({"protocol": self.protocol, "type": "ack", "id": command_id,
+                    "accepted": bool(result.get("accepted")),
+                    "state_revision": result.get("new_state_revision"), "payload": result})
+
+    def _send(self, payload):
+        encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if len(encoded) > self.maximum_frame_bytes:
+            raise RuntimeError("USB outbound frame too large")
+        if self._socket is None: raise RuntimeError("USB socket unavailable")
+        self._socket.sendall(encoded + b"\n")
+
+    def _close_session(self):
+        # Session loss releases only holds owned by this bridge. Persistent
+        # dimmer/FX/color choices and global show state intentionally survive.
+        owner = _remote_control_client_id(self._token)
+        for effect in list(REMOTE_MOMENTARY_LEASES):
+            _release_remote_momentary_effect(effect, owner=owner)
+        _release_remote_smoke_hold(owner=owner, reason="usb_session_lost")
+        active, self._socket = self._socket, None
+        if active is not None:
+            with suppress(OSError): active.shutdown(socket.SHUT_RDWR)
+            with suppress(OSError): active.close()
+
+
+USB_REMOTE_BRIDGE = None
 
 
 def main():
@@ -18588,6 +18997,10 @@ def main():
     OSC.port = args.osc_port
     TRANSPORT.start()
     DMX.start_show_engine()
+    global USB_REMOTE_BRIDGE
+    if APP_SLUG.lower().endswith("beta"):
+        USB_REMOTE_BRIDGE = BeatBeamUSBRemoteBridge()
+        USB_REMOTE_BRIDGE.start()
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)
     TRIGGER_LOG.log("BACKEND_START", host=args.host, port=args.port, osc_port=args.osc_port)
     print(f"{APP_NAME} running at http://{args.host}:{args.port}")

@@ -1,5 +1,22 @@
 import Foundation
 
+/// Small, deterministic ownership gate shared by LAN task creation and USB
+/// takeover. It intentionally contains no networking or UI policy.
+struct RemoteTransportGenerationGate {
+    private(set) var lanGeneration = 0
+
+    mutating func restartLAN() -> Int {
+        lanGeneration &+= 1
+        return lanGeneration
+    }
+
+    mutating func invalidateLAN() { lanGeneration &+= 1 }
+
+    func acceptsLAN(_ generation: Int, usbIsActive: Bool) -> Bool {
+        generation == lanGeneration && !usbIsActive
+    }
+}
+
 struct RemoteLiveStateV2: Decodable, Equatable {
     let schemaVersion: Int
     let schema: String
@@ -15,6 +32,7 @@ struct RemoteLiveStateV2: Decodable, Equatable {
     let fixtures: [RemoteFixtureGroup]
     let output: RemoteOutputPreview?
     let overrides: RemoteOverrideState
+    let smoke: RemoteSmokeState?
     let warnings: [RemoteWarning]
     let control: RemoteControlCapabilities
 }
@@ -62,8 +80,18 @@ struct RemoteFixtureGroup: Decodable, Equatable, Identifiable {
 }
 struct RemoteOverrideState: Decodable, Equatable {
     let anyActive: Bool; let phrase: String?; let energy: String?; let color: String?; let colorCombo: String?
-    let momentaryEffects: [String]; let blackout: Bool; let automatic: Bool
+    let momentaryEffects: [String]; let oneShot: RemoteOneShotState?; let fxSpeed: RemoteFxSpeedState?
+    let masterDimmer: Double?; let blackout: Bool; let automatic: Bool
 }
+struct RemoteSmokeState: Decodable, Equatable {
+    let supported: Bool; let reasonIfUnavailable: String?; let active: Bool
+    let outputPercent: Int; let resolvedDmxValue: Int; let fixtureSlotIds: [String]
+}
+struct RemoteOneShotState: Decodable, Equatable {
+    let id: String; let label: String; let durationBeats: Double; let progress: Double; let remainingBeats: Double
+    let fxSpeed: String?
+}
+struct RemoteFxSpeedState: Decodable, Equatable { let mode: String; let resolved: String }
 struct RemoteWarning: Decodable, Equatable, Identifiable {
     let code: String; let severity: String; let message: String
     var id: String { code }
@@ -85,7 +113,8 @@ struct RemoteEffectCapability: Decodable, Equatable, Identifiable {
 struct RemoteControlCapabilities: Decodable, Equatable {
     let scope: String; let colors: [RemoteControlOption]; let phrases: [RemoteControlOption]
     let colorCombinations: [RemoteColorComboCapability]?
-    let energies: [RemoteControlOption]; let momentaryEffects: [RemoteEffectCapability]
+    let energies: [RemoteControlOption]; let fxSpeeds: [RemoteControlOption]?
+    let momentaryEffects: [RemoteEffectCapability]
     let cueShots: [RemoteEffectCapability]; let momentaryLeaseSeconds: Double
 }
 struct RemoteControlAcknowledgement: Decodable {

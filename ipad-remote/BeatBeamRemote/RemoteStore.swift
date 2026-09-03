@@ -55,6 +55,13 @@ private enum RemoteKeychain {
 
 @MainActor
 final class RemoteStore: ObservableObject {
+    /// Command routing is explicit. The HTTP/SSE implementation below remains
+    /// the LAN transport; the USB listener supplies the same typed snapshots
+    /// and acknowledgements without gaining independent UI authority.
+    enum ActiveTransport: String, Equatable {
+        case lan = "LAN"
+        case usb = "USB"
+    }
     enum ConnectionState: Equatable {
         case notPaired, connecting, connected, reconnecting, offline, authFailed, serverIncompatible
 
@@ -73,6 +80,7 @@ final class RemoteStore: ObservableObject {
 
     @Published private(set) var liveState: RemoteLiveStateV2?
     @Published private(set) var connectionState: ConnectionState = .notPaired
+    @Published private(set) var activeTransport: ActiveTransport?
     @Published var configurationURLText = ""
     @Published var pairingCodeText = ""
     @Published var showConfiguration = false
@@ -80,6 +88,7 @@ final class RemoteStore: ObservableObject {
     @Published var transientMessage: String?
     @Published private(set) var pendingActions: Set<String> = []
     @Published private(set) var locallyPressedMomentaryEffects: Set<String> = []
+    @Published private(set) var locallyPressedSmoke = false
 
     private let defaults = UserDefaults.standard
     private let storedHostKey = "BeatBeamRemote.V2Host"
@@ -91,6 +100,11 @@ final class RemoteStore: ObservableObject {
     private var failedRefreshes = 0
     private var newestRevision = -1
     private var newestSequence = -1
+    private var newestUSBSequence = -1
+    // Every LAN restart gets a fresh generation. This prevents an old SSE or
+    // poll completion from changing transport/UI after USB supersedes it.
+    private var networkGenerationGate = RemoteTransportGenerationGate()
+    private weak var usbTransport: USBTransportPOCListener?
     // A gesture can emit several changed callbacks before its first network
     // acknowledgement.  Keep one state record per effect from touch-down,
     // rather than using the renewal task itself as the only active marker.
@@ -98,6 +112,12 @@ final class RemoteStore: ObservableObject {
     private var momentaryRenewals: [String: Task<Void, Never>] = [:]
     private var momentaryLeaseIDs: [String: String] = [:]
     private var momentaryReleasePending: Set<String> = []
+    private var smokeStartPending = false
+    private var smokeReleasePending = false
+    private var smokeLeaseID: String?
+    private var smokeRenewal: Task<Void, Never>?
+    private var masterDimmerCoalescingTask: Task<Void, Never>?
+    private var pendingMasterDimmer: Double?
     private let fallbackPollIntervalNanoseconds: UInt64 = 2_500_000_000
     private let streamRetryDelayNanoseconds: UInt64 = 900_000_000
     private lazy var session: URLSession = {
@@ -126,6 +146,10 @@ final class RemoteStore: ObservableObject {
     }()
 
     var isConnected: Bool { connectionState == .connected }
+    var connectionLabel: String {
+        guard connectionState == .connected, let activeTransport else { return connectionState.label }
+        return "\(connectionState.label) · \(activeTransport.rawValue)"
+    }
     var remoteHostLabel: String { host?.displayHost ?? "Niet ingesteld" }
     var trackTitle: String { liveState?.track.title ?? "(geen track)" }
     var trackArtist: String { liveState?.track.artist ?? "Onbekend" }
@@ -149,13 +173,28 @@ final class RemoteStore: ObservableObject {
         showConfiguration = true
     }
 
+    func attachUSBTransport(_ transport: USBTransportPOCListener) {
+        usbTransport = transport
+        transport.onConnected = { [weak self] in
+            Task { @MainActor in self?.usbConnected() }
+        }
+        transport.onDisconnected = { [weak self] in
+            Task { @MainActor in self?.usbDisconnected() }
+        }
+        transport.onState = { [weak self] data, sequence in
+            Task { @MainActor in self?.receiveUSBState(data, sequence: sequence) }
+        }
+    }
+
     func resumePolling() {
         guard credential != nil, host != nil else { return }
-        startConnections()
+        guard activeTransport != .usb else { return }
+        restartNetworkTransport()
     }
 
     func pausePolling() {
         releaseActiveMomentaries(reason: "connection paused")
+        networkGenerationGate.invalidateLAN()
         pollingTask?.cancel(); pollingTask = nil
         eventStreamTask?.cancel(); eventStreamTask = nil
     }
@@ -188,12 +227,37 @@ final class RemoteStore: ObservableObject {
         if let host { RemoteKeychain.delete(account: host.origin.absoluteString) }
         defaults.removeObject(forKey: storedHostKey)
         host = nil; credential = nil; liveState = nil; newestRevision = -1; newestSequence = -1
-        connectionState = .notPaired
+        activeTransport = nil; connectionState = .notPaired
         showConfiguration = true
     }
 
     func perform(_ action: String, value: String? = nil) {
         Task { _ = await sendControl(action, value: value) }
+    }
+
+    func queueMasterDimmer(_ value: Double) {
+        pendingMasterDimmer = min(1, max(0, value))
+        masterDimmerCoalescingTask?.cancel()
+        masterDimmerCoalescingTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 70_000_000)
+            guard !Task.isCancelled, let self else { return }
+            await self.flushMasterDimmer()
+        }
+    }
+
+    func commitMasterDimmer(_ value: Double) {
+        pendingMasterDimmer = min(1, max(0, value))
+        masterDimmerCoalescingTask?.cancel()
+        masterDimmerCoalescingTask = nil
+        Task { [weak self] in await self?.flushMasterDimmer() }
+    }
+
+    private func flushMasterDimmer() async {
+        guard let value = pendingMasterDimmer else { return }
+        pendingMasterDimmer = nil
+        masterDimmerCoalescingTask = nil
+        let wireValue = String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), value)
+        _ = await sendControl("set_master_dimmer", value: wireValue)
     }
 
     func beginMomentary(_ effect: String) {
@@ -224,10 +288,65 @@ final class RemoteStore: ObservableObject {
     func releaseActiveMomentaries(reason: String = "") {
         let effects = Set(momentaryStarts).union(momentaryRenewals.keys).union(momentaryLeaseIDs.keys)
         for effect in effects { endMomentary(effect) }
+        endSmokeHold()
     }
 
     func isMomentaryEngaged(_ effect: String) -> Bool {
         locallyPressedMomentaryEffects.contains(effect)
+    }
+
+    func beginSmokeHold() {
+        guard !smokeStartPending, smokeLeaseID == nil else { return }
+        smokeStartPending = true; locallyPressedSmoke = true
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome = await self.sendControl("smoke_hold_start")
+            self.completeSmokeStart(outcome)
+        }
+    }
+
+    func endSmokeHold() {
+        locallyPressedSmoke = false
+        smokeRenewal?.cancel(); smokeRenewal = nil
+        if let leaseID = smokeLeaseID {
+            smokeLeaseID = nil; smokeStartPending = false
+            releaseSmoke(leaseID: leaseID)
+        } else if smokeStartPending {
+            smokeReleasePending = true
+        }
+    }
+
+    private func completeSmokeStart(_ outcome: ControlOutcome) {
+        guard smokeStartPending else { return }
+        guard outcome.accepted, let lease = outcome.momentaryLease, lease.active, let leaseID = lease.leaseId else {
+            smokeStartPending = false; smokeReleasePending = false; locallyPressedSmoke = false; return
+        }
+        smokeLeaseID = leaseID; smokeStartPending = false
+        if smokeReleasePending { smokeReleasePending = false; smokeLeaseID = nil; releaseSmoke(leaseID: leaseID); return }
+        smokeRenewal = Task { [weak self] in
+            while let self, !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                guard !Task.isCancelled else { break }
+                guard await self.renewSmoke() else { break }
+            }
+        }
+    }
+
+    private func renewSmoke() async -> Bool {
+        guard let leaseID = smokeLeaseID else { return false }
+        let outcome = await sendControl("smoke_hold_renew", leaseID: leaseID, suppressBenignMomentaryError: true)
+        guard outcome.accepted, outcome.momentaryLease?.active == true else {
+            smokeRenewal?.cancel(); smokeRenewal = nil; smokeLeaseID = nil; locallyPressedSmoke = false
+            return false
+        }
+        return true
+    }
+
+    private func releaseSmoke(leaseID: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            _ = await self.sendControl("smoke_hold_end", leaseID: leaseID, suppressBenignMomentaryError: true)
+        }
     }
 
     private struct ControlOutcome {
@@ -280,6 +399,9 @@ final class RemoteStore: ObservableObject {
     }
 
     private func sendControl(_ action: String, value: String? = nil, leaseID: String? = nil, suppressBenignMomentaryError: Bool = false) async -> ControlOutcome {
+        if activeTransport == .usb, let usbTransport {
+            return await sendUSBControl(usbTransport, action: action, value: value, leaseID: leaseID, suppressBenignMomentaryError: suppressBenignMomentaryError)
+        }
         guard credential != nil, host != nil else { showConfiguration = true; return ControlOutcome(accepted: false, momentaryLease: nil) }
         let pending = "\(action):\(value ?? "")"
         pendingActions.insert(pending)
@@ -318,8 +440,30 @@ final class RemoteStore: ObservableObject {
         }
     }
 
+    private func sendUSBControl(_ transport: USBTransportPOCListener, action: String, value: String?, leaseID: String?, suppressBenignMomentaryError: Bool) async -> ControlOutcome {
+        guard let data = await transport.sendCommand(action: action, value: value, leaseID: leaseID) else {
+            // Never retry this command over LAN: its completion is unknown.
+            usbDisconnected()
+            transientMessage = "USB-opdracht niet bevestigd. Niet opnieuw verzonden."
+            return ControlOutcome(accepted: false, momentaryLease: nil)
+        }
+        do {
+            let acknowledgement = try decoder().decode(RemoteControlAcknowledgement.self, from: data)
+            apply(acknowledgement.effectiveState, from: .usb)
+            guard acknowledgement.accepted else {
+                if !shouldSuppressMomentaryLifecycleError(action: action, error: acknowledgement.error, enabled: suppressBenignMomentaryError) { transientMessage = acknowledgement.error ?? "Opdracht geweigerd door BeatBeam." }
+                return ControlOutcome(accepted: false, momentaryLease: acknowledgement.momentaryLease)
+            }
+            return ControlOutcome(accepted: true, momentaryLease: acknowledgement.momentaryLease)
+        } catch {
+            transientMessage = "USB-antwoord is niet compatibel."
+            usbDisconnected()
+            return ControlOutcome(accepted: false, momentaryLease: nil)
+        }
+    }
+
     private func shouldSuppressMomentaryLifecycleError(action: String, error: String?, enabled: Bool) -> Bool {
-        enabled && ["momentary_release", "momentary_renew"].contains(action) && error == "momentary effect has no active lease"
+        enabled && ["momentary_release", "momentary_renew", "smoke_hold_end", "smoke_hold_renew"].contains(action) && (error == "momentary effect has no active lease" || error == "smoke hold has no active lease")
     }
 
     private func applyPairingInput(_ raw: String) {
@@ -330,19 +474,19 @@ final class RemoteStore: ObservableObject {
     }
 
     private func connectStoredCredential() {
-        connectionState = .connecting
+        if activeTransport != .usb { connectionState = .connecting }
         Task {
             do {
                 try await refreshState()
-                connectionState = .connected
+                if self.activeTransport != .usb { connectionState = .connected; self.activeTransport = .lan }
                 failedRefreshes = 0
-                startConnections()
+                restartNetworkTransport()
             } catch { applyConnectionError(error) }
         }
     }
 
     private func pair(using rawURL: String, code: String) async {
-        connectionState = .connecting
+        if activeTransport != .usb { connectionState = .connecting }
         do {
             let parsed = try Self.parsePairingURL(rawURL)
             if parsed.wasLegacyTokenURL { throw RemoteConnectionError.legacyLinkRequiresPairing }
@@ -361,23 +505,37 @@ final class RemoteStore: ObservableObject {
             defaults.set(try JSONEncoder().encode(parsed.host), forKey: storedHostKey)
             showConfiguration = false; newestRevision = -1; newestSequence = -1
             try await refreshState()
-            connectionState = .connected; failedRefreshes = 0
-            startConnections()
+            if activeTransport != .usb { connectionState = .connected; activeTransport = .lan }; failedRefreshes = 0
+            restartNetworkTransport()
         } catch { applyConnectionError(error) }
     }
 
-    private func startConnections() {
+    /// Rebuild the LAN lifecycle without touching stored pairing material. It
+    /// is used for foreground recovery and, critically, USB → LAN failover.
+    private func restartNetworkTransport() {
+        guard credential != nil, host != nil else {
+            activeTransport = nil; connectionState = .offline; return
+        }
+        let generation = networkGenerationGate.restartLAN()
         pollingTask?.cancel(); eventStreamTask?.cancel()
-        startEventStream()
+        pollingTask = nil; eventStreamTask = nil
+        if activeTransport != .usb { connectionState = .reconnecting }
+        startEventStream(generation: generation)
         pollingTask = Task { [weak self] in
             while let self, !Task.isCancelled {
+                guard self.isCurrentNetworkGeneration(generation) else { break }
                 do {
-                    try await self.refreshState()
+                    try await self.refreshState(generation: generation)
+                    guard self.isCurrentNetworkGeneration(generation) else { break }
                     self.failedRefreshes = 0
-                    if self.connectionState != .connected { self.connectionState = .connected }
+                    if self.activeTransport != .usb {
+                        if self.connectionState != .connected { self.connectionState = .connected }
+                        self.activeTransport = .lan
+                    }
                 } catch {
+                    guard self.isCurrentNetworkGeneration(generation) else { break }
                     self.failedRefreshes += 1
-                    if self.connectionState != .authFailed && self.connectionState != .serverIncompatible {
+                    if self.activeTransport != .usb && self.connectionState != .authFailed && self.connectionState != .serverIncompatible {
                         self.connectionState = self.failedRefreshes >= 3 ? .offline : .reconnecting
                     }
                 }
@@ -386,27 +544,33 @@ final class RemoteStore: ObservableObject {
         }
     }
 
-    private func startEventStream() {
+    private func startEventStream(generation: Int) {
         eventStreamTask = Task { [weak self] in
             while let self, !Task.isCancelled {
-                do { try await self.runEventStream() }
+                guard self.isCurrentNetworkGeneration(generation) else { break }
+                do { try await self.runEventStream(generation: generation) }
                 catch is CancellationError { break }
                 catch {
-                    if Task.isCancelled { break }
-                    if self.connectionState != .authFailed && self.connectionState != .serverIncompatible { self.connectionState = .reconnecting }
+                    if Task.isCancelled || !self.isCurrentNetworkGeneration(generation) { break }
+                    if self.activeTransport != .usb && self.connectionState != .authFailed && self.connectionState != .serverIncompatible { self.connectionState = .reconnecting }
                 }
                 try? await Task.sleep(nanoseconds: self.streamRetryDelayNanoseconds)
             }
         }
     }
 
-    private func refreshState() async throws {
-        let state: RemoteLiveStateV2 = try await get("/api/remote-v2/state")
-        try validate(state)
-        apply(state)
+    private func isCurrentNetworkGeneration(_ generation: Int) -> Bool {
+        networkGenerationGate.acceptsLAN(generation, usbIsActive: activeTransport == .usb)
     }
 
-    private func runEventStream() async throws {
+    private func refreshState(generation: Int? = nil) async throws {
+        let state: RemoteLiveStateV2 = try await get("/api/remote-v2/state")
+        try validate(state)
+        if let generation, !isCurrentNetworkGeneration(generation) { return }
+        apply(state, from: .lan, networkGeneration: generation)
+    }
+
+    private func runEventStream(generation: Int) async throws {
         var streamRequest = try authenticatedRequest(path: "/api/remote-v2/events", method: "GET", timeout: 3600)
         streamRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         streamRequest.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
@@ -414,21 +578,65 @@ final class RemoteStore: ObservableObject {
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         try validateHTTP(http, data: nil)
         for try await line in bytes.lines {
-            if Task.isCancelled { break }
+            if Task.isCancelled || !isCurrentNetworkGeneration(generation) { break }
             guard line.hasPrefix("data:") else { continue }
             let json = String(line.dropFirst(5)).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             guard !json.isEmpty else { continue }
             do {
                 let state = try decoder().decode(RemoteLiveStateV2.self, from: Data(json.utf8))
-                try validate(state); apply(state); failedRefreshes = 0
-                if connectionState != .connected { connectionState = .connected }
+                try validate(state)
+                guard isCurrentNetworkGeneration(generation) else { break }
+                apply(state, from: .lan, networkGeneration: generation); failedRefreshes = 0
+                if activeTransport != .usb, connectionState != .connected { connectionState = .connected; activeTransport = .lan }
             } catch { throw error }
         }
     }
 
-    private func apply(_ state: RemoteLiveStateV2) {
+    private func apply(_ state: RemoteLiveStateV2, from transport: ActiveTransport = .lan, networkGeneration stateGeneration: Int? = nil) {
+        if let stateGeneration, !networkGenerationGate.acceptsLAN(stateGeneration, usbIsActive: activeTransport == .usb) { return }
+        guard activeTransport == nil || activeTransport == transport else { return }
         guard state.stateRevision > newestRevision || (state.stateRevision == newestRevision && state.eventSequence > newestSequence) else { return }
         newestRevision = state.stateRevision; newestSequence = state.eventSequence; liveState = state
+    }
+
+    private func usbConnected() {
+        // USB becomes authoritative at a clear boundary; old LAN callbacks
+        // cannot later retake the UI or command route.
+        networkGenerationGate.invalidateLAN()
+        pollingTask?.cancel(); pollingTask = nil
+        eventStreamTask?.cancel(); eventStreamTask = nil
+        newestUSBSequence = -1
+        activeTransport = .usb
+        connectionState = .connected
+        showConfiguration = false
+        transientMessage = nil
+    }
+
+    private func receiveUSBState(_ data: Data, sequence: Int) {
+        guard activeTransport == .usb, sequence > newestUSBSequence else { return }
+        do {
+            let state = try decoder().decode(RemoteLiveStateV2.self, from: data)
+            try validate(state)
+            newestUSBSequence = sequence
+            apply(state, from: .usb)
+            connectionState = .connected
+        } catch {
+            transientMessage = "USB-status is niet compatibel."
+        }
+    }
+
+    private func usbDisconnected() {
+        guard activeTransport == .usb else { return }
+        // The bridge releases USB-owned leases centrally on session loss. The
+        // local flags must also clear without attempting a second transport.
+        locallyPressedMomentaryEffects.removeAll(); locallyPressedSmoke = false
+        momentaryRenewals.values.forEach { $0.cancel() }; momentaryRenewals.removeAll(); momentaryLeaseIDs.removeAll(); momentaryStarts.removeAll(); momentaryReleasePending.removeAll()
+        smokeRenewal?.cancel(); smokeRenewal = nil; smokeLeaseID = nil; smokeStartPending = false; smokeReleasePending = false
+        activeTransport = nil
+        connectionState = credential != nil && host != nil ? .reconnecting : .offline
+        // Merely selecting LAN was the failure: start a new HTTP/SSE/poll
+        // lifecycle immediately, reusing the saved host and Keychain token.
+        restartNetworkTransport()
     }
 
     private func validate(_ state: RemoteLiveStateV2) throws {
@@ -438,6 +646,7 @@ final class RemoteStore: ObservableObject {
     }
 
     private func applyConnectionError(_ error: Error) {
+        if activeTransport == .usb { return }
         if let decoding = error as? DecodingError {
             let diagnostic = Self.decodingDiagnostic(decoding)
             print("BeatBeam Remote decoding failure: \(diagnostic)")

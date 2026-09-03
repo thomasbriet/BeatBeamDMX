@@ -1,27 +1,52 @@
-import SwiftUI
 import UIKit
 
 @main
-struct BeatBeamRemoteApp: App {
-    @StateObject private var store = RemoteStore()
-    @Environment(\.scenePhase) private var scenePhase
+@MainActor
+final class BeatBeamRemoteApp: UIResponder, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        let configuration = UISceneConfiguration(name: "BeatBeam Remote", sessionRole: connectingSceneSession.role)
+        configuration.delegateClass = BeatBeamSceneDelegate.self
+        return configuration
+    }
+}
 
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .environmentObject(store)
-                .preferredColorScheme(.dark)
-                .task {
-                    store.bootstrap()
-                }
-        }
-        .onChange(of: scenePhase) { _, newPhase in
-            UIApplication.shared.isIdleTimerDisabled = (newPhase == .active)
-            if newPhase == .active {
-                store.resumePolling()
-            } else {
-                store.pausePolling()
-            }
-        }
+@MainActor
+final class BeatBeamSceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+    private let store = RemoteStore()
+    private let usbTransportPOCListener = USBTransportPOCListener()
+
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+        guard let windowScene = scene as? UIWindowScene else { return }
+        let window = UIWindow(windowScene: windowScene)
+        window.rootViewController = BBRemoteApplicationViewController(store: store)
+        window.overrideUserInterfaceStyle = .dark
+        self.window = window
+        window.makeKeyAndVisible()
+        store.attachUSBTransport(usbTransportPOCListener)
+        store.bootstrap()
+    }
+
+    func sceneDidBecomeActive(_ scene: UIScene) {
+        UIApplication.shared.isIdleTimerDisabled = true
+        store.resumePolling()
+        usbTransportPOCListener.start()
+    }
+
+    func sceneWillResignActive(_ scene: UIScene) {
+        UIApplication.shared.isIdleTimerDisabled = false
+        store.releaseActiveMomentaries(reason: "app backgrounded")
+        store.pausePolling()
+        usbTransportPOCListener.stop()
+    }
+
+    func sceneDidDisconnect(_ scene: UIScene) {
+        UIApplication.shared.isIdleTimerDisabled = false
+        store.pausePolling()
+        usbTransportPOCListener.stop()
     }
 }

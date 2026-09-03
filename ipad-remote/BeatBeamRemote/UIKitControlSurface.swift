@@ -16,13 +16,17 @@ final class BBRemoteActionBridge {
 
     init(store: RemoteStore) { self.store = store }
 
-    var connectionLabel: String { store.connectionState.label }
+    var connectionLabel: String { store.connectionLabel }
     var isConnected: Bool { store.isConnected }
     var hostLabel: String { store.remoteHostLabel }
     func perform(_ action: String, value: String? = nil) { store.perform(action, value: value) }
+    func queueMasterDimmer(_ value: Double) { store.queueMasterDimmer(value) }
+    func commitMasterDimmer(_ value: Double) { store.commitMasterDimmer(value) }
     func beginMomentary(_ effect: String) { store.beginMomentary(effect) }
     func endMomentary(_ effect: String) { store.endMomentary(effect) }
     func isMomentaryEngaged(_ effect: String) -> Bool { store.isMomentaryEngaged(effect) }
+    func beginSmokeHold() { store.beginSmokeHold() }
+    func endSmokeHold() { store.endSmokeHold() }
     func releaseMomentaries(reason: String) { store.releaseActiveMomentaries(reason: reason) }
     func reconnect() { store.reconnect() }
     func scanQR() { store.showScanner = true }
@@ -62,13 +66,13 @@ final class BBRemoteRootViewController: UIViewController {
     private let content = UIView()
     private var blackoutHeight: NSLayoutConstraint!
     private var selectedTab: BBRemoteTab = .override
-    private var currentSurface: (UIView & BBRemoteStateRendering)?
+    private var currentSurfaceController: BBRemoteSurfaceViewController?
     private var state: RemoteLiveStateV2
-    private lazy var surfaces: [BBRemoteTab: UIView & BBRemoteStateRendering] = [
-        .live: BBLiveSurface(actions: actions),
-        .override: BBOverrideSurface(actions: actions),
-        .status: BBStatusSurface(actions: actions),
-        .settings: BBSettingsSurface(actions: actions, presenter: self),
+    private lazy var surfaces: [BBRemoteTab: BBRemoteSurfaceViewController] = [
+        .live: BBRemoteSurfaceViewController(surface: BBLiveSurface(actions: actions)),
+        .override: BBRemoteSurfaceViewController(surface: BBOverrideSurface(actions: actions)),
+        .status: BBRemoteSurfaceViewController(surface: BBStatusSurface(actions: actions)),
+        .settings: BBRemoteSurfaceViewController(surface: BBSettingsSurface(actions: actions, presenter: self)),
     ]
 
     init(actions: BBRemoteActionBridge, initialState: RemoteLiveStateV2) {
@@ -125,7 +129,7 @@ final class BBRemoteRootViewController: UIViewController {
         header.render(state: state)
         blackoutBanner.isHidden = !state.overrides.blackout
         blackoutHeight.constant = state.overrides.blackout ? 28 : 0
-        currentSurface?.render(state: state)
+        currentSurfaceController?.render(state: state)
     }
 
     func releaseMomentariesForDismissal() { actions.releaseMomentaries(reason: "UIKit root dismissed") }
@@ -134,18 +138,39 @@ final class BBRemoteRootViewController: UIViewController {
         if selectedTab != tab { actions.releaseMomentaries(reason: "UIKit tab changed") }
         selectedTab = tab
         header.select(tab)
-        currentSurface?.removeFromSuperview()
-        guard let surface = surfaces[tab] else { return }
-        content.addSubview(surface)
-        surface.bbPinEdges(to: content)
-        currentSurface = surface
-        surface.render(state: state)
+        if let currentSurfaceController {
+            currentSurfaceController.willMove(toParent: nil)
+            currentSurfaceController.view.removeFromSuperview()
+            currentSurfaceController.removeFromParent()
+        }
+        guard let controller = surfaces[tab] else { return }
+        addChild(controller)
+        content.addSubview(controller.view)
+        controller.view.bbPinEdges(to: content)
+        controller.didMove(toParent: self)
+        currentSurfaceController = controller
+        controller.render(state: state)
     }
 }
 
 @MainActor
 private protocol BBRemoteStateRendering: AnyObject {
     func render(state: RemoteLiveStateV2)
+}
+
+private final class BBRemoteSurfaceViewController: UIViewController, BBRemoteStateRendering {
+    private let surface: UIView & BBRemoteStateRendering
+
+    init(surface: UIView & BBRemoteStateRendering) {
+        self.surface = surface
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func loadView() { view = surface }
+
+    func render(state: RemoteLiveStateV2) { surface.render(state: state) }
 }
 
 private final class BBConsoleHeaderView: UIView {
@@ -193,10 +218,7 @@ private final class BBConsoleHeaderView: UIView {
         connection.axis = .horizontal; connection.alignment = .center; connection.spacing = 8
         connection.widthAnchor.constraint(greaterThanOrEqualToConstant: 172).isActive = true
 
-        let qr = BBHardwareButton(title: "⌗", accessibilityLabel: "Scan pairing QR")
-        qr.setTitle(nil, for: .normal)
-        qr.setImage(UIImage(systemName: "qrcode.viewfinder"), for: .normal)
-        qr.tintColor = .white
+        let qr = BBHardwareButton(symbol: "qrcode.viewfinder", accessibilityLabel: "Scan pairing QR")
         qr.widthAnchor.constraint(equalToConstant: 46).isActive = true
         qr.addAction(UIAction { [weak self] _ in self?.actions.scanQR() }, for: .touchUpInside)
 
@@ -224,18 +246,21 @@ private final class BBOverrideSurface: UIView, BBRemoteStateRendering {
     private let actions: BBRemoteActionBridge
     private let colorPanel = BBPanelView(title: "SINGLE COLORS")
     private let comboPanel = BBPanelView(title: "COLOR COMBINATIONS")
-    private let phraseEnergyPanel = BBPanelView(title: "PHRASE / ENERGY")
+    private let phraseMasterPanel = BBPanelView(title: "PHRASE / MASTER CONTROL")
     private let effectsPanel = BBPanelView(title: "EFFECTS")
-    private let safetyPanel = BBPanelView(title: "CONTROL")
+    private let safetyPanel = BBPanelView()
     private var colorButtons: [String: BBHardwareButton] = [:]
     private var comboButtons: [String: BBSplitColorComboPad] = [:]
     private var phraseButtons: [String: BBHardwareButton] = [:]
     private var holdButtons: [String: BBHardwareButton] = [:]
-    private var cueButtons: [String: BBHardwareButton] = [:]
-    private let smokeButton = BBHardwareButton(title: "☁\nSMOKE\nSETUP PENDING", accessibilityLabel: "Smoke unavailable until DMX channels are configured")
+    private var cueButtons: [String: BBOneShotProgressButton] = [:]
+    private let smokeButton = BBHardwareButton(symbol: "cloud.fill", accessibilityLabel: "Hold smoke")
+    private let smokeOutput = UISlider()
     private let energyFader = BBVerticalEnergyFader()
-    private let releaseButton = BBHardwareButton(title: "RELEASE ALL")
-    private let blackoutButton = BBHardwareButton(title: "BLACKOUT (HOLD)")
+    private let fxSpeedFader = BBVerticalFxSpeedFader()
+    private let masterDimmerFader = BBVerticalMasterDimmerFader()
+    private let releaseButton = BBHardwareButton(symbol: "arrow.uturn.backward", accessibilityLabel: "Release all overrides")
+    private let blackoutButton = BBHardwareButton(symbol: "lightbulb.slash.fill", accessibilityLabel: "Blackout")
     private var capabilitySignature = ""
     private var currentState: RemoteLiveStateV2?
 
@@ -243,8 +268,14 @@ private final class BBOverrideSurface: UIView, BBRemoteStateRendering {
         self.actions = actions
         super.init(frame: .zero)
         backgroundColor = BBUIKitTokens.background
-        smokeButton.isEnabled = false
-        smokeButton.alpha = 0.68
+        smokeButton.addAction(UIAction { [weak self] _ in self?.actions.beginSmokeHold() }, for: .touchDown)
+        smokeButton.addAction(UIAction { [weak self] _ in self?.actions.endSmokeHold() }, for: [.touchUpInside, .touchUpOutside, .touchCancel])
+        smokeOutput.minimumValue = 0; smokeOutput.maximumValue = 100
+        smokeOutput.tintColor = BBUIKitTokens.warning
+        smokeOutput.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.actions.perform("set_smoke_output", value: String(Int(self.smokeOutput.value.rounded())))
+        }, for: .touchUpInside)
         blackoutButton.activeColor = BBUIKitTokens.danger
         blackoutButton.normalFaceColor = BBUIKitTokens.danger.withAlphaComponent(0.22)
         releaseButton.addAction(UIAction { [weak self] _ in self?.actions.perform("release_all") }, for: .touchUpInside)
@@ -257,6 +288,21 @@ private final class BBOverrideSurface: UIView, BBRemoteStateRendering {
             let id = self.energyFader.level.id
             if (self.currentState?.overrides.energy ?? "none") != id { self.actions.perform("set_energy", value: id) }
         }, for: .valueChanged)
+        fxSpeedFader.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            let id = self.fxSpeedFader.level.id
+            if (self.currentState?.overrides.fxSpeed?.mode ?? "auto") != id {
+                self.actions.perform("set_fx_speed", value: id)
+            }
+        }, for: .valueChanged)
+        masterDimmerFader.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.actions.queueMasterDimmer(self.masterDimmerFader.value)
+        }, for: .valueChanged)
+        masterDimmerFader.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.actions.commitMasterDimmer(self.masterDimmerFader.value)
+        }, for: [.touchUpInside, .touchUpOutside, .touchCancel])
         buildFixedLayout()
     }
 
@@ -265,26 +311,29 @@ private final class BBOverrideSurface: UIView, BBRemoteStateRendering {
     private func buildFixedLayout() {
         let bottomRight = UIStackView(arrangedSubviews: [effectsPanel, safetyPanel])
         bottomRight.axis = .vertical; bottomRight.spacing = BBUIKitTokens.panelGap
-        safetyPanel.heightAnchor.constraint(equalToConstant: 61).isActive = true
-        let bottom = UIStackView(arrangedSubviews: [phraseEnergyPanel, bottomRight])
+        safetyPanel.heightAnchor.constraint(equalToConstant: 82).isActive = true
+        let bottom = UIStackView(arrangedSubviews: [phraseMasterPanel, bottomRight])
         bottom.axis = .horizontal; bottom.spacing = BBUIKitTokens.panelGap
         let main = UIStackView(arrangedSubviews: [colorPanel, comboPanel, bottom])
         main.axis = .vertical; main.spacing = BBUIKitTokens.panelGap
         addSubview(main); main.bbPinEdges(to: self)
         NSLayoutConstraint.activate([
-            phraseEnergyPanel.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.225),
+            phraseMasterPanel.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.40),
             colorPanel.heightAnchor.constraint(equalTo: heightAnchor, multiplier: 0.265),
             comboPanel.heightAnchor.constraint(equalTo: heightAnchor, multiplier: 0.205),
         ])
 
-        let safety = UIStackView(arrangedSubviews: [releaseButton, blackoutButton])
+        let safety = UIStackView(arrangedSubviews: [
+            BBLabeledControl(label: "RELEASE ALL", control: releaseButton),
+            BBLabeledControl(label: "BLACKOUT", control: blackoutButton),
+        ])
         safety.axis = .horizontal; safety.spacing = BBUIKitTokens.controlGap; safety.distribution = .fillEqually
         safetyPanel.contentView.addSubview(safety); safety.bbPinEdges(to: safetyPanel.contentView)
     }
 
     func render(state: RemoteLiveStateV2) {
         currentState = state
-        let signature = (["auto"] + state.control.colors.map(\.id) + (state.control.colorCombinations ?? []).map(\.id) + state.control.phrases.map(\.id) + state.control.momentaryEffects.map(\.id) + state.control.cueShots.map(\.id)).joined(separator: "|")
+        let signature = (["auto"] + state.control.colors.map(\.id) + (state.control.colorCombinations ?? []).map(\.id) + state.control.phrases.map(\.id) + (state.control.fxSpeeds ?? []).map(\.id) + state.control.momentaryEffects.map(\.id) + state.control.cueShots.map(\.id)).joined(separator: "|")
         if signature != capabilitySignature { capabilitySignature = signature; rebuildCapabilityControls(state: state) }
 
         colorButtons.forEach { id, button in
@@ -293,17 +342,37 @@ private final class BBOverrideSurface: UIView, BBRemoteStateRendering {
         comboButtons.forEach { id, button in button.isIlluminated = state.overrides.colorCombo == id }
         phraseButtons.forEach { id, button in button.isIlluminated = id == "none" ? state.overrides.phrase == nil : state.overrides.phrase == id }
         holdButtons.forEach { id, button in button.isIlluminated = state.overrides.momentaryEffects.contains(id) || actions.isMomentaryEngaged(id) }
+        let smoke = state.smoke
+        smokeButton.isEnabled = smoke?.supported == true
+        smokeButton.alpha = smoke?.supported == true ? 1 : 0.55
+        smokeButton.isIlluminated = smoke?.active == true
+        smokeButton.accessibilityLabel = smoke?.supported == true ? "Hold smoke at \(smoke?.outputPercent ?? 0) percent" : (smoke?.reasonIfUnavailable ?? "Smoke unavailable")
+        if !smokeOutput.isTracking { smokeOutput.value = Float(smoke?.outputPercent ?? 50) }
+        smokeOutput.isEnabled = smoke?.supported == true
+        cueButtons.forEach { id, button in
+            let active = actions.isConnected ? state.overrides.oneShot : nil
+            let remaining = active.flatMap { $0.id == id ? 1 - $0.progress : nil }
+            button.setRemainingFraction(remaining)
+        }
         let level = BBVerticalEnergyFader.Level(rawValue: ["low": 1, "mid": 2, "high": 3][state.overrides.energy ?? ""] ?? 0) ?? .automatic
         if !energyFader.isTracking { energyFader.set(level: level, sendEvent: false) }
+        let fxMode = state.overrides.fxSpeed?.mode ?? "auto"
+        let fxLevel = BBVerticalFxSpeedFader.Level(rawValue: ["slow": 1, "mid": 2, "fast": 3][fxMode] ?? 0) ?? .automatic
+        if !fxSpeedFader.isTracking {
+            fxSpeedFader.set(level: fxLevel, resolved: state.overrides.fxSpeed?.resolved ?? "mid", sendEvent: false)
+        }
+        if !masterDimmerFader.isTracking {
+            masterDimmerFader.set(value: state.overrides.masterDimmer ?? 1, sendEvent: false)
+        }
         blackoutButton.isIlluminated = state.overrides.blackout
-        blackoutButton.setTitle(state.overrides.blackout ? "RELEASE BLACKOUT" : "BLACKOUT (HOLD)", for: .normal)
+        blackoutButton.accessibilityLabel = state.overrides.blackout ? "Release blackout" : "Blackout"
     }
 
     private func rebuildCapabilityControls(state: RemoteLiveStateV2) {
         colorButtons.removeAll(); comboButtons.removeAll(); phraseButtons.removeAll(); holdButtons.removeAll(); cueButtons.removeAll()
         colorPanel.contentView.subviews.forEach { $0.removeFromSuperview() }
         comboPanel.contentView.subviews.forEach { $0.removeFromSuperview() }
-        phraseEnergyPanel.contentView.subviews.forEach { $0.removeFromSuperview() }
+        phraseMasterPanel.contentView.subviews.forEach { $0.removeFromSuperview() }
         effectsPanel.contentView.subviews.forEach { $0.removeFromSuperview() }
 
         let colorOrder = ["auto", "red", "yellow", "green", "lime", "purple", "pink", "cyan", "orange", "blue", "white", "rainbow"]
@@ -311,12 +380,17 @@ private final class BBOverrideSurface: UIView, BBRemoteStateRendering {
         options["auto"] = "Auto"; options["rainbow"] = options["rainbow"] ?? "Rainbow"
         var colorPads: [UIView] = []
         for id in colorOrder {
-            let button = BBColorPad(title: (options[id] ?? id).uppercased(), color: bbColor(id == "auto" ? "gray" : id))
+            let label = (options[id] ?? id).uppercased()
+            let button = BBColorPad(color: bbColor(id == "auto" ? "gray" : id), accessibilityLabel: "Color \(label)")
             button.addAction(UIAction { [weak self] _ in self?.actions.perform("set_color", value: id == "auto" ? "none" : id) }, for: .touchUpInside)
-            colorButtons[id] = button; colorPads.append(button)
+            colorButtons[id] = button
+            colorPads.append(BBLabeledControl(label: label, control: button))
         }
         let grid = makeGrid(colorPads, columns: 6)
-        let colorsAndSmoke = UIStackView(arrangedSubviews: [grid, smokeButton])
+        let smokeStack = UIStackView(arrangedSubviews: [smokeButton, smokeOutput])
+        smokeStack.axis = .vertical; smokeStack.spacing = 5
+        let smokeControl = BBLabeledControl(label: "SMOKE HOLD", detail: "0–100%", control: smokeStack)
+        let colorsAndSmoke = UIStackView(arrangedSubviews: [grid, smokeControl])
         colorsAndSmoke.axis = .horizontal; colorsAndSmoke.spacing = BBUIKitTokens.controlGap
         smokeButton.widthAnchor.constraint(equalToConstant: 120).isActive = true
         colorPanel.contentView.addSubview(colorsAndSmoke); colorsAndSmoke.bbPinEdges(to: colorPanel.contentView)
@@ -324,48 +398,70 @@ private final class BBOverrideSurface: UIView, BBRemoteStateRendering {
         let combos = state.control.colorCombinations ?? []
         var comboPads: [UIView] = []
         for combo in combos {
-            let button = BBSplitColorComboPad(title: combo.label.uppercased(), first: bbColor(combo.colors.first ?? ""), second: bbColor(combo.colors.dropFirst().first ?? ""))
+            let button = BBSplitColorComboPad(first: bbColor(combo.colors.first ?? ""), second: bbColor(combo.colors.dropFirst().first ?? ""), accessibilityLabel: "Color combination \(combo.label)")
             button.isAvailable = combo.available
             if !combo.available { button.accessibilityLabel = "\(combo.label), \(combo.reasonIfUnavailable ?? "unavailable")" }
             button.addAction(UIAction { [weak self] _ in self?.actions.perform("set_color_combo", value: combo.id) }, for: .touchUpInside)
-            comboButtons[combo.id] = button; comboPads.append(button)
+            comboButtons[combo.id] = button
+            comboPads.append(BBLabeledControl(label: combo.label, control: button, compact: true))
         }
         let comboGrid = makeGrid(comboPads, columns: 8)
         comboPanel.contentView.addSubview(comboGrid); comboGrid.bbPinEdges(to: comboPanel.contentView)
 
         var phrasePads: [UIView] = []
-        let phraseAuto = BBHardwareButton(title: "AUTO", accessibilityLabel: "Automatic phrase")
+        let phraseAuto = BBHardwareButton(symbol: "waveform", accessibilityLabel: "Automatic phrase")
         phraseAuto.addAction(UIAction { [weak self] _ in self?.actions.perform("set_phrase", value: "none") }, for: .touchUpInside)
-        phraseButtons["none"] = phraseAuto; phrasePads.append(phraseAuto)
+        phraseButtons["none"] = phraseAuto
+        phrasePads.append(BBLabeledControl(label: "AUTO", control: phraseAuto, compact: true))
         for phrase in state.control.phrases {
-            let button = BBHardwareButton(title: phrase.label.uppercased(), accessibilityLabel: "Phrase \(phrase.label)")
+            let button = BBHardwareButton(symbol: bbPhraseSymbol(phrase.id), accessibilityLabel: "Phrase \(phrase.label)")
             button.addAction(UIAction { [weak self] _ in self?.actions.perform("set_phrase", value: phrase.id) }, for: .touchUpInside)
-            phraseButtons[phrase.id] = button; phrasePads.append(button)
+            phraseButtons[phrase.id] = button
+            phrasePads.append(BBLabeledControl(label: phrase.label, control: button, compact: true))
         }
         let phraseGrid = makeGrid(phrasePads, columns: 2)
-        let phraseEnergy = UIStackView(arrangedSubviews: [phraseGrid, energyFader])
-        phraseEnergy.axis = .horizontal; phraseEnergy.spacing = BBUIKitTokens.controlGap; phraseEnergy.distribution = .fill
-        energyFader.widthAnchor.constraint(equalToConstant: 128).isActive = true
-        phraseEnergyPanel.contentView.addSubview(phraseEnergy); phraseEnergy.bbPinEdges(to: phraseEnergyPanel.contentView)
+        let phraseColumn = UIStackView(arrangedSubviews: [BBSectionHeader("PHRASE"), phraseGrid])
+        phraseColumn.axis = .vertical; phraseColumn.spacing = BBUIKitTokens.compactGap
+        phraseColumn.widthAnchor.constraint(equalToConstant: 142).isActive = true
+
+        let faders = UIStackView(arrangedSubviews: [
+            BBLabeledControl(label: "ENERGY", control: energyFader, compact: true),
+            BBLabeledControl(label: "FX SPEED", control: fxSpeedFader, compact: true),
+            BBLabeledControl(label: "MASTER DIMMER", control: masterDimmerFader, compact: true),
+        ])
+        faders.axis = .horizontal; faders.spacing = BBUIKitTokens.controlGap; faders.distribution = .fillEqually
+        let masterBank = UIStackView(arrangedSubviews: [BBSectionHeader("MASTER CONTROL"), faders])
+        masterBank.axis = .vertical; masterBank.spacing = BBUIKitTokens.compactGap
+        let phraseAndMaster = UIStackView(arrangedSubviews: [phraseColumn, masterBank])
+        phraseAndMaster.axis = .horizontal; phraseAndMaster.spacing = BBUIKitTokens.controlGap
+        phraseAndMaster.distribution = .fill
+        phraseMasterPanel.contentView.addSubview(phraseAndMaster)
+        phraseAndMaster.bbPinEdges(to: phraseMasterPanel.contentView)
 
         let holds = state.control.momentaryEffects.map { effect -> UIView in
             if effect.isAvailable {
-                let button = BBHardwareButton(title: effect.label.uppercased(), accessibilityLabel: "Hold \(effect.label)")
-                button.addAction(UIAction { [weak self] _ in self?.actions.beginMomentary(effect.id) }, for: .touchDown)
-                button.addAction(UIAction { [weak self] _ in self?.actions.endMomentary(effect.id) }, for: [.touchUpInside, .touchUpOutside, .touchCancel])
+                let button = BBHardwareButton(symbol: bbEffectSymbol(effect.id), accessibilityLabel: "Hold \(effect.label)")
+                button.addAction(UIAction { [weak self, weak button] _ in
+                    button?.isIlluminated = true
+                    self?.actions.beginMomentary(effect.id)
+                }, for: .touchDown)
+                button.addAction(UIAction { [weak self, weak button] _ in
+                    button?.isIlluminated = false
+                    self?.actions.endMomentary(effect.id)
+                }, for: [.touchUpInside, .touchUpOutside, .touchCancel])
                 holdButtons[effect.id] = button
-                return button
+                return BBLabeledControl(label: effect.label, control: button)
             }
-            let unavailable = BBHardwareButton(title: "\(effect.label.uppercased())\nUNAVAILABLE")
+            let unavailable = BBHardwareButton(symbol: bbEffectSymbol(effect.id), accessibilityLabel: "\(effect.label), unavailable")
             unavailable.isEnabled = false
-            return unavailable
+            return BBLabeledControl(label: effect.label, detail: "UNAVAILABLE", control: unavailable)
         }
         let cues = state.control.cueShots.map { effect -> UIView in
-            let button = BBHardwareButton(title: effect.label.uppercased(), accessibilityLabel: "One-shot \(effect.label)")
+            let button = BBOneShotProgressButton(symbol: bbEffectSymbol(effect.id), accessibilityLabel: "One-shot \(effect.label)")
             button.isEnabled = effect.isAvailable
             button.addAction(UIAction { [weak self] _ in self?.actions.perform("trigger_cue", value: effect.id) }, for: .touchUpInside)
             cueButtons[effect.id] = button
-            return button
+            return BBLabeledControl(label: effect.label, detail: effect.isAvailable ? nil : "UNAVAILABLE", control: button)
         }
         let holdGrid = makeGrid(holds, columns: max(1, holds.count))
         let cueGrid = makeGrid(cues, columns: max(1, cues.count))
@@ -545,11 +641,14 @@ private final class BBStatusSurface: UIView, BBRemoteStateRendering {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     private func buildLayout() {
-        let reconnect = BBHardwareButton(title: "RECONNECT", accessibilityLabel: "Reconnect to BeatBeam")
-        let qr = BBHardwareButton(title: "SCAN QR / RE-PAIR", accessibilityLabel: "Scan QR or pair again")
+        let reconnect = BBHardwareButton(symbol: "arrow.clockwise", accessibilityLabel: "Reconnect to BeatBeam")
+        let qr = BBHardwareButton(symbol: "qrcode.viewfinder", accessibilityLabel: "Scan QR or pair again")
         reconnect.addAction(UIAction { [weak self] _ in self?.actions.reconnect() }, for: .touchUpInside)
         qr.addAction(UIAction { [weak self] _ in self?.actions.scanQR() }, for: .touchUpInside)
-        let actionsRow = UIStackView(arrangedSubviews: [reconnect, qr]); actionsRow.axis = .horizontal; actionsRow.spacing = BBUIKitTokens.controlGap; actionsRow.distribution = .fillEqually
+        let actionsRow = UIStackView(arrangedSubviews: [
+            BBLabeledControl(label: "RECONNECT", control: reconnect),
+            BBLabeledControl(label: "SCAN QR / RE-PAIR", control: qr),
+        ]); actionsRow.axis = .horizontal; actionsRow.spacing = BBUIKitTokens.controlGap; actionsRow.distribution = .fillEqually
         let connection = UIStackView(arrangedSubviews: [stateValue, hostValue, protocolValue, serverStatus, pairingStatus, actionsRow]); connection.axis = .vertical; connection.spacing = 10; connection.distribution = .fillEqually
         connectionPanel.contentView.addSubview(connection); connection.bbPinEdges(to: connectionPanel.contentView)
 
@@ -620,31 +719,38 @@ private final class BBSettingsSurface: UIView, BBRemoteStateRendering {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     private func buildLayout() {
-        let reconnect = BBHardwareButton(title: "RECONNECT NOW", accessibilityLabel: "Reconnect now")
-        let pairingButton = BBHardwareButton(title: "PAIR / SCAN QR", accessibilityLabel: "Pair or scan QR")
+        let reconnect = BBHardwareButton(symbol: "arrow.clockwise", accessibilityLabel: "Reconnect now")
+        let pairingButton = BBHardwareButton(symbol: "qrcode.viewfinder", accessibilityLabel: "Pair or scan QR")
         reconnect.addAction(UIAction { [weak self] _ in self?.actions.reconnect() }, for: .touchUpInside)
         pairingButton.addAction(UIAction { [weak self] _ in self?.actions.showPairing() }, for: .touchUpInside)
-        let connectionActions = UIStackView(arrangedSubviews: [reconnect, pairingButton]); connectionActions.axis = .horizontal; connectionActions.spacing = BBUIKitTokens.controlGap; connectionActions.distribution = .fillEqually
-        connectionActions.heightAnchor.constraint(equalToConstant: 62).isActive = true
+        let connectionActions = UIStackView(arrangedSubviews: [
+            BBLabeledControl(label: "RECONNECT NOW", control: reconnect),
+            BBLabeledControl(label: "PAIR / SCAN QR", control: pairingButton),
+        ]); connectionActions.axis = .horizontal; connectionActions.spacing = BBUIKitTokens.controlGap; connectionActions.distribution = .fillEqually
+        connectionActions.heightAnchor.constraint(equalToConstant: 70).isActive = true
         let connectionStates = UIStackView(arrangedSubviews: [host, keepAwake, connection, pairing]); connectionStates.axis = .vertical; connectionStates.spacing = 10; connectionStates.distribution = .fillEqually
         let connectionStack = UIStackView(arrangedSubviews: [connectionStates, connectionActions]); connectionStack.axis = .vertical; connectionStack.spacing = 10
         connectionPanel.contentView.addSubview(connectionStack); connectionStack.bbPinEdges(to: connectionPanel.contentView)
 
-        let forget = BBHardwareButton(title: "FORGET THIS PAIRING", accessibilityLabel: "Forget this pairing")
+        let forget = BBHardwareButton(symbol: "trash", accessibilityLabel: "Forget this pairing")
         forget.activeColor = BBUIKitTokens.danger; forget.normalFaceColor = BBUIKitTokens.danger.withAlphaComponent(0.20)
         forget.addAction(UIAction { [weak self] _ in self?.confirmForget() }, for: .touchUpInside)
-        forget.heightAnchor.constraint(equalToConstant: 62).isActive = true
+        let forgetControl = BBLabeledControl(label: "FORGET THIS PAIRING", control: forget)
+        forgetControl.heightAnchor.constraint(equalToConstant: 70).isActive = true
         let remoteStates = UIStackView(arrangedSubviews: [appVersion, protocolVersion, server, scope, compatibility]); remoteStates.axis = .vertical; remoteStates.spacing = 10; remoteStates.distribution = .fillEqually
-        let remote = UIStackView(arrangedSubviews: [remoteStates, forget]); remote.axis = .vertical; remote.spacing = 10
+        let remote = UIStackView(arrangedSubviews: [remoteStates, forgetControl]); remote.axis = .vertical; remote.spacing = 10
         remotePanel.contentView.addSubview(remote); remote.bbPinEdges(to: remotePanel.contentView)
 
-        let baseline = BBHardwareButton(title: "REVERT TO BASELINE", accessibilityLabel: "Revert production to Baseline")
-        let dynamic = BBHardwareButton(title: "ENABLE DYNAMIC COMPOSER", accessibilityLabel: "Enable Dynamic Composer")
+        let baseline = BBHardwareButton(symbol: "arrow.uturn.backward.circle", accessibilityLabel: "Revert production to Baseline")
+        let dynamic = BBHardwareButton(symbol: "cube.transparent", accessibilityLabel: "Enable Dynamic Composer")
         dynamic.activeColor = BBUIKitTokens.accent
         baseline.addAction(UIAction { [weak self] _ in self?.confirmProduction(title: "Revert to Baseline?", message: "The physical frame returns to the established baseline show. Transport is unchanged.", actionTitle: "Revert", action: "revert_baseline", destructive: true) }, for: .touchUpInside)
         dynamic.addAction(UIAction { [weak self] _ in self?.confirmProduction(title: "Enable Dynamic Composer?", message: "Enable Dynamic Composer deliberately for the current production show.", actionTitle: "Enable Dynamic", action: "enable_dynamic_composer", destructive: false) }, for: .touchUpInside)
-        let productionActions = UIStackView(arrangedSubviews: [baseline, dynamic]); productionActions.axis = .vertical; productionActions.spacing = BBUIKitTokens.controlGap; productionActions.distribution = .fillEqually
-        productionActions.heightAnchor.constraint(equalToConstant: 125).isActive = true
+        let productionActions = UIStackView(arrangedSubviews: [
+            BBLabeledControl(label: "REVERT TO BASELINE", control: baseline),
+            BBLabeledControl(label: "ENABLE DYNAMIC COMPOSER", control: dynamic),
+        ]); productionActions.axis = .vertical; productionActions.spacing = BBUIKitTokens.controlGap; productionActions.distribution = .fillEqually
+        productionActions.heightAnchor.constraint(equalToConstant: 145).isActive = true
         let productionStates = UIStackView(arrangedSubviews: [currentMode, frameSource, composerEligibility, fallback, baselineAvailable]); productionStates.axis = .vertical; productionStates.spacing = 10; productionStates.distribution = .fillEqually
         let production = UIStackView(arrangedSubviews: [productionStates, productionActions]); production.axis = .vertical; production.spacing = 10
         productionPanel.contentView.addSubview(production); production.bbPinEdges(to: productionPanel.contentView)
@@ -703,3 +809,32 @@ private func makeGrid(_ views: [UIView], columns: Int) -> UIStackView {
 private func bbProductionLabel(_ value: String) -> String { value == "DYNAMIC_COMPOSER_ENABLED" ? "DYNAMIC COMPOSER" : "BASELINE" }
 private func bbFrameLabel(_ value: String) -> String { value == "dynamic_composer" ? "DYNAMIC COMPOSER" : "BASELINE" }
 private func bbTimestamp(_ milliseconds: Int?) -> String { guard let milliseconds else { return "—" }; return String(format: "%d:%02d", milliseconds / 60_000, (milliseconds / 1_000) % 60) }
+
+private func bbPhraseSymbol(_ id: String) -> String {
+    switch id.lowercased() {
+    case "intro": return "play.fill"
+    case "verse": return "text.line.first.and.arrowtriangle.forward"
+    case "build": return "chart.line.uptrend.xyaxis"
+    case "chorus": return "waveform.path.ecg"
+    case "drop": return "arrow.down.to.line.compact"
+    case "down": return "chart.line.downtrend.xyaxis"
+    case "break": return "pause.fill"
+    case "outro": return "stop.fill"
+    default: return "waveform"
+    }
+}
+
+private func bbEffectSymbol(_ id: String) -> String {
+    switch id.lowercased() {
+    case "manual_strobe", "all_on": return "sun.max.fill"
+    case "audience_sweep": return "arcade.stick.console"
+    case "par_chase", "par_chase_burst": return "arrow.right.to.line.compact"
+    case "par_snake": return "waveform.path"
+    case "audience_riser": return "chart.bar.fill"
+    case "white_hit": return "sparkle"
+    case "color_burst": return "circle.hexagongrid.fill"
+    case "snap_fan": return "fanblades.fill"
+    case "mirror_bounce": return "arrow.up.left.and.arrow.down.right"
+    default: return "bolt.fill"
+    }
+}

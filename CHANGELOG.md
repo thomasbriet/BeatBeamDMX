@@ -18,6 +18,7 @@
 - Een fabrikant-gebaseerd 8ch fixtureprofiel voor BeamZ BLAZE Series
   160.538 / 160.540 / 160.542 (manual V1.1), met veilige Fog/Macro-defaults,
   native RGBA-maxima en zonder fictief White-kanaal.
+- Direct USB-transport voor BeatBeam Remote via een managed `iproxy`/usbmuxd-bridge, met bounded NDJSON handshake, heartbeats, acknowledgements en stale-state bescherming.
 
 ### Changed
 - Rich Musical Events moduleren de continuous Dynamic Composer-state tijdelijk; zonder current RME blijft de composer actief en valt de Preview Map niet meer terug op de complete baseline-scène.
@@ -31,6 +32,7 @@
 - Manual Color Combos gebruiken nu een stabiele kleurcapabele A/B-partitie die
   alleen op authoritative beat-parity wisselt, bij stale transport bevriest en
   bij verse authority zonder vrije timer hervat.
+- BeatBeam Remote geeft USB voorrang, valt automatisch terug op LAN/Wi-Fi en reacquireert USB zonder pairing of app-herstart; USB-loss geeft alleen USB-owned momentary leases veilig vrij.
 
 ## [1.2.0-wishlist]
 

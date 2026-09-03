@@ -35,7 +35,7 @@ let healthy = """
   "decks": [{ "number": 1, "loaded": true, "title": "Track", "artist": "Artist", "playing": true, "master": true, "active": true, "analysis_readiness": "READY", "prewarm_readiness": "READY" }],
   "musical_state": { "section": "chorus", "section_progress": 0.5, "relative_energy": 0.8, "energy_trajectory": "rising", "recurrence": 0.2, "material_context": null, "current_rme": null, "event_envelope": { "active": false, "phase": null, "progress": null, "event_type": null }, "effective_intensity": 0.8, "analyzed_intensity": 0.7, "live_intensity_valid": true },
   "dmx": { "connected": true, "device_name": "DMX", "renderer_healthy": true, "renderer_active": true, "frame_sequence": 10, "last_error": null, "dispatch_failures": 0, "rendered_output_available": true, "physical_output_available": true },
-  "fixtures": [], "output": { "rendered_available": true, "physical_output_available": true, "blackout": false, "frame_sequence": 10, "fixtures": [{"id":"par","label":"PAR","role":"par","active":true,"dimmer":200,"red":120,"green":30,"blue":10,"white":0,"strobe":0,"pan":null,"tilt":null}] }, "overrides": { "any_active": false, "phrase": null, "energy": null, "color": null, "color_combo": null, "momentary_effects": [], "blackout": false, "automatic": true }, "control": { "scope": "LIVE_CONTROL", "colors": [{"id":"red","label":"Red"}], "color_combinations": [{"id":"blue_orange","label":"Blue / Orange","colors":["blue","orange"],"available":true,"reason_if_unavailable":null}], "phrases": [], "energies": [], "momentary_effects": [], "cue_shots": [], "momentary_lease_seconds": 3 }, "warnings": [], "future_additive_field": "ignored"
+  "fixtures": [], "output": { "rendered_available": true, "physical_output_available": true, "blackout": false, "frame_sequence": 10, "fixtures": [{"id":"par","label":"PAR","role":"par","active":true,"dimmer":200,"red":120,"green":30,"blue":10,"white":0,"strobe":0,"pan":null,"tilt":null}] }, "overrides": { "any_active": false, "phrase": null, "energy": null, "color": null, "color_combo": null, "momentary_effects": [], "one_shot": null, "fx_speed":{"mode":"auto","resolved":"mid"}, "master_dimmer":0.75, "blackout": false, "automatic": true }, "control": { "scope": "LIVE_CONTROL", "colors": [{"id":"red","label":"Red"}], "color_combinations": [{"id":"blue_orange","label":"Blue / Orange","colors":["blue","orange"],"available":true,"reason_if_unavailable":null}], "phrases": [], "energies": [], "fx_speeds":[{"id":"auto","label":"Auto"},{"id":"slow","label":"Slow"},{"id":"mid","label":"Mid"},{"id":"fast","label":"Fast"}], "momentary_effects": [], "cue_shots": [], "momentary_lease_seconds": 3 }, "warnings": [], "future_additive_field": "ignored"
 }
 """
 
@@ -49,6 +49,15 @@ struct RemoteLiveStateV2ContractTests {
             require(full.stateRevision == 10, "revision")
             require(full.dmx.renderedOutputAvailable == true, "rendered output availability")
             require(full.output?.fixtures.first?.red == 120, "authoritative output fixture")
+            require(full.overrides.fxSpeed?.mode == "auto" && full.overrides.fxSpeed?.resolved == "mid", "FX Speed state")
+            require(full.overrides.masterDimmer == 0.75, "Master Dimmer state")
+            require(full.control.fxSpeeds?.map(\.id) == ["auto", "slow", "mid", "fast"], "FX Speed capabilities")
+
+            let oldServer = healthy
+                .replacingOccurrences(of: ", \"fx_speed\":{\"mode\":\"auto\",\"resolved\":\"mid\"}, \"master_dimmer\":0.75", with: "")
+                .replacingOccurrences(of: ", \"fx_speeds\":[{\"id\":\"auto\",\"label\":\"Auto\"},{\"id\":\"slow\",\"label\":\"Slow\"},{\"id\":\"mid\",\"label\":\"Mid\"},{\"id\":\"fast\",\"label\":\"Fast\"}]", with: "")
+            let compatibleOldServer = try decode(oldServer)
+            require(compatibleOldServer.overrides.fxSpeed == nil && compatibleOldServer.overrides.masterDimmer == nil, "missing additive controls remain compatible")
 
             let fallback = try decode(healthy.replacingOccurrences(of: "\"dynamic_composer\", \"preview_source\": \"dynamic_composer\", \"fallback_active\": false, \"fallback_reason\": null", with: "\"existing_autoshow\", \"preview_source\": \"baseline\", \"fallback_active\": true, \"fallback_reason\": \"transport_stale\""))
             require(fallback.show.fallbackActive, "fallback active")
@@ -70,6 +79,11 @@ struct RemoteLiveStateV2ContractTests {
             let combo = try decode(healthy.replacingOccurrences(of: "\"color_combo\": null", with: "\"color_combo\": \"blue_orange\""))
             require(combo.overrides.colorCombo == "blue_orange", "manual combo override")
             require(combo.control.colorCombinations?.first?.colors == ["blue", "orange"], "manual combo capability")
+
+            let oneShot = try decode(healthy.replacingOccurrences(of: "\"one_shot\": null", with: "\"one_shot\": {\"id\":\"white_hit\",\"label\":\"White Hit\",\"duration_beats\":4,\"progress\":0.5,\"remaining_beats\":2,\"fx_speed\":\"fast\"}"))
+            require(oneShot.overrides.oneShot?.id == "white_hit", "authoritative one-shot id")
+            require(oneShot.overrides.oneShot?.remainingBeats == 2, "authoritative one-shot remaining beats")
+            require(oneShot.overrides.oneShot?.fxSpeed == "fast", "activation FX speed")
 
             let unavailable = try decode(healthy.replacingOccurrences(of: "\"readiness\": \"READY\"", with: "\"readiness\": \"UNAVAILABLE\""))
             require(unavailable.track.readiness == "UNAVAILABLE", "SongAnalyzer unavailable")
