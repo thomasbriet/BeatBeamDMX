@@ -19,6 +19,35 @@ DYNAMIC_COMPOSER_MODE = "DYNAMIC_COMPOSER"
 GROUP_NAMES = ("moving", "par", "wash", "static")
 INTERVAL_EVENT_TYPES = frozenset({"BUILD", "BREAK"})
 COMPOSITION_HISTORY_CAPACITY = 6
+COMPOSITION_COMPATIBILITY_CLASSES = frozenset({
+    "LOW", "MODERATE", "RISING", "HIGH", "IMPACT", "RELEASE",
+})
+
+
+def composition_compatibility_class(state, event_type=None, composition_history=None):
+    """Return one small, deterministic musical eligibility class.
+
+    This deliberately describes the current musical role rather than a named
+    effect.  History may therefore preserve a useful identity within a role,
+    but cannot promote a quiet break choice into an unrelated chorus or
+    release merely because the material recurs.
+    """
+    event = str(event_type or "").upper()
+    if event in {"DROP", "STRONG_ARRIVAL"}:
+        return "IMPACT"
+    if event == "BUILD":
+        return "RISING"
+    if event == "BREAK":
+        return "LOW"
+    energy = state.relative_energy
+    if energy < .30:
+        return "LOW"
+    if isinstance(composition_history, CompositionHistory) \
+            and composition_history.release_follow_through_for(state):
+        return "RELEASE"
+    if energy >= .72:
+        return "HIGH"
+    return "MODERATE"
 
 
 @dataclass(frozen=True)
@@ -195,20 +224,35 @@ class CompositionHistory:
         self._context = None
         self._recent = []
         self._by_observation = {}
+        self._impact_observation_id = None
 
     def reset(self, context=None):
         self._context = context
         self._recent = []
         self._by_observation = {}
+        self._impact_observation_id = None
 
-    def select(self, state, candidates, context=None):
+    def release_follow_through_for(self, state):
+        """Keep one musically compatible post-impact section eligible.
+
+        This is section-owned, not a wall-clock latch: a quiet destination
+        section still resolves LOW before this method is consulted.
+        """
+        return self._impact_observation_id == state.observation_id
+
+    def select(self, state, candidates, context=None, compatibility_class="MODERATE"):
         if context != self._context:
             self.reset(context)
-        cached = self._by_observation.get(state.observation_id)
+        compatibility_class = str(compatibility_class or "MODERATE").upper()
+        if compatibility_class not in COMPOSITION_COMPATIBILITY_CLASSES:
+            compatibility_class = "MODERATE"
+        observation_key = (state.observation_id, compatibility_class)
+        cached = self._by_observation.get(observation_key)
         if cached is not None:
             return cached["primitives"], cached["signature"], {
                 "selection": "retained", "history_size": len(self._recent),
                 "repeat_classification": "RETAINED_SEEK_REPLAY",
+                "compatibility_class": compatibility_class,
                 "avoided_components": [],
             }
         # Een terugkerende sectie mag een leesbare eerdere identiteit hernemen.
@@ -218,10 +262,14 @@ class CompositionHistory:
             repeat_classification = "NEW_MATERIAL"
             avoided_components = []
         else:
-            recent_keys = {entry["signature"].key() for entry in self._recent}
-            last_key = self._recent[-1]["signature"].key()
+            compatible_recent = [
+                entry for entry in self._recent
+                if entry.get("compatibility_class") == compatibility_class
+            ]
+            recent_keys = {entry["signature"].key() for entry in compatible_recent}
+            last_key = compatible_recent[-1]["signature"].key() if compatible_recent else None
             reusable = next((
-                entry for entry in reversed(self._recent[:-1])
+                entry for entry in reversed(compatible_recent[:-1])
                 if entry["signature"].key() != last_key
             ), None) if state.recurrence_strength is not None \
                 and state.recurrence_strength >= .70 else None
@@ -235,7 +283,8 @@ class CompositionHistory:
                 pool = fresh or candidates
                 selected = min(pool, key=self._recency_score)
                 selection = "anti_repeat_alternative" if fresh else "continuity_reuse"
-                repeated = self._same_components(selected["signature"], self._recent[-1]["signature"])
+                previous = compatible_recent[-1]["signature"] if compatible_recent else None
+                repeated = self._same_components(selected["signature"], previous) if previous else []
                 avoided_components = self._avoidable_components(pool, selected)
                 if len(repeated) >= 6:
                     repeat_classification = "NEAR_REPEAT" if fresh else "CAPABILITY_LIMITED"
@@ -243,14 +292,21 @@ class CompositionHistory:
                     repeat_classification = "COMPONENT_VARIATION"
                 else:
                     repeat_classification = "NEW_MATERIAL"
-        entry = {"primitives": selected["primitives"], "signature": selected["signature"]}
-        self._by_observation[state.observation_id] = entry
+        entry = {
+            "primitives": selected["primitives"],
+            "signature": selected["signature"],
+            "compatibility_class": compatibility_class,
+        }
+        self._by_observation[observation_key] = entry
         self._recent.append(entry)
         if len(self._recent) > self.capacity:
             self._recent.pop(0)
+        if compatibility_class == "IMPACT":
+            self._impact_observation_id = state.observation_id
         return entry["primitives"], entry["signature"], {
             "selection": selection, "history_size": len(self._recent),
             "repeat_classification": repeat_classification,
+            "compatibility_class": compatibility_class,
             "avoided_components": avoided_components,
         }
 
@@ -355,25 +411,31 @@ def compose_dynamic_preview(base_show, continuous_state, rme_context=None, event
     if event_envelope is not None and not isinstance(event_envelope, MusicalEventEnvelope):
         return None
 
-    groups, primitives, signature, variation = _continuous_composition(
-        continuous_state, composition_history, lifecycle_context
-    )
     event_type = None
     progress = None
     envelope_payload = None
-    # Een point-envelope neemt tijdelijk de intervalmodifier over. Daarmee wordt
-    # een BUILD + RELEASE/DROP-boundary niet dubbel opgeteld; de continuous
-    # musical state blijft in alle gevallen de onderliggende backbone.
     if event_envelope is not None:
         event_type = event_envelope.event_type
         progress = event_envelope.progress
         envelope_payload = event_envelope.as_dict()
-        groups, primitives = _event_envelope_modulation(groups, primitives, event_envelope)
     else:
         event = rme_context.get("current_rme") if isinstance(rme_context, dict) and rme_context.get("valid") is True else None
         if isinstance(event, dict) and event.get("type") in INTERVAL_EVENT_TYPES:
             event_type = event["type"]
             progress = _unit(rme_context.get("rme_progress"), 0.0)
+    compatibility_class = composition_compatibility_class(
+        continuous_state, event_type, composition_history
+    )
+    groups, primitives, signature, variation = _continuous_composition(
+        continuous_state, composition_history, lifecycle_context, compatibility_class
+    )
+    # Een point-envelope neemt tijdelijk de intervalmodifier over. Daarmee wordt
+    # een BUILD + RELEASE/DROP-boundary niet dubbel opgeteld; de continuous
+    # musical state blijft in alle gevallen de onderliggende backbone.
+    if event_envelope is not None:
+        groups, primitives = _event_envelope_modulation(groups, primitives, event_envelope)
+    else:
+        if event_type in INTERVAL_EVENT_TYPES:
             groups, primitives = _event_modulation(groups, primitives, event_type, progress)
 
     groups = _live_intensity_modulation(groups, live_intensity)
@@ -388,6 +450,7 @@ def compose_dynamic_preview(base_show, continuous_state, rme_context=None, event
         "selected_primitives": primitives,
         "composition_signature": signature.as_dict(),
         "variation": variation,
+        "compatibility_class": compatibility_class,
         "changed_dimensions": _changed_dimensions(event_type),
         "live_intensity": dict(live_intensity or {}),
     }
@@ -412,7 +475,8 @@ def _track_namespace(lifecycle_context):
     return "|".join(str(value) for value in lifecycle_context[:2]) or "preview"
 
 
-def _continuous_composition(state, composition_history=None, lifecycle_context=None):
+def _continuous_composition(state, composition_history=None, lifecycle_context=None,
+                            compatibility_class="MODERATE"):
     energy = state.relative_energy
     trajectory = state.energy_trajectory if state.energy_trajectory is not None else 0.0
     recurrence = state.recurrence_strength if state.recurrence_strength is not None else 0.0
@@ -445,30 +509,55 @@ def _continuous_composition(state, composition_history=None, lifecycle_context=N
     static = FixtureGroupIntent(.28 + .44 * energy, .18 + .62 * energy, 0, 0, 0, "base", .08 + .24 * energy, .04 + .20 * energy)
 
     track_namespace = _track_namespace(lifecycle_context)
-    if energy < .34:
+    if compatibility_class == "LOW":
         motions = ("break_soft_blue_center", "break_slow_pulse_circle")
         palettes = ("cobalt_amber", "purple_gold", "blue_amber")
         pulses = ("breathe", "soft_pulse")
-        washes = ("center_glow_blue", "blue_white_split")
+        washes = ("center_glow_blue", "wash_wave_forward", "wash_color_wipe")
         dimmers = ("static_reduced", "beat_pulse", "half_bar_gate", "alternate_a_b")
         color_animations = ("all_same", "group_split", "swap_on_2_bars")
         partitions = ("wash_foundation", "par_wash", "alternating_groups", "all_groups")
         complexity = "low"
+    elif compatibility_class == "RISING":
+        motions = ("build_rising_sweep", "build_audience_wave", "build_narrow_to_wide_fan", "floor_forward_sweep", "floor_forward_cannon", "fan_3d")
+        palettes = ("amber_teal", "teal_orange", "violet_lime")
+        pulses = ("soft_pulse", "strong_pulse")
+        washes = ("wash_center_out", "wash_build_fill", "wash_ripple")
+        dimmers = ("bar_gate", "stair_up", "wave_forward", "in_to_out")
+        color_animations = ("chase_color", "swap_on_bar", "event_accent")
+        partitions = ("moving_lead", "moving_par", "call_response", "alternating_groups")
+        complexity = "high"
+    elif compatibility_class in {"HIGH", "IMPACT", "RELEASE"}:
+        motions = (
+            "fast_audience_circle", "fast_audience_sweep", "fast_audience_figure_8", "sweep_arc",
+            "full_sphere_explode", "full_sphere_cannon", "dome_sweep_3d", "forward_rear_arc",
+            "cross_3d", "volumetric_orbit", "volumetric_figure_8", "energy_scatter", "fan_3d",
+            "rear_hold_split",
+        )
+        palettes = ("amber_teal", "teal_orange", "magenta_cyan", "violet_lime", "pink_blue", "ruby_lime")
+        pulses = ("soft_pulse", "strong_pulse")
+        washes = ("wash_mirror_chase", "wash_opposing_wave", "wash_call_response", "wash_color_wipe")
+        dimmers = ("bar_gate", "alternate_left_right", "chase_forward", "chase_reverse",
+                   "out_to_in", "in_to_out", "wave_forward", "wave_reverse", "stair_up",
+                   "stair_down", "burst_all", "burst_alternate", "syncopated_pulse")
+        color_animations = ("group_split", "alternate", "chase_color", "swap_on_bar", "event_accent")
+        partitions = ("all_groups", "moving_lead", "par_lead", "moving_par", "alternating_groups", "call_response")
+        complexity = "high"
     elif energy < .68:
         motions = ("sweep_narrow", "sweep_mid", "sweep_arc")
         palettes = ("cobalt_amber", "amber_teal", "rose_mint", "ruby_lime", "purple_gold")
         pulses = ("soft_pulse", "breathe")
-        washes = ("blue_white_split", "center_glow_blue")
+        washes = ("wash_chase_forward", "wash_zone_alternate", "wash_call_response", "wash_wave_forward")
         dimmers = ("beat_pulse", "half_bar_gate", "bar_gate", "alternate_a_b",
                    "chase_forward", "chase_reverse", "wave_forward", "stair_up")
         color_animations = ("group_split", "alternate", "swap_on_bar", "chase_color")
         partitions = ("all_groups", "moving_lead", "par_lead", "moving_par", "par_wash", "call_response")
         complexity = "medium"
     else:
-        motions = ("sweep_mid", "sweep_wide", "fast_audience_circle")
+        motions = ("sweep_mid", "sweep_wide", "fast_audience_circle", "full_sphere_explode", "dome_sweep_3d", "fan_3d")
         palettes = ("amber_teal", "teal_orange", "magenta_cyan", "violet_lime", "pink_blue", "ruby_lime")
         pulses = ("soft_pulse", "strong_pulse")
-        washes = ("blue_white_split", "center_out_build")
+        washes = ("wash_drop_explosion", "wash_cannon", "wash_cross_ripple", "wash_zone_hits")
         dimmers = ("bar_gate", "alternate_left_right", "chase_forward", "chase_reverse",
                    "out_to_in", "in_to_out", "wave_forward", "wave_reverse", "stair_up",
                    "stair_down", "burst_all", "burst_alternate", "syncopated_pulse")
@@ -528,11 +617,16 @@ def _continuous_composition(state, composition_history=None, lifecycle_context=N
         )
         candidates.append({"order": order, "primitives": primitives, "signature": signature})
     if isinstance(composition_history, CompositionHistory):
-        primitives, signature, variation = composition_history.select(state, candidates, lifecycle_context)
+        primitives, signature, variation = composition_history.select(
+            state, candidates, lifecycle_context, compatibility_class
+        )
     else:
         selected = candidates[0]
         primitives, signature = selected["primitives"], selected["signature"]
-        variation = {"selection": "new", "history_size": 0}
+        variation = {
+            "selection": "new", "history_size": 0,
+            "compatibility_class": compatibility_class,
+        }
     groups = {"moving": moving, "par": par, "wash": wash_intent, "static": static}
     partition = signature.fixture_partition
     groups = _apply_fixture_partition(groups, partition)
@@ -616,7 +710,7 @@ def _event_modulation(groups, base_primitives, event_type, progress):
         groups["par"] = _adjust(groups["par"], activity=.14*ramp, intensity=.18*ramp, color=.22*ramp, pulse=.24*ramp, accent=.24*ramp, palette="tension")
         groups["wash"] = _adjust(groups["wash"], activity=.12*ramp, intensity=.14*ramp, color=.16*ramp, pulse=.12*ramp, accent=.18*ramp, palette="tension")
         primitives = _event_primitive_set(base_primitives, {
-            "moving": {"movement_pattern": "build_fastening_circle", "pulse": "lift", "palette": "amber_teal"},
+            "moving": {"movement_pattern": "build_rising_sweep", "pulse": "lift", "palette": "amber_teal"},
             "par": {"pulse": "lift", "palette": "amber_teal"},
             "wash": {"palette": "amber_teal", "wash_cue": "center_out_build"},
         })
@@ -636,14 +730,23 @@ def _event_envelope_modulation(groups, base_primitives, envelope):
     """Leg één bounded point-eventaccent boven de bestaande backbone."""
     groups = dict(groups)
     strength = envelope.strength
-    if envelope.event_type == "ARRIVAL":
+    if envelope.event_type == "STRONG_ARRIVAL":
+        groups["moving"] = _adjust(groups["moving"], activity=.25*strength, intensity=.24*strength, movement=.24*strength, speed=.28*strength, color=.28*strength, pulse=.32*strength, accent=.46*strength, palette="release")
+        groups["par"] = _adjust(groups["par"], activity=.26*strength, intensity=.24*strength, color=.28*strength, pulse=.32*strength, accent=.48*strength, palette="release")
+        groups["wash"] = _adjust(groups["wash"], activity=.18*strength, intensity=.16*strength, color=.22*strength, pulse=.18*strength, accent=.28*strength, palette="release")
+        primitives = _event_primitive_set(base_primitives, {
+            "moving": {"movement_pattern": "full_sphere_explode", "pulse": "strong_pulse", "palette": "amber_teal"},
+            "par": {"pulse": "strong_pulse", "palette": "amber_teal"},
+            "wash": {"palette": "amber_teal", "wash_cue": "center_out_build"},
+        })
+    elif envelope.event_type == "ARRIVAL":
         # Duidelijker dan de normale release, maar aantoonbaar onder DROP:
         # geen strobe-route, geen nieuwe primitives en dezelfde 2-bar settle.
         groups["moving"] = _adjust(groups["moving"], activity=.20*strength, intensity=.18*strength, movement=.18*strength, speed=.16*strength, color=.26*strength, pulse=.28*strength, accent=.36*strength, palette="release")
         groups["par"] = _adjust(groups["par"], activity=.22*strength, intensity=.20*strength, color=.28*strength, pulse=.30*strength, accent=.38*strength, palette="release")
         groups["wash"] = _adjust(groups["wash"], activity=.14*strength, intensity=.13*strength, color=.20*strength, pulse=.14*strength, accent=.22*strength, palette="release")
         primitives = _event_primitive_set(base_primitives, {
-            "moving": {"movement_pattern": "sweep_mid", "pulse": "soft_pulse", "palette": "cobalt_amber"},
+            "moving": {"movement_pattern": "sweep_arc", "pulse": "soft_pulse", "palette": "cobalt_amber"},
             "par": {"pulse": "soft_pulse", "palette": "cobalt_amber"},
             "wash": {"palette": "cobalt_amber", "wash_cue": "blue_white_split"},
         })
@@ -652,7 +755,7 @@ def _event_envelope_modulation(groups, base_primitives, envelope):
         groups["par"] = _adjust(groups["par"], activity=.30*strength, intensity=.30*strength, color=.28*strength, pulse=.40*strength, accent=.56*strength, palette="impact")
         groups["wash"] = _adjust(groups["wash"], activity=.22*strength, intensity=.22*strength, color=.20*strength, pulse=.24*strength, accent=.40*strength, palette="impact")
         primitives = _event_primitive_set(base_primitives, {
-            "moving": {"movement_pattern": "drop_fast_circle_white", "pulse": "hit", "palette": "ice_fire"},
+            "moving": {"movement_pattern": "floor_hold_explode", "pulse": "hit", "palette": "ice_fire"},
             "par": {"pulse": "hit", "palette": "ice_fire"},
             "wash": {"palette": "ice_fire", "wash_cue": "white_pixel_hits"},
         })
@@ -661,7 +764,7 @@ def _event_envelope_modulation(groups, base_primitives, envelope):
         groups["par"] = _adjust(groups["par"], activity=.10*strength, intensity=.10*strength, color=.08*strength, pulse=.10*strength, accent=.14*strength, palette="release")
         groups["wash"] = _adjust(groups["wash"], activity=.08*strength, intensity=.08*strength, color=.06*strength, pulse=.08*strength, accent=.10*strength, palette="release")
         primitives = _event_primitive_set(base_primitives, {
-            "moving": {"movement_pattern": "sweep_mid", "pulse": "soft_pulse", "palette": "cobalt_amber"},
+            "moving": {"movement_pattern": "forward_rear_arc", "pulse": "soft_pulse", "palette": "cobalt_amber"},
             "par": {"pulse": "soft_pulse", "palette": "cobalt_amber"},
             "wash": {"palette": "cobalt_amber", "wash_cue": "blue_white_split"},
         })
@@ -690,7 +793,7 @@ def _changed_dimensions(event_type):
     continuous = ("fixture_activity", "intensity", "movement", "movement_speed", "color_change_rate", "palette", "pulse")
     if event_type == "DROP":
         return continuous + ("accent", "event_envelope", "rme_modifier")
-    if event_type in {"ARRIVAL", "RELEASE", "TRANSITION", "FILL"}:
+    if event_type in {"ARRIVAL", "STRONG_ARRIVAL", "RELEASE", "TRANSITION", "FILL"}:
         return continuous + ("event_envelope", "rme_modifier")
     if event_type in INTERVAL_EVENT_TYPES:
         return continuous + ("rme_modifier",)

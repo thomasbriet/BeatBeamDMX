@@ -24,7 +24,7 @@ def fixture_state(*, mode="DYNAMIC_COMPOSER_ENABLED", source="dynamic_composer",
         },
         "dmx": {
             "connected": connected, "port": "/dev/cu.usbserial-test", "error": None,
-            "production_show_mode": mode, "blackout_active": blackout,
+            "production_show_mode": mode, "blackout_active": blackout, "master_dimmer": .75,
             "renderer_health": {"active": True, "healthy": renderer_healthy,
                                 "error": None if renderer_healthy else "renderer fault",
                                 "render_frame_sequence": 42},
@@ -48,6 +48,7 @@ def fixture_state(*, mode="DYNAMIC_COMPOSER_ENABLED", source="dynamic_composer",
             },
             "auto_show": {
                 "energy": .72, "movement": .45, "override_active": override,
+                "fx_speed_mode": "auto", "fx_speed_resolved": "mid",
                 "override_phrase": "none", "override_energy": "none", "override_color": "none", "override_color_combo": "none",
                 "override_manual_strobe": False, "override_audience_sweep": False,
                 "override_all_on": False, "override_par_chase": False, "override_par_snake": False,
@@ -99,6 +100,9 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         self.assertIn({"id": "rainbow", "label": "Rainbow"}, payload["control"]["colors"])
         self.assertEqual(16, len(payload["control"]["color_combinations"]))
         self.assertTrue(all(combo["available"] for combo in payload["control"]["color_combinations"]))
+        self.assertEqual({"mode": "auto", "resolved": "mid"}, payload["overrides"]["fx_speed"])
+        self.assertEqual(.75, payload["overrides"]["master_dimmer"])
+        self.assertEqual(["auto", "slow", "mid", "fast"], [item["id"] for item in payload["control"]["fx_speeds"]])
         self.assertEqual(
             {"red_blue", "red_yellow", "red_white", "green_blue", "green_purple", "green_white", "blue_yellow", "purple_white"},
             {combo["id"] for combo in payload["control"]["color_combinations"][-8:]},
@@ -131,6 +135,26 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         self.assertIsNone(payload["overrides"]["color"])
         self.assertEqual("blue_orange", payload["overrides"]["color_combo"])
         self.assertTrue(payload["overrides"]["any_active"])
+
+    def test_active_one_shot_projects_existing_authoritative_beat_envelope_read_only(self):
+        state = fixture_state(override=True)
+        state["dmx"]["auto_show"].update({
+            "one_shot_active": True,
+            "one_shot_cue": "mirror_bounce",
+            "one_shot_duration_beats": 16.0,
+            "one_shot_fx_speed": "slow",
+            "one_shot_progress": .375,
+        })
+        one_shot = self.project(state)["overrides"]["one_shot"]
+        self.assertEqual("mirror_bounce", one_shot["id"])
+        self.assertEqual("Mirror Bounce", one_shot["label"])
+        self.assertEqual(16.0, one_shot["duration_beats"])
+        self.assertEqual("slow", one_shot["fx_speed"])
+        self.assertAlmostEqual(.375, one_shot["progress"])
+        self.assertAlmostEqual(10.0, one_shot["remaining_beats"])
+
+        state["dmx"]["auto_show"]["one_shot_active"] = False
+        self.assertIsNone(self.project(state)["overrides"]["one_shot"])
 
     def test_revision_changes_only_when_authoritative_projection_changes(self):
         state = fixture_state()
@@ -209,6 +233,21 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
                             and fixture["red"] == 0 and fixture["green"] == 0 and fixture["blue"] == 0
                             for fixture in blackout["fixtures"]))
 
+    def test_output_preview_preserves_authoritative_zero_on_native_dimmers(self):
+        state = fixture_state(connected=False)
+        state["dmx"]["master_dimmer"] = 0.0
+        for channel in (6, 21, 31, 39):
+            state["dmx"]["rendered_final_values"][channel] = 0
+
+        fixtures = {
+            fixture["id"]: fixture
+            for fixture in self.project(state)["output"]["fixtures"]
+        }
+
+        for fixture_id in ("moving", "moving_2", "par", "par_2"):
+            self.assertEqual(0, fixtures[fixture_id]["dimmer"])
+        self.assertGreater(fixtures["moving"]["red"], 0)
+
     def test_blackout_remains_authoritative_while_remote_state_exposes_it_separately(self):
         state = fixture_state(blackout=True)
         payload = self.project(state)
@@ -264,6 +303,7 @@ class RemoteLiveControlTests(unittest.TestCase):
         self.config = beatbeam_app.REMOTE_ACCESS_CONFIG
         self.dmx = beatbeam_app.DMX
         self.leases = dict(beatbeam_app.REMOTE_MOMENTARY_LEASES)
+        self.smoke_lease = beatbeam_app.REMOTE_SMOKE_HOLD_LEASE
         self.results = dict(beatbeam_app.REMOTE_CONTROL_RESULTS)
         beatbeam_app.REMOTE_ACCESS_CONFIG = {"remote_credentials": {
             "control-token": {"scope": "REMOTE_READ", "scopes": ["REMOTE_READ", "LIVE_CONTROL"], "client_id": "ipad-a"},
@@ -276,8 +316,10 @@ class RemoteLiveControlTests(unittest.TestCase):
             def blackout(self): self.calls.append(("blackout",))
             def trigger_one_shot_cue(self, cue): self.calls.append(("cue", cue))
             def set_production_show_mode(self, mode): self.calls.append(("mode", mode))
+            def start_manual_smoke_hold(self): self.calls.append(("smoke_start",))
+            def release_manual_smoke(self, reason): self.calls.append(("smoke_release", reason))
         beatbeam_app.DMX = FakeDmx()
-        beatbeam_app.REMOTE_MOMENTARY_LEASES.clear(); beatbeam_app.REMOTE_CONTROL_RESULTS.clear()
+        beatbeam_app.REMOTE_MOMENTARY_LEASES.clear(); beatbeam_app.REMOTE_SMOKE_HOLD_LEASE = None; beatbeam_app.REMOTE_CONTROL_RESULTS.clear()
         self.state = {"state_revision": 7, "event_sequence": 7, "overrides": {}}
         self.patcher = patch("beatbeam_app.remote_live_state_v2", return_value=self.state)
         self.patcher.start()
@@ -285,6 +327,7 @@ class RemoteLiveControlTests(unittest.TestCase):
     def tearDown(self):
         self.patcher.stop(); beatbeam_app.REMOTE_ACCESS_CONFIG = self.config; beatbeam_app.DMX = self.dmx
         beatbeam_app.REMOTE_MOMENTARY_LEASES.clear(); beatbeam_app.REMOTE_MOMENTARY_LEASES.update(self.leases)
+        beatbeam_app.REMOTE_SMOKE_HOLD_LEASE = self.smoke_lease
         beatbeam_app.REMOTE_CONTROL_RESULTS.clear(); beatbeam_app.REMOTE_CONTROL_RESULTS.update(self.results)
 
     def command(self, action, value=None, command_id="command-1", **extra):
@@ -319,9 +362,20 @@ class RemoteLiveControlTests(unittest.TestCase):
         self.assertEqual("none", beatbeam_app.DMX.calls[-1][1]["auto_show"]["override_color_combo"])
         self.assertFalse(self.command_as("read-token", "set_color_combo", "blue_orange", command_id="read")["accepted"])
 
+    def test_every_color_combo_uses_the_existing_authoritative_live_control_route(self):
+        for index, combo_id in enumerate(beatbeam_app.MANUAL_COLOR_COMBOS):
+            with self.subTest(combo=combo_id):
+                result = self.command("set_color_combo", combo_id, command_id=f"combo-{index}")
+                self.assertTrue(result["accepted"])
+                update = beatbeam_app.DMX.calls[-1][1]["auto_show"]
+                self.assertEqual(combo_id, update["override_color_combo"])
+                self.assertEqual("none", update["override_color"])
+
     def test_phrase_energy_cue_release_all_blackout_and_modes_are_bounded(self):
         self.assertTrue(self.command("set_phrase", "chorus", command_id="phrase")["accepted"])
         self.assertTrue(self.command("set_energy", "high", command_id="energy")["accepted"])
+        self.assertTrue(self.command("set_fx_speed", "slow", command_id="fx-speed")["accepted"])
+        self.assertTrue(self.command("set_master_dimmer", ".35", command_id="master")["accepted"])
         self.assertTrue(self.command("trigger_cue", "white_hit", command_id="cue")["accepted"])
         self.assertTrue(self.command("blackout_on", command_id="blackout")["accepted"])
         self.assertTrue(self.command("blackout_off", command_id="unblackout")["accepted"])
@@ -330,6 +384,33 @@ class RemoteLiveControlTests(unittest.TestCase):
         self.assertTrue(self.command("release_all", command_id="release")["accepted"])
         self.assertIn(("cue", "white_hit"), beatbeam_app.DMX.calls)
         self.assertIn(("blackout",), beatbeam_app.DMX.calls)
+        self.assertEqual(.35, next(
+            payload["master_dimmer"] for kind, payload in beatbeam_app.DMX.calls
+            if kind == "update" and "master_dimmer" in payload
+        ))
+
+    def test_smoke_hold_is_leased_and_release_all_forces_safe_release(self):
+        started = self.command("smoke_hold_start", command_id="smoke-start")
+        self.assertTrue(started["accepted"])
+        lease_id = started["momentary_lease"]["lease_id"]
+        self.assertIn(("smoke_start",), beatbeam_app.DMX.calls)
+        renewed = self.command("smoke_hold_renew", command_id="smoke-renew", lease_id=lease_id)
+        self.assertTrue(renewed["accepted"])
+        self.assertTrue(self.command("release_all", command_id="smoke-release-all")["accepted"])
+        self.assertIn(("smoke_release", "release_all"), beatbeam_app.DMX.calls)
+
+    def test_fx_speed_and_master_dimmer_commands_are_validated_and_no_dmx_gated(self):
+        for index, mode in enumerate(("auto", "slow", "mid", "fast")):
+            result = self.command("set_fx_speed", mode, command_id=f"fx-{index}")
+            self.assertTrue(result["accepted"])
+            self.assertEqual(mode, beatbeam_app.DMX.config["auto_show"]["override_fx_speed"])
+        self.assertFalse(self.command("set_fx_speed", "turbo", command_id="fx-bad")["accepted"])
+
+        self.assertTrue(self.command("set_master_dimmer", "-1", command_id="master-low")["accepted"])
+        self.assertEqual(0.0, beatbeam_app.DMX.config["master_dimmer"])
+        self.assertTrue(self.command("set_master_dimmer", "2", command_id="master-high")["accepted"])
+        self.assertEqual(1.0, beatbeam_app.DMX.config["master_dimmer"])
+        self.assertFalse(self.command("set_master_dimmer", "nan", command_id="master-nan")["accepted"])
 
     def test_momentary_lease_is_client_owned_and_expiry_releases(self):
         press = self.command("momentary_press", "par_chase", command_id="press")

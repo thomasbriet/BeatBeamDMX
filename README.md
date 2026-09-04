@@ -75,7 +75,7 @@ De buildscript ondersteunt aparte `release` en `beta` varianten.
 ```bash
 cd /Users/thomasbriet/BeatBeamDMX
 ./build_native_app.sh release
-open "dist-native-app/BeatBeam DMX.app"
+./deploy_release_app.sh
 ```
 
 - appnaam: `BeatBeam DMX`
@@ -83,18 +83,26 @@ open "dist-native-app/BeatBeam DMX.app"
 - OSC-poort: `4461`
 - versie: `1.1.0`
 
+De release-installer houdt precies één publieke app op
+`/Applications/BeatBeam DMX.app` en hoogstens één rollback buiten Applications
+in `~/Library/Application Support/BeatBeam/Backups/BeatBeam DMX Previous.app`.
+
 ### Beta build
 
 ```bash
 cd /Users/thomasbriet/BeatBeamDMX
 ./build_native_app.sh beta
-open "dist-native-app/BeatBeam DMX Beta.app"
+./deploy_beta_app.sh
 ```
 
 - appnaam: `BeatBeam DMX Beta`
 - backendpoort: `8781`
 - OSC-poort: `4462`
 - versie: `1.2.0-beta`
+
+De installer houdt precies één publieke app op `/Applications/BeatBeam DMX Beta.app`
+en hoogstens één rollback buiten Applications in
+`~/Library/Application Support/BeatBeam/Backups/BeatBeam DMX Beta Previous.app`.
 
 ### Beide bouwen
 

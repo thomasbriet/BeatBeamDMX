@@ -346,6 +346,9 @@
       "model": "LED Wash 7x12W RGBW Moving Head Lighting",
       "pan_range": 540,
       "tilt_range": 180,
+      "physical_tilt_min_deg": -90.0,
+      "physical_tilt_center_deg": 0.0,
+      "physical_tilt_max_deg": 90.0,
       "beam_layout": {
         "type": "rings",
         "beams_by_ring": [1, 6]

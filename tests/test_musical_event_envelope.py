@@ -110,6 +110,33 @@ class MusicalEventEnvelopeTests(unittest.TestCase):
             self.assertLess(arrived["fixture_group_intents"]["par"][field],
                             dropped["fixture_group_intents"]["par"][field])
 
+    def test_calling_high_energy_arrivals_project_as_strong_release_without_bar_rule(self):
+        for bar, origin, destination, contrast in ((81, .347, .964, .309), (145, .398, .898, .301)):
+            source = projection("ARRIVAL")
+            event = source["rich_musical_events"]["events"][0]
+            event["start_bar"] = bar
+            event["character_context"] = {
+                "origin_relative_energy": origin,
+                "destination_relative_energy": destination,
+                "entry_contrast": contrast,
+            }
+            envelope, reason = project_musical_event_envelope(source, playback(10.0, bar, 1))
+            self.assertEqual("active", reason)
+            self.assertEqual("STRONG_ARRIVAL", envelope.event_type)
+            composition = compose_dynamic_preview(base_show(), self.state(), self.context(source, 10.0), envelope)
+            self.assertEqual("full_sphere_explode", composition["selected_primitives"]["moving"]["movement_pattern"])
+
+    def test_ordinary_or_quiet_arrival_is_not_promoted_to_strong_release(self):
+        source = projection("ARRIVAL")
+        source["rich_musical_events"]["events"][0]["character_context"] = {
+            "origin_relative_energy": .91,
+            "destination_relative_energy": .22,
+            "entry_contrast": .31,
+        }
+        envelope, reason = project_musical_event_envelope(source, playback())
+        self.assertEqual("active", reason)
+        self.assertEqual("ARRIVAL", envelope.event_type)
+
     def test_future_fill_is_bounded_accent_without_raw_strobe_or_fixture_output(self):
         source = projection("FILL")
         envelope, _ = project_musical_event_envelope(source, playback())

@@ -24,8 +24,9 @@ class StructureSourceUiTests(unittest.TestCase):
     def test_advanced_diagnostics_is_part_of_the_primary_information_architecture(self):
         native = (ROOT / "native" / "BeatBeamDMXApp.swift").read_text(encoding="utf-8")
         live_show = (ROOT / "native" / "LiveShowUX.swift").read_text(encoding="utf-8")
-        for title in ('case live = "Live Show"', 'case preview = "Preview"',
-                      'case manual = "Manual"', 'case advanced = "Advanced"'):
+        for title in ('case live = "Live Show"', 'case preview = "Stage Map"',
+                      'case autoShow = "Auto Show"', 'case manual = "Manual"',
+                      'case advanced = "Advanced"'):
             self.assertIn(title, native)
         self.assertIn('LiveShowWorkspaceView()', native)
         self.assertIn('AdvancedOperationsWorkspaceView(', native)

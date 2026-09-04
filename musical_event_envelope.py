@@ -11,10 +11,11 @@ import math
 import numbers
 
 
-POINT_ENVELOPE_EVENT_TYPES = frozenset({"ARRIVAL", "DROP", "RELEASE", "TRANSITION", "FILL"})
+POINT_ENVELOPE_EVENT_TYPES = frozenset({"ARRIVAL", "STRONG_ARRIVAL", "DROP", "RELEASE", "TRANSITION", "FILL"})
 _ENVELOPE_SPECS = {
     # total/attack/impact zijn muzikale beats; settle vult het restant.
     "ARRIVAL": (8.0, 0.25, 0.75),
+    "STRONG_ARRIVAL": (8.0, 0.25, 0.75),
     "DROP": (6.0, 0.25, 0.75),
     "RELEASE": (8.0, 0.0, 0.50),
     "TRANSITION": (8.0, 0.25, 0.75),
@@ -25,6 +26,26 @@ _ENVELOPE_SPECS = {
 # ARRIVAL en DROP). Per boundary is precies één envelope toegestaan; deze kleine
 # semantische voorrang voorkomt stacking en houdt DROP duidelijker dan ARRIVAL.
 _BOUNDARY_PRIORITY = {"DROP": 4, "FILL": 3, "RELEASE": 2, "ARRIVAL": 1, "TRANSITION": 0}
+
+
+def is_strong_arrival_event(event):
+    """Promote only evidenced Arrival boundaries, never every chorus/arrival.
+
+    SongAnalyzer already supplies the directional evidence in the handoff.  The
+    thresholds retain ordinary arrivals and genuine breaks as distinct musical
+    concepts while exposing a high-value release opportunity to production.
+    """
+    if not isinstance(event, dict) or event.get("type") != "ARRIVAL":
+        return False
+    context = event.get("character_context")
+    if not isinstance(context, dict):
+        return False
+    destination = _number(context.get("destination_relative_energy"))
+    origin = _number(context.get("origin_relative_energy"))
+    contrast = _number(context.get("entry_contrast"))
+    if destination is None or origin is None or contrast is None:
+        return False
+    return destination >= .72 and (destination - origin) >= .18 and contrast >= .24
 
 
 def _number(value):
@@ -125,8 +146,9 @@ def project_musical_event_envelope(projection, playback):
     if beats >= total:
         return None, "complete_or_no_point_event"
     phase, strength = _phase_and_strength(beats, total, attack, impact)
+    event_type = "STRONG_ARRIVAL" if is_strong_arrival_event(event) else event["type"]
     return MusicalEventEnvelope(
-        event_type=event["type"],
+        event_type=event_type,
         phase=phase,
         progress=_unit(beats / total),
         strength=strength,

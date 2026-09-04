@@ -7,10 +7,11 @@ from dynamic_composer import (
     DIMMER_ANIMATION_MOTIFS,
     DYNAMIC_COMPOSER_MODE,
     FixtureGroupIntent,
+    composition_compatibility_class,
     compose_dynamic_preview,
     project_continuous_musical_state,
 )
-from musical_event_envelope import project_musical_event_envelope
+from musical_event_envelope import MusicalEventEnvelope, project_musical_event_envelope
 from rme_preview import apply_dynamic_composer_preview, preview_rme_context
 
 
@@ -114,7 +115,7 @@ class DynamicComposerTests(unittest.TestCase):
                                backbone["fixture_group_intents"][group]["intensity"])
             self.assertLess(start["fixture_group_intents"][group]["intensity"], middle["fixture_group_intents"][group]["intensity"])
             self.assertLess(middle["fixture_group_intents"][group]["intensity"], end["fixture_group_intents"][group]["intensity"])
-        self.assertEqual("build_fastening_circle", end["selected_primitives"]["moving"]["movement_pattern"])
+        self.assertEqual("build_rising_sweep", end["selected_primitives"]["moving"]["movement_pattern"])
 
     def test_break_reduces_backbone_and_drop_is_bounded_accent(self):
         state = self.state()
@@ -200,6 +201,53 @@ class DynamicComposerTests(unittest.TestCase):
         self.assertEqual("recurrence_reuse", reused["variation"]["selection"])
         self.assertEqual("new", reset["variation"]["selection"])
         self.assertEqual(1, reset["variation"]["history_size"])
+
+    def test_history_never_reuses_low_break_material_for_high_energy_context(self):
+        history = CompositionHistory()
+        low = ContinuousMusicalState("break", 0, 30, .5, .16, -.2, .8, .4)
+        high = ContinuousMusicalState("chorus", 30, 60, .5, .91, .3, .9, .9)
+        low_show = compose_dynamic_preview(base_show(), low, self.context(), composition_history=history,
+                                           lifecycle_context=("virtualdj", "track", 1))
+        high_show = compose_dynamic_preview(base_show(), high, self.context(), composition_history=history,
+                                            lifecycle_context=("virtualdj", "track", 1))
+        self.assertIn(low_show["selected_primitives"]["moving"]["movement_pattern"], {
+            "break_soft_blue_center", "break_slow_pulse_circle",
+        })
+        self.assertEqual("LOW", low_show["compatibility_class"])
+        self.assertEqual("HIGH", high_show["compatibility_class"])
+        self.assertIn(high_show["selected_primitives"]["moving"]["movement_pattern"], {
+            "fast_audience_circle", "fast_audience_sweep", "fast_audience_figure_8", "sweep_arc",
+            "full_sphere_explode", "full_sphere_cannon", "dome_sweep_3d", "forward_rear_arc",
+            "cross_3d", "volumetric_orbit", "volumetric_figure_8", "energy_scatter", "fan_3d", "rear_hold_split",
+        })
+        self.assertNotEqual("recurrence_reuse", high_show["variation"]["selection"])
+
+    def test_impact_follow_through_is_high_only_while_destination_energy_supports_it(self):
+        history = CompositionHistory()
+        release = ContinuousMusicalState("post-drop", 30, 60, .1, .78, .2, .8, .8)
+        drop = MusicalEventEnvelope("DROP", "IMPACT", .05, 1.0, .3, 6.0, "bar")
+        accented = compose_dynamic_preview(base_show(), release, self.context(), drop,
+                                            composition_history=history,
+                                            lifecycle_context=("virtualdj", "track", 1))
+        followed = compose_dynamic_preview(base_show(), release, self.context(), None,
+                                            composition_history=history,
+                                            lifecycle_context=("virtualdj", "track", 1))
+        quiet = ContinuousMusicalState("real-break", 60, 90, .1, .18, -.3, .8, .5)
+        rested = compose_dynamic_preview(base_show(), quiet, self.context(), None,
+                                          composition_history=history,
+                                          lifecycle_context=("virtualdj", "track", 1))
+        self.assertEqual("IMPACT", accented["compatibility_class"])
+        self.assertEqual("floor_hold_explode", accented["selected_primitives"]["moving"]["movement_pattern"])
+        self.assertEqual("RELEASE", followed["compatibility_class"])
+        self.assertIn(followed["selected_primitives"]["moving"]["movement_pattern"], {
+            "fast_audience_circle", "fast_audience_sweep", "fast_audience_figure_8", "sweep_arc",
+            "full_sphere_explode", "full_sphere_cannon", "dome_sweep_3d", "forward_rear_arc",
+            "cross_3d", "volumetric_orbit", "volumetric_figure_8", "energy_scatter", "fan_3d", "rear_hold_split",
+        })
+        self.assertEqual("LOW", composition_compatibility_class(quiet, None, history))
+        self.assertIn(rested["selected_primitives"]["moving"]["movement_pattern"], {
+            "break_soft_blue_center", "break_slow_pulse_circle",
+        })
 
     def test_v2_component_history_avoids_immediate_perceptual_repeats(self):
         history = CompositionHistory(capacity=6)

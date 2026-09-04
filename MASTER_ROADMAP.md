@@ -107,6 +107,24 @@ productstappen zijn human usabilityreview en later expliciete installer/update/
 service-productization. Library-wide status/batch blijft HOLD totdat VirtualDJ
 een officiële veilige arbitrary-trackroute biedt.
 
+## Native SongAnalyzer Hot MyLists scope
+
+De automatische voorbereidingsscope is begrensd tot de native VirtualDJ
+MyLists-hiërarchie onder de exact benoemde List Folder `SongAnalyzer Hot`.
+De bridge leest read-only de native `order`-entry, het corresponderende
+`.vdjfolder`-XML en uitsluitend de verklaarde `.subfolders`-kinderen. De
+recursieve canonical-path-union dedupliceert tracks, voorkomt cycles en laat
+onverwante MyLists, database/library-scans en root-legacy-M3U’s buiten scope.
+Een child-`order`-entry kan een finale VirtualDJ UI-metadata-suffix bevatten;
+de parser bewaart de raw entry, verwijdert uitsluitend bewezen metadata vóór
+child-assetresolutie en behandelt onbekende suffixen of ambiguïteit fail-closed.
+Ontbrekende root is een gezonde lege set; malformed lijsten en ontbrekende
+audio worden veilig overgeslagen. Current analyses blijven behouden en worden
+hergebruikt; stale, unknown en eerdere failed resultaten gaan alleen via de
+bestaande bounded queue. Verwijderen of verplaatsen uit de tree wist geen
+analyse. Dit verandert geen User1/User2-statussemantiek, native plugin polling
+of BeatBeam. Reële VirtualDJ bediening blijft `HOLD_USER_HOT_MYLISTS_ACCEPTANCE`.
+
 ## Historical planning snapshot — superseded as active backlog
 
 De secties `# 1` tot en met `# 11` hieronder zijn een behouden snapshot van

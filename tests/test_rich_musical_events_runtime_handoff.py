@@ -29,7 +29,16 @@ def rich_event_payload():
             "start_bar": 1,
             "origin_observation_id": "raw-section-0000-0004",
             "structural_context": {},
-            "character_context": {},
+            "character_context": {
+                "origin_relative_energy": 0.31,
+                "destination_relative_energy": 0.84,
+                "energy_trajectory": 0.53,
+                "energy_direction": 0.53,
+                "onset_direction": 0.42,
+                "silence_direction": -0.27,
+                "entry_contrast": 0.48,
+                "boundary_novelty": 0.61,
+            },
             "provenance": {
                 "source_category": "software_independent_structure_character",
                 "derivation": "direct",
@@ -75,6 +84,8 @@ class RichMusicalEventsRuntimeHandoffTests(unittest.TestCase):
         self.assertEqual(1, debug["rich_musical_events"]["event_count"])
         self.assertEqual(("SECTION_START",), tuple(debug["rich_musical_events"]["event_types"]))
         self.assertEqual("SHADOW_ONLY", debug["rich_musical_events"]["observation"]["mode"])
+        self.assertEqual(0.84, debug["rich_musical_events"]["events"][0]["character_context"]["destination_relative_energy"])
+        self.assertEqual(0.48, debug["rich_musical_events"]["events"][0]["character_context"]["entry_contrast"])
 
     def test_rich_event_presence_cannot_change_production_projection(self):
         baseline = self.project(structure_payload(include_rich_events=False), include_rich_events=False)

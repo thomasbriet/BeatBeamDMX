@@ -2,6 +2,7 @@
 import argparse
 import atexit
 import colorsys
+import hashlib
 import json
 import math
 import mimetypes
@@ -16,10 +17,12 @@ import time
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import Enum
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
+from types import MappingProxyType
+from typing import Mapping, Optional
 from urllib.parse import parse_qs, urlparse
 
 from enttec_open_dmx import (
@@ -98,6 +101,2201 @@ DEFAULT_MANUAL_PHRASE = "verse"
 PLAYBACK_STATE_SCHEMA_VERSION = 1
 PLAYBACK_CLOCK_GRACE_SECONDS = 1.0
 PLAYBACK_STATIONARY_TOLERANCE_MS = 45.0
+
+
+@dataclass(frozen=True)
+class VenuePoint:
+    """One point in normalized, global DJ-centric Venue Space.
+
+    ``z`` is deliberately optional.  A top-down map can author x/y, but may
+    not silently invent a vertical reference for physical tilt targeting.
+    """
+
+    x: float
+    y: float
+    z: Optional[float] = None
+
+    def __post_init__(self):
+        if not (-1.0 <= self.x <= 1.0 and -1.0 <= self.y <= 1.0):
+            raise ValueError("venue coordinates must be normalized to -1...1")
+        if self.z is not None and (not math.isfinite(float(self.z)) or not -1.0 <= self.z <= 1.0):
+            raise ValueError("venue height must be normalized to -1...1 when supplied")
+
+    def as_dict(self):
+        result = {"x": self.x, "y": self.y}
+        if self.z is not None:
+            result["z"] = self.z
+        return result
+
+
+@dataclass(frozen=True)
+class VenueVector3:
+    """A direction in Venue Space (x right, y audience, z physically up)."""
+
+    x: float
+    y: float
+    z: float
+
+    def as_dict(self):
+        return {"x": self.x, "y": self.y, "z": self.z}
+
+
+@dataclass(frozen=True)
+class VenuePhysicalPoint:
+    """One authoritative point in DJ-centric physical venue metres."""
+
+    x: float
+    y: float
+    z: float
+
+    def __post_init__(self):
+        if not all(math.isfinite(float(value)) for value in (self.x, self.y, self.z)):
+            raise ValueError("physical venue coordinates must be finite")
+
+    def as_dict(self):
+        return {"x": self.x, "y": self.y, "z": self.z}
+
+
+@dataclass(frozen=True)
+class VenueGeometry:
+    """Persisted physical scale; every field is intentionally unset by default."""
+
+    width_m: Optional[float] = None
+    forward_depth_m: Optional[float] = None
+    rear_depth_m: Optional[float] = None
+    audience_target_height_m: Optional[float] = None
+    ceiling_height_m: Optional[float] = None
+
+    def as_dict(self):
+        return {
+            "venue_width_m": self.width_m,
+            "venue_forward_depth_m": self.forward_depth_m,
+            "venue_rear_depth_m": self.rear_depth_m,
+            "audience_target_height_m": self.audience_target_height_m,
+            "ceiling_height_m": self.ceiling_height_m,
+        }
+
+
+class VenueTargetVerticalLayer(str, Enum):
+    FLOOR = "FLOOR"
+    NORMAL = "NORMAL"
+    CEILING = "CEILING"
+
+
+def canonical_venue_target_vertical_layer(value, default=VenueTargetVerticalLayer.NORMAL):
+    value = default if value is None else value
+    if isinstance(value, VenueTargetVerticalLayer):
+        return value
+    raw = str(value).strip().upper()
+    try:
+        return VenueTargetVerticalLayer(raw)
+    except ValueError:
+        return None
+
+
+VENUE_TARGETS = {
+    "AUDIENCE_NEAR_LEFT": VenuePoint(-0.65, 0.20),
+    "AUDIENCE_NEAR_CENTER": VenuePoint(0.0, 0.20),
+    "AUDIENCE_NEAR_RIGHT": VenuePoint(0.65, 0.20),
+    "AUDIENCE_MID_LEFT": VenuePoint(-0.65, 0.55),
+    "AUDIENCE_MID_CENTER": VenuePoint(0.0, 0.55),
+    "AUDIENCE_MID_RIGHT": VenuePoint(0.65, 0.55),
+    "AUDIENCE_FAR_LEFT": VenuePoint(-0.65, 0.90),
+    "AUDIENCE_FAR_CENTER": VenuePoint(0.0, 0.90),
+    "AUDIENCE_FAR_RIGHT": VenuePoint(0.65, 0.90),
+    "REAR_LEFT": VenuePoint(-0.65, -1.00),
+    "REAR_CENTER": VenuePoint(0.0, -1.00),
+    "REAR_RIGHT": VenuePoint(0.65, -1.00),
+}
+VENUE_TARGET_ALIASES = {
+    "AUDIENCE_LEFT": "AUDIENCE_MID_LEFT",
+    "AUDIENCE_CENTER": "AUDIENCE_MID_CENTER",
+    "AUDIENCE_RIGHT": "AUDIENCE_MID_RIGHT",
+}
+VENUE_TARGET_RESOLVER_HOLD = "MISSING_FIXTURE_CALIBRATION"
+VENUE_TARGET_TEST_LEASE_SECONDS = 5.0
+KINEMATIC_CALIBRATION_VERSION = 1
+KINEMATIC_REQUIRED_ANCHORS = (
+    "AUDIENCE_MID_CENTER",
+    "AUDIENCE_FAR_LEFT",
+    "AUDIENCE_NEAR_CENTER",
+)
+KINEMATIC_VALIDATION_TARGET = "AUDIENCE_FAR_RIGHT"
+KINEMATIC_MINIMUM_PAN_SPREAD_DEGREES = 5.0
+KINEMATIC_MINIMUM_TILT_SPREAD_DEGREES = 3.0
+KINEMATIC_MAXIMUM_RESIDUAL_RATIO = 0.025
+AXIS_MAPPING_V2_VERSION = 2
+AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS = (0.0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1.0)
+AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
+AXIS_MAPPING_V2_VALIDATION_TARGETS = (
+    "AUDIENCE_NEAR_CENTER",
+    "AUDIENCE_MID_LEFT",
+    "AUDIENCE_FAR_RIGHT",
+)
+AXIS_MAPPING_V2_DEFAULT_PAN_SWEEP_TILT_PLANE_DEGREES = -10.0
+AXIS_MAPPING_V2_PAN_SWEEP_TILT_PLANE_OPTIONS = (0.0, -10.0, -20.0)
+
+
+def canonical_venue_target_id(value, default=None):
+    raw = str(value or default or "").strip().upper()
+    canonical = VENUE_TARGET_ALIASES.get(raw, raw)
+    return canonical if canonical in VENUE_TARGETS else None
+
+
+def _stable_signature(value):
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:20]
+
+
+def _validated_physical_tilt_limits(value):
+    """Return one finite, ordered local mechanical Tilt domain or ``None``."""
+    source = value if isinstance(value, dict) else {}
+    try:
+        minimum = float(source["min_deg"] if "min_deg" in source else source["physical_tilt_min_deg"])
+        center = float(source["center_deg"] if "center_deg" in source else source["physical_tilt_center_deg"])
+        maximum = float(source["max_deg"] if "max_deg" in source else source["physical_tilt_max_deg"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(item) for item in (minimum, center, maximum)) or not minimum < center < maximum:
+        return None
+    return {"min_deg": minimum, "center_deg": center, "max_deg": maximum}
+
+
+def profile_physical_tilt_limits(fixture):
+    """Profile-owned local mechanical Tilt capability, with safe legacy fallback."""
+    explicit = _validated_physical_tilt_limits(fixture)
+    if explicit is not None:
+        return {**explicit, "source": "PROFILE_EXPLICIT"}
+    try:
+        tilt_range = float((fixture or {}).get("tilt_range"))
+    except (TypeError, ValueError):
+        tilt_range = None
+    if tilt_range is None or not math.isfinite(tilt_range) or tilt_range <= 0:
+        return None
+    return {
+        "min_deg": -tilt_range / 2.0,
+        "center_deg": 0.0,
+        "max_deg": tilt_range / 2.0,
+        "source": "PROFILE_TILT_RANGE_LEGACY",
+    }
+
+
+def fixture_physical_tilt_limits(slot_config):
+    """Resolve the one local mechanical Tilt domain for a fixture instance."""
+    fixture = find_fixture(FIXTURE_LIBRARY, (slot_config or {}).get("fixture"))
+    profile = profile_physical_tilt_limits(fixture)
+    venue = (slot_config or {}).get("venue_calibration")
+    override = _validated_physical_tilt_limits((venue or {}).get("physical_tilt_limits"))
+    if override is not None:
+        return {**override, "source": "FIXTURE_OVERRIDE"}
+    return profile
+
+
+def local_tilt_degrees_from_raw(raw, limits, supports_fine):
+    """Map the profile's existing raw endpoint domain into local motor degrees."""
+    if limits is None:
+        return None
+    maximum = _axis_raw_limit(supports_fine)
+    if maximum <= 0:
+        return None
+    ratio = float(raw) / maximum
+    return float(limits["min_deg"]) + ratio * (float(limits["max_deg"]) - float(limits["min_deg"]))
+
+
+def raw_from_local_tilt_degrees(degrees, limits, supports_fine):
+    if limits is None:
+        return None
+    span = float(limits["max_deg"]) - float(limits["min_deg"])
+    if span <= 0:
+        return None
+    ratio = (float(degrees) - float(limits["min_deg"])) / span
+    return ratio * _axis_raw_limit(supports_fine)
+
+
+def physical_tilt_calibration_fields(slot_config):
+    limits = fixture_physical_tilt_limits(slot_config)
+    if limits is None:
+        return {}
+    return {
+        "physical_tilt_min_deg": limits["min_deg"],
+        "physical_tilt_center_deg": limits["center_deg"],
+        "physical_tilt_max_deg": limits["max_deg"],
+        "physical_tilt_limits_source": limits["source"],
+    }
+
+
+def calibration_relevant_venue_geometry(geometry):
+    """Ceiling is target-only metadata; it cannot stale NORMAL calibration evidence."""
+    value = geometry.as_dict() if isinstance(geometry, VenueGeometry) else clean_venue_geometry_config(geometry)
+    return {key: item for key, item in value.items() if key != "ceiling_height_m"}
+
+
+def kinematic_calibration_signature(slot_config, geometry):
+    """Identify every input whose mutation makes physical anchor evidence stale."""
+    raw_venue = slot_config.get("venue_calibration") if isinstance(slot_config, dict) else None
+    raw_venue = raw_venue if isinstance(raw_venue, dict) else {}
+    fixture = find_fixture(FIXTURE_LIBRARY, slot_config.get("fixture"))
+    mode = find_mode(fixture, slot_config.get("mode"))
+    return _stable_signature({
+        "venue_geometry": calibration_relevant_venue_geometry(geometry),
+        "venue_calibration": {
+            key: raw_venue.get(key)
+            for key in (
+                "position_m", "position", "mounting_height_m", "physical_forward", "physical_up",
+                "pan_correction_degrees", "tilt_correction_degrees",
+            )
+        },
+        "fixture": fixture.get("id"),
+        "mode": mode.get("name"),
+        "pan_range": fixture.get("pan_range"),
+        "tilt_range": fixture.get("tilt_range"),
+        "pan_invert": bool(slot_config.get("pan_invert")),
+        "tilt_invert": bool(slot_config.get("tilt_invert")),
+        "use_fine_pan_tilt": bool(slot_config.get("use_fine_pan_tilt", True)),
+        "movement_channels": [
+            {"offset": channel.get("offset"), "type": channel.get("type")}
+            for channel in mode.get("channels", [])
+            if channel.get("type") in {"pan", "pan_fine", "tilt", "tilt_fine"}
+        ],
+    })
+
+
+def _axis_raw_limit(supports_fine):
+    return 65535 if supports_fine else 255
+
+
+def _axis_bytes_to_raw(coarse, fine, supports_fine):
+    coarse = clamp_dmx(coarse)
+    return ((coarse << 8) | clamp_dmx(fine or 0)) if supports_fine else coarse
+
+
+def _axis_raw_to_bytes(value, supports_fine):
+    maximum = _axis_raw_limit(supports_fine)
+    raw = max(0, min(maximum, int(round(float(value)))))
+    return {
+        "coarse": (raw >> 8) & 0xFF if supports_fine else raw,
+        "fine": raw & 0xFF if supports_fine else None,
+        "raw": raw,
+        "maximum": maximum,
+    }
+
+
+def _linear_fit(points):
+    """Least-squares affine fit returning raw = slope * degrees + intercept."""
+    if len(points) < 2:
+        return None
+    xs = [float(point[0]) for point in points]
+    ys = [float(point[1]) for point in points]
+    mean_x = sum(xs) / len(xs)
+    mean_y = sum(ys) / len(ys)
+    denominator = sum((value - mean_x) ** 2 for value in xs)
+    if denominator <= 1e-9:
+        return None
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denominator
+    intercept = mean_y - slope * mean_x
+    residuals = [y - (slope * x + intercept) for x, y in zip(xs, ys)]
+    return {
+        "slope_raw_per_degree": slope,
+        "intercept_raw": intercept,
+        "maximum_absolute_residual_raw": max(abs(value) for value in residuals),
+        "rms_residual_raw": math.sqrt(sum(value * value for value in residuals) / len(residuals)),
+        "sample_count": len(points),
+        "input_min_degrees": min(xs),
+        "input_max_degrees": max(xs),
+        "input_spread_degrees": max(xs) - min(xs),
+    }
+
+
+def _unwrap_angle_near(angle_degrees, reference_degrees):
+    angle = float(angle_degrees)
+    reference = float(reference_degrees)
+    while angle - reference > 180.0:
+        angle -= 360.0
+    while angle - reference <= -180.0:
+        angle += 360.0
+    return angle
+
+
+def fit_kinematic_calibration(anchors, *, pan_supports_fine, tilt_supports_fine):
+    """Fit the smallest evidence-supported per-axis physical-angle mapping."""
+    anchors = anchors if isinstance(anchors, dict) else {}
+    missing = [anchor for anchor in KINEMATIC_REQUIRED_ANCHORS if anchor not in anchors]
+    if missing:
+        return {"status": "PARTIAL", "reason": "MISSING_ANCHORS", "missing_anchors": missing}
+    selected = [anchors[anchor] for anchor in KINEMATIC_REQUIRED_ANCHORS]
+    pan_reference = float(anchors["AUDIENCE_MID_CENTER"]["desired_pan_degrees"])
+    pan_points = [
+        (_unwrap_angle_near(item["desired_pan_degrees"], pan_reference), item["actual_pan_raw"])
+        for item in selected
+    ]
+    tilt_points = [(item["desired_tilt_degrees"], item["actual_tilt_raw"]) for item in selected]
+    pan_model = _linear_fit(pan_points)
+    tilt_model = _linear_fit(tilt_points)
+    if (
+        pan_model is None
+        or tilt_model is None
+        or pan_model["input_spread_degrees"] < KINEMATIC_MINIMUM_PAN_SPREAD_DEGREES
+        or tilt_model["input_spread_degrees"] < KINEMATIC_MINIMUM_TILT_SPREAD_DEGREES
+    ):
+        return {
+            "status": "INSUFFICIENT_ANCHOR_SPREAD",
+            "reason": "Independent pan/tilt angular leverage is too small.",
+            "pan": pan_model,
+            "tilt": tilt_model,
+        }
+    pan_max = _axis_raw_limit(pan_supports_fine)
+    tilt_max = _axis_raw_limit(tilt_supports_fine)
+    if (
+        pan_model["maximum_absolute_residual_raw"] > pan_max * KINEMATIC_MAXIMUM_RESIDUAL_RATIO
+        or tilt_model["maximum_absolute_residual_raw"] > tilt_max * KINEMATIC_MAXIMUM_RESIDUAL_RATIO
+    ):
+        return {
+            "status": "KINEMATIC_MODEL_MISMATCH",
+            "reason": "Anchor residuals exceed the bounded affine V1 tolerance.",
+            "pan": pan_model,
+            "tilt": tilt_model,
+        }
+    # The sign is evidence-derived. A near-zero slope cannot define a safe inverse.
+    if abs(pan_model["slope_raw_per_degree"]) < 1e-6 or abs(tilt_model["slope_raw_per_degree"]) < 1e-6:
+        return {"status": "KINEMATIC_MODEL_MISMATCH", "reason": "Degenerate axis scale.", "pan": pan_model, "tilt": tilt_model}
+    return {
+        "status": "CALIBRATED",
+        "model": "AFFINE_RAW_DMX_V1",
+        "pan": {
+            **pan_model,
+            "raw_max": pan_max,
+            "branch_model": "DETERMINISTIC_UNWRAPPED_RAW_DMX",
+            "branch_reference_target": "AUDIENCE_MID_CENTER",
+            "branch_reference_degrees": pan_reference,
+            "branch_reference_raw": anchors["AUDIENCE_MID_CENTER"]["actual_pan_raw"],
+        },
+        "tilt": {**tilt_model, "raw_max": tilt_max},
+        "anchor_ids": list(KINEMATIC_REQUIRED_ANCHORS),
+    }
+
+
+def _calibrated_axis_output(angle_degrees, axis_model):
+    angle = float(angle_degrees)
+    if axis_model.get("branch_model") == "DETERMINISTIC_UNWRAPPED_RAW_DMX":
+        angle = _unwrap_angle_near(angle, axis_model.get("branch_reference_degrees", angle))
+    raw = float(axis_model["slope_raw_per_degree"]) * angle + float(axis_model["intercept_raw"])
+    maximum = int(axis_model["raw_max"])
+    if raw < 0 or raw > maximum:
+        return None
+    return _axis_raw_to_bytes(raw, maximum == 65535)
+
+
+def _calibrated_axis_angle(raw, axis_model):
+    slope = float(axis_model["slope_raw_per_degree"])
+    if abs(slope) < 1e-9:
+        return None
+    return (float(raw) - float(axis_model["intercept_raw"])) / slope
+
+
+def axis_mapping_v2_signature(slot_config):
+    """Identity of the physical motor installation, deliberately excluding Venue geometry."""
+    fixture = find_fixture(FIXTURE_LIBRARY, slot_config.get("fixture"))
+    mode = find_mode(fixture, slot_config.get("mode"))
+    venue = slot_config.get("venue_calibration") if isinstance(slot_config.get("venue_calibration"), dict) else {}
+    forward = _vector3_from_mapping(venue.get("physical_forward"))
+    up = _vector3_from_mapping(venue.get("physical_up"))
+    return _stable_signature({
+        "fixture": fixture.get("id"),
+        "mode": mode.get("name"),
+        "pan_range": fixture.get("pan_range"),
+        "tilt_range": fixture.get("tilt_range"),
+        "use_fine_pan_tilt": bool(slot_config.get("use_fine_pan_tilt", True)),
+        "movement_channels": [
+            {"offset": channel.get("offset"), "type": channel.get("type")}
+            for channel in mode.get("channels", [])
+            if channel.get("type") in {"pan", "pan_fine", "tilt", "tilt_fine"}
+        ],
+        # These vectors currently describe a physical remount. Position and Venue
+        # scale do not alter raw motor -> world direction and are excluded.
+        "physical_forward": forward.as_dict() if forward else None,
+        "physical_up": up.as_dict() if up else None,
+        "remount_revision": int(slot_config.get("axis_mapping_v2_remount_revision") or 0),
+    })
+
+
+def axis_mapping_v2_validation_signature(slot_config, geometry):
+    """Target-validation identity; unlike the motor map it includes Venue and fixture XYZ."""
+    venue = slot_config.get("venue_calibration") if isinstance(slot_config.get("venue_calibration"), dict) else {}
+    geometry_value = calibration_relevant_venue_geometry(geometry)
+    return _stable_signature({
+        "venue_geometry": geometry_value,
+        "fixture_position_m": venue.get("position_m"),
+        "legacy_fixture_position_normalized": venue.get("position"),
+        "mounting_height_m": venue.get("mounting_height_m"),
+    })
+
+
+def _axis_mapping_sample_positions(fractions, supports_fine):
+    maximum = _axis_raw_limit(supports_fine)
+    return [int(round(maximum * fraction)) for fraction in fractions]
+
+
+def _clean_axis_mapping_samples(raw_samples, fractions, supports_fine, measured_key):
+    maximum = _axis_raw_limit(supports_fine)
+    expected = _axis_mapping_sample_positions(fractions, supports_fine)
+    result = {}
+    source = raw_samples if isinstance(raw_samples, dict) else {}
+    for index, expected_raw in enumerate(expected):
+        item = source.get(str(index), source.get(index))
+        if not isinstance(item, dict):
+            continue
+        try:
+            raw = int(item.get("raw"))
+            measured = float(item.get(measured_key))
+            if raw != expected_raw or not math.isfinite(measured):
+                continue
+            result[str(index)] = {
+                "index": index,
+                "raw": raw,
+                "coarse": _axis_raw_to_bytes(raw, supports_fine)["coarse"],
+                "fine": _axis_raw_to_bytes(raw, supports_fine)["fine"],
+                "normalized_fraction": raw / maximum,
+                measured_key: measured,
+                "sample_order": index,
+                "profile_signature": str(item.get("profile_signature") or ""),
+                "session_revision": int(item.get("session_revision") or 0),
+                "reference_raw": _clean_axis_reference_raw(item.get("reference_raw"), supports_fine),
+                "saved_at": float(item.get("saved_at") or 0.0),
+            }
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _clean_tilt_axis_mapping_samples(raw_samples, fractions, supports_fine):
+    """Separate directed Tilt-plane evidence from legacy elevation-only evidence."""
+    directed = _clean_axis_mapping_samples(
+        raw_samples,
+        fractions,
+        supports_fine,
+        "measured_tilt_plane_degrees",
+    )
+    legacy = _clean_axis_mapping_samples(
+        raw_samples,
+        fractions,
+        supports_fine,
+        "measured_elevation_degrees",
+    )
+    return directed, legacy
+
+
+def _normalize_directed_tilt_plane_angle(value):
+    """Canonical directed Tilt-plane angle in (-180, 180], never collapsing BACK to FRONT."""
+    angle = float(value)
+    if not math.isfinite(angle):
+        raise ValueError("directed Tilt-plane angle must be finite")
+    normalized = ((angle + 180.0) % 360.0) - 180.0
+    return 180.0 if abs(normalized + 180.0) < 1e-9 else normalized
+
+
+def _directed_tilt_plane_delta(left, right):
+    delta = ((float(right) - float(left) + 180.0) % 360.0) - 180.0
+    # Exactly opposite adjacent observations do not reveal which way the motor swept.
+    return None if abs(abs(delta) - 180.0) < 1e-6 else delta
+
+
+def _unwrap_pan_samples(samples):
+    ordered = [samples[str(index)] for index in range(len(AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS))]
+    unwrapped = [float(ordered[0]["measured_azimuth_degrees"]) % 360.0]
+    deltas = []
+    for item in ordered[1:]:
+        previous_mod = unwrapped[-1] % 360.0
+        current_mod = float(item["measured_azimuth_degrees"]) % 360.0
+        delta = ((current_mod - previous_mod + 180.0) % 360.0) - 180.0
+        # Exactly opposite directions do not identify the physical sweep branch.
+        if abs(abs(delta) - 180.0) < 1e-6 or abs(delta) < 2.0:
+            return {"status": "PAN_MAPPING_AMBIGUOUS", "problem_sample": item["index"]}
+        deltas.append(delta)
+        unwrapped.append(unwrapped[-1] + delta)
+    signs = {1 if delta > 0 else -1 for delta in deltas}
+    if len(signs) != 1 or any(abs(delta) > 150.0 for delta in deltas):
+        return {"status": "INVALID_SAMPLE_SEQUENCE", "reason": "PAN_DIRECTION_REVERSAL"}
+    coverage = abs(unwrapped[-1] - unwrapped[0])
+    if coverage < 300.0:
+        return {"status": "PAN_MAPPING_AMBIGUOUS", "reason": "INSUFFICIENT_PHYSICAL_COVERAGE", "coverage_degrees": coverage}
+    points = [
+        {"raw": int(item["raw"]), "physical_degrees": angle, "index": int(item["index"])}
+        for item, angle in zip(ordered, unwrapped)
+    ]
+    return {
+        "status": "VALID",
+        "direction": "INCREASING" if deltas[0] > 0 else "DECREASING",
+        "coverage_degrees": coverage,
+        "points": points,
+    }
+
+
+def _fit_tilt_samples(samples):
+    ordered = [samples[str(index)] for index in range(len(AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS))]
+    observed = [_normalize_directed_tilt_plane_angle(item["measured_tilt_plane_degrees"]) for item in ordered]
+    unwrapped = [observed[0]]
+    deltas = []
+    for item, value in zip(ordered[1:], observed[1:]):
+        delta = _directed_tilt_plane_delta(unwrapped[-1], value)
+        if delta is None or abs(delta) < 1.0:
+            return {"status": "TILT_MAPPING_AMBIGUOUS", "reason": "AMBIGUOUS_ADJACENT_DIRECTION", "problem_sample": item["index"]}
+        if abs(delta) > 120.0:
+            return {"status": "INVALID_TILT_SAMPLE_SEQUENCE", "reason": "IMPLAUSIBLE_TILT_STEP", "problem_sample": item["index"]}
+        deltas.append(delta)
+        unwrapped.append(unwrapped[-1] + delta)
+    if len({1 if delta > 0 else -1 for delta in deltas}) != 1:
+        return {"status": "INVALID_TILT_SAMPLE_SEQUENCE", "reason": "TILT_DIRECTION_REVERSAL"}
+    coverage = abs(unwrapped[-1] - unwrapped[0])
+    if coverage < 90.0:
+        return {"status": "INVALID_TILT_SAMPLE_SEQUENCE", "reason": "INSUFFICIENT_TILT_COVERAGE", "coverage_degrees": coverage}
+    return {
+        "status": "VALID",
+        "direction": "INCREASING" if deltas[0] > 0 else "DECREASING",
+        "coverage_degrees": coverage,
+        "angle_model": "DIRECTED_TILT_PLANE_DEGREES",
+        "points": [
+            {"raw": int(item["raw"]), "physical_degrees": value, "index": int(item["index"])}
+            for item, value in zip(ordered, unwrapped)
+        ],
+    }
+
+
+def fit_axis_mapping_v2(pan_samples, tilt_samples):
+    if len(tilt_samples) < len(AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS):
+        return {"status": "TILT_PARTIAL", "pan_sample_count": len(pan_samples), "tilt_sample_count": len(tilt_samples)}
+    tilt = _fit_tilt_samples(tilt_samples)
+    if tilt.get("status") != "VALID":
+        return {**tilt, "pan_sample_count": len(pan_samples), "tilt_sample_count": len(tilt_samples)}
+    if len(pan_samples) < len(AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS):
+        return {"status": "TILT_MAPPING_VALID", "tilt": tilt, "pan_sample_count": len(pan_samples), "tilt_sample_count": len(tilt_samples)}
+    pan = _unwrap_pan_samples(pan_samples)
+    if pan.get("status") != "VALID":
+        return {**pan, "tilt": tilt, "pan_sample_count": len(pan_samples), "tilt_sample_count": len(tilt_samples)}
+    return {
+        "status": "CALIBRATED_CANDIDATE",
+        "model": "PIECEWISE_LINEAR_PAN_DIRECTED_TILT_PLANE_V2",
+        "pan": pan,
+        "tilt": tilt,
+        "pan_sample_count": len(pan_samples),
+        "tilt_sample_count": len(tilt_samples),
+    }
+
+
+def axis_mapping_v2_forward(raw, axis_model):
+    points = list((axis_model or {}).get("points") or [])
+    if not points or raw < points[0]["raw"] or raw > points[-1]["raw"]:
+        return None
+    for left, right in zip(points, points[1:]):
+        if left["raw"] <= raw <= right["raw"]:
+            span = right["raw"] - left["raw"]
+            ratio = 0.0 if span == 0 else (raw - left["raw"]) / span
+            return left["physical_degrees"] + ratio * (right["physical_degrees"] - left["physical_degrees"])
+    return float(points[-1]["physical_degrees"])
+
+
+def _axis_mapping_v2_inverse_candidates(degrees, axis_model):
+    points = list((axis_model or {}).get("points") or [])
+    if not points:
+        return []
+    low = min(point["physical_degrees"] for point in points)
+    high = max(point["physical_degrees"] for point in points)
+    base = _normalize_directed_tilt_plane_angle(degrees)
+    candidates = []
+    for branch in range(-2, 3):
+        desired = base + branch * 360.0
+        if not low - 1e-9 <= desired <= high + 1e-9:
+            continue
+        for left, right in zip(points, points[1:]):
+            segment_low, segment_high = sorted((left["physical_degrees"], right["physical_degrees"]))
+            if segment_low - 1e-9 <= desired <= segment_high + 1e-9:
+                span = right["physical_degrees"] - left["physical_degrees"]
+                ratio = 0.0 if abs(span) < 1e-9 else (desired - left["physical_degrees"]) / span
+                raw = left["raw"] + ratio * (right["raw"] - left["raw"])
+                if not any(abs(item["raw"] - raw) < 1e-6 for item in candidates):
+                    candidates.append({"physical_degrees": desired, "raw": raw})
+                break
+    return candidates
+
+
+def axis_mapping_v2_inverse_tilt(degrees, axis_model, current_raw=None):
+    candidates = _axis_mapping_v2_inverse_candidates(degrees, axis_model)
+    if not candidates:
+        return None
+    reference = float(current_raw) if current_raw is not None else sum(point["raw"] for point in axis_model["points"]) / len(axis_model["points"])
+    return min(candidates, key=lambda item: (abs(item["raw"] - reference), item["raw"]))["raw"]
+
+
+def axis_mapping_v2_inverse_pan(azimuth_degrees, axis_model, current_raw=None):
+    points = list((axis_model or {}).get("points") or [])
+    if not points:
+        return {"candidates": [], "chosen_raw": None}
+    physical_min = min(point["physical_degrees"] for point in points)
+    physical_max = max(point["physical_degrees"] for point in points)
+    base = float(azimuth_degrees) % 360.0
+    candidates = []
+    for branch in range(-3, 4):
+        desired = base + branch * 360.0
+        if physical_min - 1e-9 <= desired <= physical_max + 1e-9:
+            for left, right in zip(points, points[1:]):
+                low, high = sorted((left["physical_degrees"], right["physical_degrees"]))
+                if low - 1e-9 <= desired <= high + 1e-9:
+                    span = right["physical_degrees"] - left["physical_degrees"]
+                    ratio = 0.0 if abs(span) < 1e-9 else (desired - left["physical_degrees"]) / span
+                    raw = left["raw"] + ratio * (right["raw"] - left["raw"])
+                    candidates.append({"physical_degrees": desired, "raw": raw})
+                    break
+    if not candidates:
+        return {"candidates": [], "chosen_raw": None}
+    reference = float(current_raw) if current_raw is not None else sum(point["raw"] for point in points) / len(points)
+    chosen = min(candidates, key=lambda item: (abs(item["raw"] - reference), item["raw"]))
+    return {"candidates": candidates, "chosen_raw": chosen["raw"], "chosen_physical_degrees": chosen["physical_degrees"], "reference_raw": reference}
+
+
+def axis_mapping_v2_world_direction(pan_degrees, tilt_plane_degrees):
+    """Compose measured Pan front and directed Tilt-plane angle into world space."""
+    pan_radians = math.radians(float(pan_degrees))
+    tilt_radians = math.radians(float(tilt_plane_degrees))
+    horizontal = math.cos(tilt_radians)
+    return VenueVector3(
+        math.sin(pan_radians) * horizontal,
+        math.cos(pan_radians) * horizontal,
+        math.sin(tilt_radians),
+    )
+
+
+def _axis_mapping_v2_target_candidates(world_azimuth, world_elevation, pan_model, tilt_model):
+    """Return the bounded FRONT/BACK mechanical solutions for one desired world ray."""
+    front_tilt = _normalize_directed_tilt_plane_angle(world_elevation)
+    back_tilt = _normalize_directed_tilt_plane_angle(180.0 - world_elevation)
+    solutions = []
+    for branch_name, pan_degrees, tilt_degrees in (
+        ("FRONT_SIDE", world_azimuth, front_tilt),
+        ("BACK_SIDE", (world_azimuth + 180.0) % 360.0, back_tilt),
+    ):
+        pan_candidates = axis_mapping_v2_inverse_pan(pan_degrees, pan_model).get("candidates", [])
+        tilt_candidates = _axis_mapping_v2_inverse_candidates(tilt_degrees, tilt_model)
+        for pan_candidate in pan_candidates:
+            for tilt_candidate in tilt_candidates:
+                solutions.append({
+                    "branch": branch_name,
+                    "pan_raw": pan_candidate["raw"],
+                    "tilt_raw": tilt_candidate["raw"],
+                    "pan_physical_degrees": pan_candidate["physical_degrees"],
+                    "tilt_plane_degrees": tilt_candidate["physical_degrees"],
+                })
+    return solutions
+
+
+def _axis_mapping_v2_physical_tilt_boundaries(axis_model, limits, supports_fine):
+    """Measured endpoint directions at the fixture's legal local motor limits."""
+    if limits is None:
+        return []
+    boundaries = []
+    for name, local_degrees in (("PHYSICAL_TILT_MIN", limits["min_deg"]), ("PHYSICAL_TILT_MAX", limits["max_deg"])):
+        raw = raw_from_local_tilt_degrees(local_degrees, limits, supports_fine)
+        physical_degrees = axis_mapping_v2_forward(raw, axis_model) if raw is not None else None
+        if raw is not None and physical_degrees is not None:
+            boundaries.append({
+                "boundary": name,
+                "raw": raw,
+                "local_tilt_deg": float(local_degrees),
+                "physical_degrees": physical_degrees,
+            })
+    return boundaries
+
+
+def _axis_mapping_v2_extrapolated_raw(degrees, axis_model):
+    """Diagnostic-only estimate beyond samples. It is never used as a command."""
+    points = list((axis_model or {}).get("points") or [])
+    if len(points) < 2:
+        return None
+    base = _normalize_directed_tilt_plane_angle(degrees)
+    physical_values = [float(point["physical_degrees"]) for point in points]
+    desired = min((base + 360.0 * branch for branch in range(-2, 3)), key=lambda item: min(abs(item - value) for value in physical_values))
+    left, right = (points[0], points[1]) if desired < min(physical_values) else (points[-2], points[-1])
+    span = float(right["physical_degrees"]) - float(left["physical_degrees"])
+    if abs(span) < 1e-9:
+        return None
+    return float(left["raw"]) + (desired - float(left["physical_degrees"])) * (float(right["raw"]) - float(left["raw"])) / span
+
+
+def _clean_axis_mapping_v2(value, slot_config):
+    raw = value if isinstance(value, dict) else {}
+    fixture = find_fixture(FIXTURE_LIBRARY, slot_config.get("fixture"))
+    mode = find_mode(fixture, slot_config.get("mode"))
+    capabilities = mode_capabilities(mode)
+    pan_fine = bool(capabilities.get("pan_fine") and slot_config.get("use_fine_pan_tilt", True))
+    tilt_fine = bool(capabilities.get("tilt_fine") and slot_config.get("use_fine_pan_tilt", True))
+    pan_samples = _clean_axis_mapping_samples(raw.get("pan_samples"), AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS, pan_fine, "measured_azimuth_degrees")
+    tilt_samples, migrated_legacy_tilt_samples = _clean_tilt_axis_mapping_samples(
+        raw.get("tilt_samples"), AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS, tilt_fine
+    )
+    _, persisted_legacy_tilt_samples = _clean_tilt_axis_mapping_samples(
+        raw.get("legacy_tilt_samples"), AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS, tilt_fine
+    )
+    legacy_tilt_samples = {**persisted_legacy_tilt_samples, **migrated_legacy_tilt_samples}
+    workflow_phase = str(raw.get("workflow_phase") or "").upper()
+    if workflow_phase not in {"TILT_REFERENCE", "TILT", "PAN", "VALIDATION"}:
+        workflow_phase = None
+    try:
+        workflow_sample_index = int(raw.get("workflow_sample_index"))
+    except (TypeError, ValueError):
+        workflow_sample_index = None
+    workflow_move_status = str(raw.get("workflow_move_status") or "MOVE_REQUIRED").upper()
+    if workflow_move_status not in {"MOVE_REQUIRED", "MOVE_FAILED", "VALIDATION_READY"}:
+        workflow_move_status = "MOVE_REQUIRED"
+    validations = {}
+    for target, evidence in (raw.get("validations") or {}).items():
+        target_id = canonical_venue_target_id(target)
+        result = str((evidence or {}).get("result") or "").upper()
+        if target_id in AXIS_MAPPING_V2_VALIDATION_TARGETS and result in {"PASS", "FAIL"}:
+            validations[target_id] = {**dict(evidence), "target": target_id, "result": result}
+    return {
+        "version": AXIS_MAPPING_V2_VERSION,
+        "profile_signature": str(raw.get("profile_signature") or ""),
+        "session_revision": int(raw.get("session_revision") or 1),
+        "pan_samples": pan_samples,
+        "tilt_samples": tilt_samples,
+        "legacy_tilt_samples": legacy_tilt_samples,
+        # Tilt-first reference poses are physical observations, not nominal motor
+        # centres. Existing V2 evidence intentionally has no inferred value here.
+        "tilt_sweep_reference_pan_raw": _clean_axis_reference_raw(raw.get("tilt_sweep_reference_pan_raw"), pan_fine),
+        "pan_sweep_reference_tilt_plane_degrees": _clean_axis_reference_tilt_plane(
+            raw.get("pan_sweep_reference_tilt_plane_degrees")
+        ),
+        "legacy_pan_sweep_reference_elevation_degrees": _clean_axis_reference_elevation(
+            raw.get("legacy_pan_sweep_reference_elevation_degrees", raw.get("pan_sweep_reference_elevation_degrees"))
+        ),
+        "pan_sweep_reference_tilt_raw": _clean_axis_reference_raw(raw.get("pan_sweep_reference_tilt_raw"), tilt_fine),
+        "pan_samples_review_required": bool(raw.get("pan_samples_review_required")),
+        "workflow_phase": workflow_phase,
+        "workflow_sample_index": workflow_sample_index,
+        "workflow_move_status": workflow_move_status,
+        "workflow_move_error": str(raw.get("workflow_move_error") or "") or None,
+        "model": raw.get("model") if isinstance(raw.get("model"), dict) else None,
+        "validations": validations,
+        "active": bool(raw.get("active")),
+        "activated_at": float(raw.get("activated_at") or 0.0),
+    }
+
+
+def _clean_axis_reference_raw(value, supports_fine):
+    try:
+        raw = int(value)
+    except (TypeError, ValueError):
+        return None
+    return raw if 0 <= raw <= _axis_raw_limit(supports_fine) else None
+
+
+def _clean_axis_reference_elevation(value):
+    try:
+        degrees = float(value)
+    except (TypeError, ValueError):
+        return None
+    return degrees if math.isfinite(degrees) and -90.0 <= degrees <= 90.0 else None
+
+
+def _clean_axis_reference_tilt_plane(value):
+    try:
+        return _normalize_directed_tilt_plane_angle(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def axis_mapping_v2_state(slot_id, slot_config, geometry=None):
+    try:
+        raw = _clean_axis_mapping_v2(slot_config.get("axis_mapping_v2"), slot_config)
+        signature = axis_mapping_v2_signature(slot_config)
+        fixture = find_fixture(FIXTURE_LIBRARY, slot_config.get("fixture"))
+        capabilities = mode_capabilities(find_mode(fixture, slot_config.get("mode")))
+        pan_fine = bool(capabilities.get("pan_fine") and slot_config.get("use_fine_pan_tilt", True))
+        tilt_fine = bool(capabilities.get("tilt_fine") and slot_config.get("use_fine_pan_tilt", True))
+    except Exception:
+        return {"slot_id": str(slot_id), "status": "INVALID", "active": False, "pan_sample_count": 0, "tilt_sample_count": 0}
+    fitted = fit_axis_mapping_v2(raw["pan_samples"], raw["tilt_samples"])
+    stale = bool(raw["pan_samples"] or raw["tilt_samples"]) and raw["profile_signature"] != signature
+    model_matches = raw.get("model") == fitted
+    validations = raw["validations"]
+    current_validation_signature = None
+    validation_stale = False
+    if geometry is not None:
+        current_validation_signature = axis_mapping_v2_validation_signature(slot_config, geometry)
+        validation_stale = any(
+            evidence.get("venue_geometry_signature") not in {None, "", current_validation_signature}
+            for evidence in validations.values()
+        )
+    all_pass = not validation_stale and all((validations.get(target) or {}).get("result") == "PASS" for target in AXIS_MAPPING_V2_VALIDATION_TARGETS)
+    any_fail = any((validations.get(target) or {}).get("result") == "FAIL" for target in AXIS_MAPPING_V2_VALIDATION_TARGETS)
+    tilt_complete = len(raw["tilt_samples"]) == len(AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS)
+    pan_complete = len(raw["pan_samples"]) == len(AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS)
+    has_legacy_order_pan = bool(raw["pan_samples"]) and raw["tilt_sweep_reference_pan_raw"] is None
+    pan_reference_mismatch = any(
+        item.get("reference_raw") != raw["pan_sweep_reference_tilt_raw"]
+        for item in raw["pan_samples"].values()
+    )
+    legacy_tilt_review_required = bool(raw["legacy_tilt_samples"])
+    pan_reference_ready = (
+        raw["pan_sweep_reference_tilt_plane_degrees"] is not None
+        and raw["pan_sweep_reference_tilt_raw"] is not None
+    )
+    if raw["tilt_sweep_reference_pan_raw"] is None:
+        workflow_phase = "TILT_REFERENCE"
+        workflow_sample_index = None
+    elif not tilt_complete:
+        workflow_phase = "TILT"
+        workflow_sample_index = raw["workflow_sample_index"] if (
+            raw["workflow_phase"] == "TILT"
+            and raw["workflow_sample_index"] is not None
+            and 0 <= raw["workflow_sample_index"] < len(AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS)
+        ) else next((index for index in range(len(AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS)) if str(index) not in raw["tilt_samples"]), None)
+    elif not pan_reference_ready:
+        # A complete directed Tilt map must resolve FRONT automatically. This
+        # state is retained only as an explicit fail-closed diagnostic.
+        workflow_phase = "TILT"
+        workflow_sample_index = None
+    elif not pan_complete:
+        workflow_phase = "PAN"
+        workflow_sample_index = raw["workflow_sample_index"] if (
+            raw["workflow_phase"] == "PAN"
+            and raw["workflow_sample_index"] is not None
+            and 0 <= raw["workflow_sample_index"] < len(AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS)
+        ) else next((index for index in range(len(AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS)) if str(index) not in raw["pan_samples"]), None)
+    else:
+        workflow_phase = "VALIDATION"
+        workflow_sample_index = None
+    workflow_move_status = raw["workflow_move_status"]
+    if workflow_phase == "VALIDATION":
+        workflow_move_status = "VALIDATION_READY"
+    elif raw["workflow_phase"] != workflow_phase or raw["workflow_sample_index"] != workflow_sample_index:
+        workflow_move_status = "MOVE_REQUIRED"
+    if legacy_tilt_review_required and not tilt_complete:
+        status = "LEGACY_TILT_DIRECTION_REVIEW_REQUIRED"
+    elif not raw["pan_samples"] and not raw["tilt_samples"]:
+        status = "TILT_REFERENCE_REQUIRED"
+    elif stale:
+        status = "STALE"
+    elif has_legacy_order_pan or raw["pan_samples_review_required"] or pan_reference_mismatch:
+        status = "LEGACY_ORDER_REVIEW_REQUIRED"
+    elif not tilt_complete:
+        status = "TILT_IN_PROGRESS"
+    elif fitted.get("status") == "TILT_MAPPING_VALID" and not pan_reference_ready:
+        status = "PAN_REFERENCE_REQUIRED"
+    elif fitted.get("status") == "TILT_MAPPING_VALID":
+        status = "PAN_IN_PROGRESS"
+    elif fitted.get("status") != "CALIBRATED_CANDIDATE" or not model_matches:
+        status = fitted.get("status", "INVALID")
+    elif any_fail:
+        status = "VALIDATION_FAILED"
+    elif all_pass:
+        status = "ACTIVE" if raw["active"] else "VALIDATED"
+    else:
+        status = "CALIBRATED_CANDIDATE"
+    return {
+        "version": AXIS_MAPPING_V2_VERSION,
+        "slot_id": str(slot_id),
+        "status": status,
+        "active": status == "ACTIVE",
+        "movement_mapping_authority": "AXIS_MAPPING_V2" if status == "ACTIVE" else "LEGACY_OR_THEORETICAL",
+        "pan_sample_count": len(raw["pan_samples"]),
+        "pan_required_count": len(AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS),
+        "tilt_sample_count": len(raw["tilt_samples"]),
+        "tilt_required_count": len(AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS),
+        "pan_sample_positions": _axis_mapping_sample_positions(AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS, pan_fine),
+        "tilt_sample_positions": _axis_mapping_sample_positions(AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS, tilt_fine),
+        "pan_samples": raw["pan_samples"],
+        "tilt_samples": raw["tilt_samples"],
+        "legacy_tilt_samples": raw["legacy_tilt_samples"],
+        "legacy_tilt_direction_review_required": legacy_tilt_review_required,
+        "tilt_sweep_reference_pan_raw": raw["tilt_sweep_reference_pan_raw"],
+        "pan_sweep_reference_tilt_plane_degrees": raw["pan_sweep_reference_tilt_plane_degrees"],
+        "legacy_pan_sweep_reference_elevation_degrees": raw["legacy_pan_sweep_reference_elevation_degrees"],
+        "pan_sweep_reference_tilt_raw": raw["pan_sweep_reference_tilt_raw"],
+        "pan_samples_review_required": bool(raw["pan_samples_review_required"] or has_legacy_order_pan or pan_reference_mismatch),
+        "workflow_phase": workflow_phase,
+        "workflow_sample_index": workflow_sample_index,
+        "workflow_saved_count": len(raw["tilt_samples"]) if workflow_phase in {"TILT_REFERENCE", "TILT"} else len(raw["pan_samples"]),
+        "workflow_move_status": workflow_move_status,
+        "workflow_move_error": raw["workflow_move_error"] if workflow_move_status == "MOVE_FAILED" else None,
+        "pan_start_allowed": tilt_complete and pan_reference_ready and not stale,
+        "tilt_start_allowed": raw["tilt_sweep_reference_pan_raw"] is not None and not stale,
+        "pan_sweep_tilt_plane_options": list(AXIS_MAPPING_V2_PAN_SWEEP_TILT_PLANE_OPTIONS),
+        "default_pan_sweep_tilt_plane_degrees": AXIS_MAPPING_V2_DEFAULT_PAN_SWEEP_TILT_PLANE_DEGREES,
+        "model": raw.get("model") if model_matches else fitted,
+        "validations": validations,
+        "required_validation_targets": list(AXIS_MAPPING_V2_VALIDATION_TARGETS),
+        "validation_stale": validation_stale,
+        "current_validation_geometry_signature": current_validation_signature,
+        "profile_signature": raw["profile_signature"],
+        "current_profile_signature": signature,
+        "legacy_physical_aim_status": "LEGACY_INACTIVE" if status == "ACTIVE" else "LEGACY_AVAILABLE",
+    }
+
+
+def default_venue_geometry_config():
+    return VenueGeometry().as_dict()
+
+
+def _optional_physical_dimension(value, *, allow_zero=False):
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or parsed < 0 or (not allow_zero and parsed == 0):
+        return None
+    return parsed
+
+
+def clean_venue_geometry_config(value):
+    raw = value if isinstance(value, dict) else {}
+    return {
+        "venue_width_m": _optional_physical_dimension(raw.get("venue_width_m")),
+        "venue_forward_depth_m": _optional_physical_dimension(raw.get("venue_forward_depth_m")),
+        "venue_rear_depth_m": _optional_physical_dimension(raw.get("venue_rear_depth_m"), allow_zero=True),
+        "audience_target_height_m": _optional_physical_dimension(
+            raw.get("audience_target_height_m"), allow_zero=True
+        ),
+        "ceiling_height_m": _optional_physical_dimension(raw.get("ceiling_height_m")),
+    }
+
+
+def venue_geometry_from_mapping(value):
+    cleaned = clean_venue_geometry_config(value)
+    return VenueGeometry(
+        width_m=cleaned["venue_width_m"],
+        forward_depth_m=cleaned["venue_forward_depth_m"],
+        rear_depth_m=cleaned["venue_rear_depth_m"],
+        audience_target_height_m=cleaned["audience_target_height_m"],
+        ceiling_height_m=cleaned["ceiling_height_m"],
+    )
+
+
+def venue_target_vertical_layer_state(geometry):
+    """One canonical availability contract for the orthogonal target Z layer."""
+    geometry = geometry if isinstance(geometry, VenueGeometry) else venue_geometry_from_mapping(geometry)
+    ceiling_reason = None
+    if geometry.ceiling_height_m is None:
+        ceiling_reason = "CEILING_HEIGHT_UNSET"
+    elif geometry.audience_target_height_m is None:
+        ceiling_reason = "CEILING_HEIGHT_REQUIRES_NORMAL_HEIGHT"
+    elif geometry.ceiling_height_m <= geometry.audience_target_height_m:
+        ceiling_reason = "CEILING_HEIGHT_INVALID"
+    return {
+        VenueTargetVerticalLayer.FLOOR.value: {"available": True, "reason": None},
+        VenueTargetVerticalLayer.NORMAL.value: {
+            "available": geometry.audience_target_height_m is not None,
+            "reason": None if geometry.audience_target_height_m is not None else "MISSING_TARGET_HEIGHT",
+        },
+        VenueTargetVerticalLayer.CEILING.value: {
+            "available": ceiling_reason is None,
+            "reason": ceiling_reason,
+        },
+    }
+
+
+def resolve_venue_target_z(geometry, vertical_layer=VenueTargetVerticalLayer.NORMAL):
+    """Return a finite target Z or a fail-closed status for one named layer."""
+    geometry = geometry if isinstance(geometry, VenueGeometry) else venue_geometry_from_mapping(geometry)
+    layer = canonical_venue_target_vertical_layer(vertical_layer)
+    if layer is None:
+        return None, None, "VERTICAL_LAYER_INVALID"
+    layers = venue_target_vertical_layer_state(geometry)
+    availability = layers[layer.value]
+    if not availability["available"]:
+        return None, layer.value, availability["reason"]
+    if layer is VenueTargetVerticalLayer.FLOOR:
+        return 0.0, layer.value, None
+    if layer is VenueTargetVerticalLayer.NORMAL:
+        return geometry.audience_target_height_m, layer.value, None
+    return geometry.ceiling_height_m, layer.value, None
+
+
+def resolve_venue_target_point(target_id, geometry, vertical_layer=VenueTargetVerticalLayer.NORMAL):
+    """Resolve one of the 12 persistent XY identities plus its selected Z layer."""
+    target_id = canonical_venue_target_id(target_id)
+    if target_id is None:
+        return {"status": "UNKNOWN_TARGET", "reason": "Unknown venue target."}
+    geometry = geometry if isinstance(geometry, VenueGeometry) else venue_geometry_from_mapping(geometry)
+    target = VENUE_TARGETS[target_id]
+    height_m, layer, reason = resolve_venue_target_z(geometry, vertical_layer)
+    if reason:
+        return {
+            "status": reason,
+            "reason": reason.replace("_", " "),
+            "target": target_id,
+            "vertical_layer": layer or str(vertical_layer or ""),
+            "target_point": target.as_dict(),
+        }
+    missing = venue_geometry_missing_fields(geometry, target)
+    if missing:
+        return {
+            "status": "MISSING_VENUE_SCALE",
+            "missing_geometry": missing,
+            "target": target_id,
+            "vertical_layer": layer,
+            "target_point": target.as_dict(),
+        }
+    return {
+        "status": "RESOLVED",
+        "target": target_id,
+        "vertical_layer": layer,
+        "target_point": target.as_dict(),
+        "physical_point_m": venue_normalized_to_meters(target, geometry, height_m=height_m),
+    }
+
+
+def venue_geometry_missing_fields(geometry, point=None):
+    missing = []
+    if geometry.width_m is None:
+        missing.append("venue_width_m")
+    if geometry.forward_depth_m is None:
+        missing.append("venue_forward_depth_m")
+    if point is not None and point.y < 0 and geometry.rear_depth_m is None:
+        missing.append("venue_rear_depth_m")
+    return missing
+
+
+def venue_normalized_to_meters(point, geometry, *, height_m):
+    """Map normalized DJ-centric XY to physical metres without mixing Z units."""
+    missing = venue_geometry_missing_fields(geometry, point)
+    if missing:
+        raise ValueError("missing venue scale: " + ", ".join(missing))
+    y_m = point.y * (
+        geometry.forward_depth_m if point.y >= 0 else geometry.rear_depth_m
+    )
+    return VenuePhysicalPoint(point.x * geometry.width_m / 2.0, y_m, height_m)
+
+
+def venue_meters_to_normalized(point, geometry):
+    """Inverse of ``venue_normalized_to_meters`` for physical diagnostics/UI."""
+    missing = venue_geometry_missing_fields(
+        geometry,
+        VenuePoint(0.0, 1.0 if point.y >= 0 else -1.0),
+    )
+    if missing:
+        raise ValueError("missing venue scale: " + ", ".join(missing))
+    depth = geometry.forward_depth_m if point.y >= 0 else geometry.rear_depth_m
+    return VenuePoint(point.x / (geometry.width_m / 2.0), point.y / depth)
+
+
+def venue_vector(fixture_position, target):
+    """Return a global DJ-space vector without applying fixture assumptions."""
+    return (
+        target.x - fixture_position.x,
+        target.y - fixture_position.y,
+        None if target.z is None or fixture_position.z is None else target.z - fixture_position.z,
+    )
+
+
+def venue_vector_to_fixture_local(vector, physical_heading_degrees):
+    """Rotate a global vector into a fixture's explicitly calibrated heading."""
+    radians = math.radians(float(physical_heading_degrees))
+    dx, dy = vector[:2]
+    return (
+        dx * math.cos(radians) - dy * math.sin(radians),
+        dx * math.sin(radians) + dy * math.cos(radians),
+    )
+
+
+def _vector3_tuple(value):
+    return (float(value.x), float(value.y), float(value.z))
+
+
+def _vector3_length(value):
+    x, y, z = value
+    return math.sqrt(x * x + y * y + z * z)
+
+
+def _vector3_normalize(value):
+    length = _vector3_length(value)
+    if not math.isfinite(length) or length < 1e-8:
+        return None
+    return tuple(component / length for component in value)
+
+
+def _vector3_dot(left, right):
+    return sum(a * b for a, b in zip(left, right))
+
+
+def _vector3_cross(left, right):
+    return (
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    )
+
+
+def fixture_orientation_basis(physical_forward, physical_up):
+    """Build one right-handed orthonormal fixture frame.
+
+    Venue Space uses x=DJ-right, y=audience and z=physical-up.  The fixture
+    basis uses ``right = forward × up`` and then recomputes Up as
+    ``right × forward``.  Nearly parallel or zero inputs are invalid rather
+    than producing an unstable target.
+    """
+    if physical_forward is None or physical_up is None:
+        return {"status": "PARTIAL", "reason": "missing_forward_or_up"}
+    forward = _vector3_normalize(_vector3_tuple(physical_forward))
+    supplied_up = _vector3_normalize(_vector3_tuple(physical_up))
+    if forward is None:
+        return {"status": "INVALID", "reason": "forward_zero"}
+    if supplied_up is None:
+        return {"status": "INVALID", "reason": "up_zero"}
+    right = _vector3_normalize(_vector3_cross(forward, supplied_up))
+    if right is None or abs(_vector3_dot(forward, supplied_up)) > 0.999:
+        return {"status": "INVALID", "reason": "forward_up_parallel"}
+    up = _vector3_normalize(_vector3_cross(right, forward))
+    if up is None:
+        return {"status": "INVALID", "reason": "unstable_basis"}
+    return {
+        "status": "VALID",
+        "forward": VenueVector3(*forward),
+        "right": VenueVector3(*right),
+        "up": VenueVector3(*up),
+    }
+
+
+@dataclass(frozen=True)
+class VenueFixtureCalibration:
+    """Explicit inputs required before a venue target may become DMX."""
+
+    supports_pan_tilt: bool
+    # ``position_m`` is the canonical physical authority. ``position`` and
+    # ``mounting_height_m`` are retained only to decode pre-metric configs.
+    position_m: Optional[VenuePhysicalPoint] = None
+    position: Optional[VenuePoint] = None
+    mounting_height_m: Optional[float] = None
+    physical_forward: Optional[VenueVector3] = None
+    physical_up: Optional[VenueVector3] = None
+    pan_min_degrees: Optional[float] = None
+    pan_max_degrees: Optional[float] = None
+    tilt_min_degrees: Optional[float] = None
+    tilt_max_degrees: Optional[float] = None
+    physical_tilt_min_deg: Optional[float] = None
+    physical_tilt_center_deg: Optional[float] = None
+    physical_tilt_max_deg: Optional[float] = None
+    physical_tilt_limits_source: Optional[str] = None
+    pan_invert: bool = False
+    tilt_invert: bool = False
+    pan_correction_degrees: float = 0.0
+    tilt_correction_degrees: float = 0.0
+    use_fine_pan_tilt: bool = True
+    supports_pan_fine: bool = False
+    supports_tilt_fine: bool = False
+    kinematic_model: Optional[dict] = None
+    axis_mapping_v2: Optional[dict] = None
+    current_pan_raw: Optional[int] = None
+    current_tilt_raw: Optional[int] = None
+
+
+def _calibration_missing_fields(calibration):
+    required = (
+        "position",
+        "physical_forward",
+        "physical_up",
+        "pan_min_degrees",
+        "pan_max_degrees",
+        "tilt_min_degrees",
+        "tilt_max_degrees",
+    )
+    return [field for field in required if getattr(calibration, field) is None]
+
+
+def _angle_to_dmx(angle, lower, upper, inverted=False):
+    ratio = (angle - lower) / (upper - lower)
+    if inverted:
+        ratio = 1.0 - ratio
+    return clamp_dmx(round(ratio * 255.0))
+
+
+def _angle_to_dmx16(angle, lower, upper, inverted=False):
+    ratio = (angle - lower) / (upper - lower)
+    if inverted:
+        ratio = 1.0 - ratio
+    value = max(0, min(65535, round(ratio * 65535.0)))
+    return {"coarse": (value >> 8) & 0xFF, "fine": value & 0xFF}
+
+
+def resolve_venue_target(
+    calibration,
+    target,
+    geometry=None,
+    target_height_m=None,
+    vertical_layer=VenueTargetVerticalLayer.NORMAL,
+):
+    """Resolve a semantic target through a proven fixture-local basis.
+
+    This function is diagnostic/foundation code: it returns fixture-local
+    angles and predicted adapter bytes but never writes a physical frame.
+    """
+    if not calibration.supports_pan_tilt:
+        return {"status": "UNSUPPORTED", "pan": None, "tilt": None}
+    v2_model = calibration.axis_mapping_v2 if isinstance(calibration.axis_mapping_v2, dict) else None
+    v2_active = bool(v2_model and v2_model.get("status") in {"CALIBRATED_CANDIDATE", "VALIDATED", "ACTIVE"})
+    has_position = calibration.position_m is not None or calibration.position is not None
+    required = () if v2_active else (
+        "physical_forward", "physical_up", "pan_min_degrees",
+        "pan_max_degrees", "tilt_min_degrees", "tilt_max_degrees",
+    )
+    missing = [field for field in required if getattr(calibration, field) is None]
+    if not has_position:
+        missing.insert(0, "position_m")
+    if missing:
+        return {
+            "status": "MISSING_FIXTURE_CALIBRATION",
+            "missing_calibration": missing,
+            "pan": None,
+            "tilt": None,
+        }
+    basis = None if v2_active else fixture_orientation_basis(calibration.physical_forward, calibration.physical_up)
+    if not v2_active and basis["status"] != "VALID":
+        return {
+            "status": "INVALID_CALIBRATION" if basis["status"] == "INVALID" else "MISSING_FIXTURE_CALIBRATION",
+            "reason": basis.get("reason"),
+            "pan": None,
+            "tilt": None,
+        }
+    invalid_ranges = []
+    if not v2_active and calibration.pan_max_degrees <= calibration.pan_min_degrees:
+        invalid_ranges.append("pan_angle_limits")
+    if not v2_active and calibration.tilt_max_degrees <= calibration.tilt_min_degrees:
+        invalid_ranges.append("tilt_angle_limits")
+    physical_tilt_limits = _validated_physical_tilt_limits({
+        "min_deg": calibration.physical_tilt_min_deg if calibration.physical_tilt_min_deg is not None else calibration.tilt_min_degrees,
+        "center_deg": calibration.physical_tilt_center_deg if calibration.physical_tilt_center_deg is not None else 0.0,
+        "max_deg": calibration.physical_tilt_max_deg if calibration.physical_tilt_max_deg is not None else calibration.tilt_max_degrees,
+    })
+    if physical_tilt_limits is None:
+        invalid_ranges.append("physical_tilt_limits")
+    if invalid_ranges:
+        return {
+            "status": "INVALID_CALIBRATION",
+            "missing_calibration": invalid_ranges,
+            "pan": None,
+            "tilt": None,
+        }
+
+    geometry = geometry if isinstance(geometry, VenueGeometry) else venue_geometry_from_mapping(geometry)
+    missing_geometry = []
+    if calibration.position_m is None:
+        missing_geometry.extend(venue_geometry_missing_fields(geometry, calibration.position))
+    if not isinstance(target, VenuePhysicalPoint):
+        missing_geometry.extend(field for field in venue_geometry_missing_fields(geometry, target) if field not in missing_geometry)
+    if missing_geometry:
+        return {
+            "status": "MISSING_VENUE_SCALE",
+            "missing_geometry": missing_geometry,
+            "pan": None,
+            "tilt": None,
+        }
+    if calibration.position_m is None and calibration.mounting_height_m is None:
+        return {
+            "status": "MISSING_FIXTURE_HEIGHT",
+            "missing_calibration": ["mounting_height_m"],
+            "pan": None,
+            "tilt": None,
+        }
+    if not isinstance(target, VenuePhysicalPoint) and target_height_m is None:
+        target_height_m, _layer, layer_reason = resolve_venue_target_z(geometry, vertical_layer)
+        if layer_reason:
+            return {
+                "status": layer_reason,
+                "reason": layer_reason.replace("_", " "),
+                "pan": None,
+                "tilt": None,
+            }
+    if not isinstance(target, VenuePhysicalPoint) and target_height_m is None:
+        return {
+            "status": "MISSING_TARGET_HEIGHT",
+            "missing_geometry": ["audience_target_height_m"],
+            "pan": None,
+            "tilt": None,
+        }
+
+    fixture_point = calibration.position_m
+    if fixture_point is None:
+        fixture_point = venue_normalized_to_meters(
+            calibration.position,
+            geometry,
+            height_m=calibration.mounting_height_m,
+        )
+    target_point = target if isinstance(target, VenuePhysicalPoint) else venue_normalized_to_meters(
+        target, geometry, height_m=target_height_m
+    )
+    global_vector = (
+        target_point.x - fixture_point.x,
+        target_point.y - fixture_point.y,
+        target_point.z - fixture_point.z,
+    )
+    world_azimuth = math.degrees(math.atan2(global_vector[0], global_vector[1])) % 360.0
+    world_elevation = math.degrees(math.atan2(global_vector[2], math.hypot(global_vector[0], global_vector[1])))
+    common_diagnostics = {
+        "fixture_xyz_m": fixture_point.as_dict(),
+        "target_xyz_m": target_point.as_dict(),
+        "target_vector_m": VenueVector3(*global_vector).as_dict(),
+        "horizontal_distance_m": math.hypot(global_vector[0], global_vector[1]),
+        "vertical_delta_m": global_vector[2],
+        "direct_distance_m": _vector3_length(global_vector),
+        "desired_world_azimuth_degrees": world_azimuth,
+        "desired_world_elevation_degrees": world_elevation,
+    }
+    if v2_active:
+        physical_limits = physical_tilt_limits
+        tilt_supports_fine = calibration.supports_tilt_fine and calibration.use_fine_pan_tilt
+        raw_min = raw_from_local_tilt_degrees(physical_limits["min_deg"], physical_limits, tilt_supports_fine)
+        raw_max = raw_from_local_tilt_degrees(physical_limits["max_deg"], physical_limits, tilt_supports_fine)
+        mechanical_candidates = _axis_mapping_v2_target_candidates(
+            world_azimuth,
+            world_elevation,
+            v2_model.get("pan"),
+            v2_model.get("tilt"),
+        )
+        mechanical_candidates = [
+            item for item in mechanical_candidates
+            if raw_min - 1e-9 <= item["tilt_raw"] <= raw_max + 1e-9
+        ]
+        clamped = False
+        clamp_reason = None
+        if not mechanical_candidates:
+            # Keep Pan on a real azimuth solution, then compare only legal
+            # measured Tilt boundaries. This cannot use Pan to manufacture
+            # extra Tilt travel.
+            boundaries = _axis_mapping_v2_physical_tilt_boundaries(
+                v2_model.get("tilt"), physical_limits, tilt_supports_fine
+            )
+            desired_direction = _vector3_normalize(global_vector)
+            for branch_name, pan_degrees, requested_tilt in (
+                ("FRONT_SIDE", world_azimuth, _normalize_directed_tilt_plane_angle(world_elevation)),
+                ("BACK_SIDE", (world_azimuth + 180.0) % 360.0, _normalize_directed_tilt_plane_angle(180.0 - world_elevation)),
+            ):
+                for pan_candidate in axis_mapping_v2_inverse_pan(pan_degrees, v2_model.get("pan")).get("candidates", []):
+                    for boundary in boundaries:
+                        direction = axis_mapping_v2_world_direction(pan_candidate["physical_degrees"], boundary["physical_degrees"])
+                        dot = max(-1.0, min(1.0, _vector3_dot(desired_direction, _vector3_tuple(direction))))
+                        mechanical_candidates.append({
+                            "branch": branch_name,
+                            "pan_raw": pan_candidate["raw"],
+                            "tilt_raw": boundary["raw"],
+                            "pan_physical_degrees": pan_candidate["physical_degrees"],
+                            "tilt_plane_degrees": boundary["physical_degrees"],
+                            "requested_tilt_plane_degrees": requested_tilt,
+                            "physical_tilt_boundary": boundary["boundary"],
+                            "angular_error_degrees": math.degrees(math.acos(dot)),
+                        })
+            clamped = bool(mechanical_candidates)
+            clamp_reason = "PHYSICAL_TILT_BOUNDARY" if clamped else None
+        if not mechanical_candidates:
+            return {
+                "status": "UNREACHABLE", "reason": "outside_axis_mapping_v2_range",
+                "pan": None, "tilt": None, "predicted_output": None,
+                "mapping_source": "AXIS_MAPPING_V2", "pan_candidates": [], "mechanical_candidates": [],
+                **common_diagnostics,
+            }
+        pan_points = list((v2_model.get("pan") or {}).get("points") or [])
+        tilt_points = list((v2_model.get("tilt") or {}).get("points") or [])
+        pan_span = max(1.0, float(pan_points[-1]["raw"] - pan_points[0]["raw"]))
+        tilt_span = max(1.0, float(tilt_points[-1]["raw"] - tilt_points[0]["raw"]))
+        pan_reference = float(calibration.current_pan_raw) if calibration.current_pan_raw is not None else sum(item["raw"] for item in pan_points) / len(pan_points)
+        tilt_reference = float(calibration.current_tilt_raw) if calibration.current_tilt_raw is not None else sum(item["raw"] for item in tilt_points) / len(tilt_points)
+        for candidate in mechanical_candidates:
+            candidate["normalized_movement"] = (
+                abs(candidate["pan_raw"] - pan_reference) / pan_span
+                + abs(candidate["tilt_raw"] - tilt_reference) / tilt_span
+            )
+        chosen = min(
+            mechanical_candidates,
+            key=lambda item: (
+                round(item.get("angular_error_degrees", 0.0), 7),
+                item["normalized_movement"], item["pan_raw"], item["tilt_raw"], item["branch"],
+            ),
+        )
+        pan_raw = chosen["pan_raw"]
+        tilt_raw = chosen["tilt_raw"]
+        pan_output = _axis_raw_to_bytes(pan_raw, calibration.supports_pan_fine and calibration.use_fine_pan_tilt)
+        tilt_output = _axis_raw_to_bytes(tilt_raw, calibration.supports_tilt_fine and calibration.use_fine_pan_tilt)
+        predicted_output = {
+            "pan": pan_output["coarse"], "pan_fine": pan_output["fine"],
+            "tilt": tilt_output["coarse"], "tilt_fine": tilt_output["fine"],
+        }
+        predicted_pan = axis_mapping_v2_forward(pan_output["raw"], v2_model.get("pan"))
+        predicted_tilt = axis_mapping_v2_forward(tilt_output["raw"], v2_model.get("tilt"))
+        requested_tilt_raw = chosen["tilt_raw"] if not clamped else _axis_mapping_v2_extrapolated_raw(
+            chosen.get("requested_tilt_plane_degrees", world_elevation), v2_model.get("tilt")
+        )
+        requested_local_tilt = local_tilt_degrees_from_raw(requested_tilt_raw, physical_limits, tilt_supports_fine) if requested_tilt_raw is not None else None
+        resolved_local_tilt = local_tilt_degrees_from_raw(tilt_output["raw"], physical_limits, tilt_supports_fine)
+        return {
+            "status": "RESOLVED", "pan": predicted_output["pan"], "tilt": predicted_output["tilt"],
+            "predicted_output": predicted_output, "theoretical_output": None,
+            "mapping_source": "AXIS_MAPPING_V2",
+            "pan_candidates": [item for item in mechanical_candidates if item["branch"] == chosen["branch"]],
+            "mechanical_candidates": mechanical_candidates,
+            "chosen_mechanical_branch": chosen["branch"],
+            "chosen_pan_raw": pan_output["raw"], "chosen_tilt_raw": tilt_output["raw"],
+            "predicted_physical_azimuth_degrees": predicted_pan,
+            "predicted_physical_tilt_plane_degrees": predicted_tilt,
+            "predicted_physical_elevation_degrees": math.degrees(math.asin(max(-1.0, min(1.0, axis_mapping_v2_world_direction(predicted_pan, predicted_tilt).z)))),
+            "pan_degrees": world_azimuth, "tilt_degrees": world_elevation,
+            "requested_local_tilt_deg": requested_local_tilt,
+            "resolved_local_tilt_deg": resolved_local_tilt,
+            "physical_tilt_min_deg": physical_limits["min_deg"],
+            "physical_tilt_center_deg": physical_limits["center_deg"],
+            "physical_tilt_max_deg": physical_limits["max_deg"],
+            "clamped": clamped,
+            "clamp_reason": clamp_reason,
+            "angular_error_degrees": chosen.get("angular_error_degrees", 0.0),
+            **common_diagnostics,
+        }
+    forward = _vector3_tuple(basis["forward"])
+    right = _vector3_tuple(basis["right"])
+    local_right = _vector3_dot(global_vector, right)
+    local_forward = _vector3_dot(global_vector, forward)
+    local_up = _vector3_dot(global_vector, _vector3_tuple(basis["up"]))
+    pan_degrees = math.degrees(math.atan2(local_right, local_forward))
+    tilt_degrees = math.degrees(math.atan2(local_up, math.hypot(local_right, local_forward)))
+    pan_degrees += float(calibration.pan_correction_degrees)
+    tilt_degrees += float(calibration.tilt_correction_degrees)
+    diagnostics = {
+        **common_diagnostics,
+        "pan_degrees": pan_degrees,
+        "tilt_degrees": tilt_degrees,
+        "basis": {key: basis[key].as_dict() for key in ("forward", "right", "up")},
+    }
+    if not (
+        calibration.pan_min_degrees <= pan_degrees <= calibration.pan_max_degrees
+        and calibration.tilt_min_degrees <= tilt_degrees <= calibration.tilt_max_degrees
+    ):
+        return {
+            "status": "UNREACHABLE",
+            "pan": None,
+            "tilt": None,
+            "predicted_output": None,
+            **diagnostics,
+        }
+    theoretical_pan_output = _angle_to_dmx16(
+        pan_degrees,
+        calibration.pan_min_degrees,
+        calibration.pan_max_degrees,
+        calibration.pan_invert,
+    )
+    theoretical_tilt_output = _angle_to_dmx16(
+        tilt_degrees,
+        calibration.tilt_min_degrees,
+        calibration.tilt_max_degrees,
+        calibration.tilt_invert,
+    )
+    theoretical_output = {
+        "pan": theoretical_pan_output["coarse"],
+        "tilt": theoretical_tilt_output["coarse"],
+        "pan_fine": theoretical_pan_output["fine"] if calibration.use_fine_pan_tilt and calibration.supports_pan_fine else None,
+        "tilt_fine": theoretical_tilt_output["fine"] if calibration.use_fine_pan_tilt and calibration.supports_tilt_fine else None,
+    }
+    predicted_output = dict(theoretical_output)
+    mapping_source = "THEORETICAL_PROFILE"
+    model = calibration.kinematic_model if isinstance(calibration.kinematic_model, dict) else None
+    if model and model.get("status") == "CALIBRATED":
+        calibrated_pan = _calibrated_axis_output(pan_degrees, model.get("pan") or {})
+        calibrated_tilt = _calibrated_axis_output(tilt_degrees, model.get("tilt") or {})
+        if calibrated_pan is None or calibrated_tilt is None:
+            return {
+                "status": "UNREACHABLE",
+                "reason": "calibrated_output_outside_safe_raw_range",
+                "pan": None,
+                "tilt": None,
+                "predicted_output": None,
+                "theoretical_output": theoretical_output,
+                "mapping_source": "KINEMATIC_CALIBRATION_V1",
+                **diagnostics,
+            }
+        predicted_output = {
+            "pan": calibrated_pan["coarse"],
+            "tilt": calibrated_tilt["coarse"],
+            "pan_fine": calibrated_pan["fine"] if calibration.use_fine_pan_tilt and calibration.supports_pan_fine else None,
+            "tilt_fine": calibrated_tilt["fine"] if calibration.use_fine_pan_tilt and calibration.supports_tilt_fine else None,
+        }
+        mapping_source = "KINEMATIC_CALIBRATION_V1"
+    return {
+        "status": "RESOLVED",
+        "pan": predicted_output["pan"],
+        "tilt": predicted_output["tilt"],
+        "predicted_output": predicted_output,
+        "theoretical_output": theoretical_output,
+        "mapping_source": mapping_source,
+        **diagnostics,
+    }
+
+
+def venue_design_point_m(geometry, *, x, y, z=None):
+    """Resolve a normalized design point to explicit metre XYZ.
+
+    ``x``/``y`` are artistic-world coordinates relative to Venue Space, not
+    Venue Target coordinates. They intentionally may extend beyond ``[-1, 1]``
+    so a choreography path can leave the mapped room; the calibrated physical
+    solver remains the sole authority that bounds fixture movement. Missing
+    physical scale and non-finite input still fail closed.
+    """
+    geometry = geometry if isinstance(geometry, VenueGeometry) else venue_geometry_from_mapping(geometry)
+    if z is None:
+        z = geometry.audience_target_height_m
+    if z is None:
+        return None
+    try:
+        x, y, z = float(x), float(y), float(z)
+        if not all(math.isfinite(value) for value in (x, y, z)):
+            return None
+        if geometry.width_m is None or geometry.forward_depth_m is None:
+            return None
+        if y < 0.0 and geometry.rear_depth_m is None:
+            return None
+        depth = geometry.forward_depth_m if y >= 0.0 else geometry.rear_depth_m
+        return VenuePhysicalPoint(x * geometry.width_m / 2.0, y * depth, z)
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_spatial_movement_intent(slot_id, slot_config, geometry, intent, *, current_pan_raw=None, current_tilt_raw=None):
+    """Central world-intent -> fixture-specific raw Pan/Tilt resolver."""
+    target = _physical_point_from_mapping((intent or {}).get("world_target_xyz_m"))
+    direction = _vector3_from_mapping((intent or {}).get("world_direction"))
+    if target is None and direction is None:
+        return {
+            "status": "MISSING_WORLD_INTENT",
+            "mapping_source": "LEGACY_OR_THEORETICAL",
+            "predicted_output": None,
+        }
+    calibration = _venue_calibration_for_slot(
+        slot_id,
+        slot_config,
+        geometry if isinstance(geometry, VenueGeometry) else venue_geometry_from_mapping(geometry),
+        current_pan_raw=current_pan_raw,
+        current_tilt_raw=current_tilt_raw,
+    )
+    intent_kind = "WORLD_TARGET_XYZ_M"
+    if target is None:
+        direction_values = _vector3_tuple(direction)
+        direction_length = _vector3_length(direction_values)
+        if direction_length <= 1e-9:
+            return {
+                "status": "INVALID_WORLD_DIRECTION",
+                "mapping_source": "LEGACY_OR_THEORETICAL",
+                "predicted_output": None,
+            }
+        fixture_point = calibration.position_m
+        if fixture_point is None and calibration.position is not None and calibration.mounting_height_m is not None:
+            try:
+                fixture_point = venue_normalized_to_meters(
+                    calibration.position,
+                    geometry if isinstance(geometry, VenueGeometry) else venue_geometry_from_mapping(geometry),
+                    height_m=calibration.mounting_height_m,
+                )
+            except ValueError:
+                fixture_point = None
+        if fixture_point is None:
+            return {
+                "status": "MISSING_FIXTURE_CALIBRATION",
+                "mapping_source": "LEGACY_OR_THEORETICAL",
+                "predicted_output": None,
+            }
+        scale = 100.0 / direction_length
+        target = VenuePhysicalPoint(
+            fixture_point.x + direction.x * scale,
+            fixture_point.y + direction.y * scale,
+            fixture_point.z + direction.z * scale,
+        )
+        intent_kind = "WORLD_DIRECTION"
+    result = resolve_venue_target(calibration, target, geometry)
+    result["spatial_intent"] = {
+        "kind": intent_kind,
+        "effect": str((intent or {}).get("effect") or "SPATIAL_MOVEMENT"),
+        "world_target_xyz_m": target.as_dict(),
+        "world_direction": None if direction is None else direction.as_dict(),
+        "movement_space": str((intent or {}).get("movement_space") or "VENUE_NATIVE"),
+        "semantic_path": str((intent or {}).get("semantic_path") or "WORLD_TARGET"),
+    }
+    result["movement_mapping_authority"] = (
+        "V2_ACTIVE_CALIBRATED"
+        if result.get("mapping_source") == "AXIS_MAPPING_V2"
+        else "LEGACY_OR_THEORETICAL"
+    )
+    return result
+
+
+def _final_motion_byte(values, channel):
+    """Read one final DMX byte without assuming JSON key representation."""
+    if not isinstance(values, dict):
+        return None
+    raw = values.get(channel, values.get(str(channel)))
+    if raw is None:
+        return None
+    try:
+        return clamp_dmx(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _final_motion_angle(coarse, fine, lower, upper, inverted):
+    """Decode the renderer's exact coarse/fine output to one physical angle."""
+    if coarse is None or lower is None or upper is None or upper <= lower:
+        return None
+    if fine is None:
+        ratio = float(coarse) / 255.0
+    else:
+        ratio = ((int(coarse) << 8) | int(fine)) / 65535.0
+    if inverted:
+        ratio = 1.0 - ratio
+    return float(lower) + ratio * (float(upper) - float(lower))
+
+
+def rendered_motion_projection(config, rendered_final_values):
+    """Project the post-merge frame into global physical beam directions.
+
+    ``slot_previews`` intentionally remain compositor/show intent.  This
+    projection instead decodes the bytes which the renderer has already merged
+    and is about to dispatch.  It is therefore the sole live motion source for
+    native stage maps and never asks a client to redo fixture inversion,
+    fine-channel decoding, or the Forward/Up basis calculation.
+    """
+    config = config if isinstance(config, dict) else {}
+    slots = config.get("slots") if isinstance(config.get("slots"), dict) else {}
+    slot_order = config.get("slot_order") if isinstance(config.get("slot_order"), list) else list(slots)
+    geometry = venue_geometry_from_mapping(config.get("venue_geometry"))
+    result = {}
+
+    for slot_id in slot_order:
+        slot = slots.get(slot_id)
+        if not isinstance(slot, dict) or not slot.get("enabled", True):
+            continue
+        try:
+            fixture = find_fixture(FIXTURE_LIBRARY, slot.get("fixture"))
+            mode = find_mode(fixture, slot.get("mode"))
+            capabilities = mode_capabilities(mode)
+            address = int(slot.get("address") or 1)
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        offsets = {
+            str(channel.get("type")): address + int(channel.get("offset") or 1) - 1
+            for channel in mode.get("channels", [])
+            if str(channel.get("type")) in {"pan", "pan_fine", "tilt", "tilt_fine"}
+        }
+        if not (capabilities.get("pan") or capabilities.get("tilt")):
+            continue
+
+        pan = _final_motion_byte(rendered_final_values, offsets.get("pan"))
+        pan_fine = _final_motion_byte(rendered_final_values, offsets.get("pan_fine"))
+        tilt = _final_motion_byte(rendered_final_values, offsets.get("tilt"))
+        tilt_fine = _final_motion_byte(rendered_final_values, offsets.get("tilt_fine"))
+        has_pan = bool(capabilities.get("pan"))
+        has_tilt = bool(capabilities.get("tilt"))
+        available = (not has_pan or pan is not None) and (not has_tilt or tilt is not None)
+        calibration = fixture_calibration_state(slot_id, slot, geometry)
+        axis_v2 = axis_mapping_v2_state(slot_id, slot, geometry)
+        calibration_ready = calibration.get("status") == "VALID" or axis_v2.get("status") == "ACTIVE"
+
+        projection = {
+            "slot_id": str(slot_id),
+            "fixture_id": str(slot.get("fixture") or ""),
+            "label": str(slot.get("label") or slot_id),
+            "source": "rendered_final_values",
+            "supported": bool(has_pan and has_tilt),
+            "available": bool(available),
+            "status": "AVAILABLE" if available and calibration_ready else (
+                "CALIBRATION_INCOMPLETE" if available else "UNAVAILABLE"
+            ),
+            "pan": pan,
+            "pan_fine": pan_fine if capabilities.get("pan_fine") else None,
+            "tilt": tilt,
+            "tilt_fine": tilt_fine if capabilities.get("tilt_fine") else None,
+            "pan_16bit": None if pan is None else ((pan << 8) | (pan_fine or 0)) if capabilities.get("pan_fine") else None,
+            "tilt_16bit": None if tilt is None else ((tilt << 8) | (tilt_fine or 0)) if capabilities.get("tilt_fine") else None,
+            "physical_pan_degrees": None,
+            "physical_tilt_degrees": None,
+            "physical_tilt_plane_degrees": None,
+            "commanded_pan_degrees": None,
+            "commanded_tilt_degrees": None,
+            "world_direction": None,
+            "fixture_position_m": None,
+            "calibration_status": calibration.get("status"),
+        }
+        if not (available and has_pan and has_tilt and calibration_ready):
+            result[str(slot_id)] = projection
+            continue
+
+        pan_range = calibration.get("capabilities", {}).get("pan_range_degrees")
+        tilt_range = calibration.get("capabilities", {}).get("tilt_range_degrees")
+        aim = kinematic_calibration_state(slot_id, slot, geometry)
+        if axis_v2.get("status") == "ACTIVE":
+            pan_raw = _axis_bytes_to_raw(pan, pan_fine, bool(capabilities.get("pan_fine") and slot.get("use_fine_pan_tilt", True)))
+            tilt_raw = _axis_bytes_to_raw(tilt, tilt_fine, bool(capabilities.get("tilt_fine") and slot.get("use_fine_pan_tilt", True)))
+            physical_pan = axis_mapping_v2_forward(pan_raw, axis_v2["model"]["pan"])
+            physical_tilt = axis_mapping_v2_forward(tilt_raw, axis_v2["model"]["tilt"])
+            if physical_pan is None or physical_tilt is None:
+                projection.update({"status": "UNREACHABLE", "mapping_source": "AXIS_MAPPING_V2"})
+                result[str(slot_id)] = projection
+                continue
+            direction = axis_mapping_v2_world_direction(physical_pan, physical_tilt)
+            projection.update({
+                "status": "AVAILABLE",
+                "mapping_source": "AXIS_MAPPING_V2",
+                "movement_mapping_authority": "AXIS_MAPPING_V2",
+                "commanded_pan_degrees": physical_pan,
+                "commanded_tilt_degrees": physical_tilt,
+                "physical_pan_degrees": physical_pan,
+                "physical_tilt_degrees": physical_tilt,
+                "physical_tilt_plane_degrees": physical_tilt,
+                "world_direction": direction.as_dict(),
+            })
+            projection["fixture_position_m"] = calibration.get("position_m")
+            if projection["fixture_position_m"] is None:
+                raw_calibration = slot.get("venue_calibration") if isinstance(slot.get("venue_calibration"), dict) else {}
+                position = _point_from_mapping(raw_calibration.get("position"))
+                height = _optional_physical_dimension(raw_calibration.get("mounting_height_m"), allow_zero=True)
+                if position is not None and height is not None:
+                    with suppress(ValueError):
+                        projection["fixture_position_m"] = venue_normalized_to_meters(position, geometry, height_m=height).as_dict()
+            result[str(slot_id)] = projection
+            continue
+        if aim.get("status") == "CALIBRATED":
+            pan_raw = _axis_bytes_to_raw(pan, pan_fine, bool(capabilities.get("pan_fine")))
+            tilt_raw = _axis_bytes_to_raw(tilt, tilt_fine, bool(capabilities.get("tilt_fine")))
+            commanded_pan = _calibrated_axis_angle(pan_raw, aim["model"]["pan"])
+            commanded_tilt = _calibrated_axis_angle(tilt_raw, aim["model"]["tilt"])
+            projection["mapping_source"] = "KINEMATIC_CALIBRATION_V1"
+        else:
+            commanded_pan = _final_motion_angle(
+                pan, pan_fine if capabilities.get("pan_fine") else None,
+                -float(pan_range) / 2.0, float(pan_range) / 2.0,
+                bool(slot.get("pan_invert")),
+            )
+            commanded_tilt = _final_motion_angle(
+                tilt, tilt_fine if capabilities.get("tilt_fine") else None,
+                -float(tilt_range) / 2.0, float(tilt_range) / 2.0,
+                bool(slot.get("tilt_invert")),
+            )
+            projection["mapping_source"] = "THEORETICAL_PROFILE"
+        projection["movement_mapping_authority"] = (
+            "KINEMATIC_CALIBRATION_V1" if aim.get("status") == "CALIBRATED" else "THEORETICAL_PROFILE"
+        )
+        raw_calibration = slot.get("venue_calibration") if isinstance(slot.get("venue_calibration"), dict) else {}
+        # Calibrated inverse output already expresses the requested fixture-local
+        # physical direction. Legacy theoretical output still removes the old
+        # bounded correction offsets here.
+        if aim.get("status") == "CALIBRATED":
+            physical_pan = commanded_pan
+            physical_tilt = commanded_tilt
+        else:
+            physical_pan = commanded_pan - float(raw_calibration.get("pan_correction_degrees") or 0.0)
+            physical_tilt = commanded_tilt - float(raw_calibration.get("tilt_correction_degrees") or 0.0)
+        forward = _vector3_tuple(_vector3_from_mapping(calibration.get("physical_forward")))
+        right = _vector3_tuple(_vector3_from_mapping(calibration.get("derived_right")))
+        up = _vector3_tuple(_vector3_from_mapping(calibration.get("physical_up")))
+        pan_radians = math.radians(physical_pan)
+        tilt_radians = math.radians(physical_tilt)
+        horizontal = math.cos(tilt_radians)
+        direction = _vector3_normalize(tuple(
+            forward[index] * horizontal * math.cos(pan_radians)
+            + right[index] * horizontal * math.sin(pan_radians)
+            + up[index] * math.sin(tilt_radians)
+            for index in range(3)
+        ))
+        projection.update({
+            "status": "AVAILABLE",
+            "commanded_pan_degrees": commanded_pan,
+            "commanded_tilt_degrees": commanded_tilt,
+            "physical_pan_degrees": physical_pan,
+            "physical_tilt_degrees": physical_tilt,
+            "world_direction": None if direction is None else VenueVector3(*direction).as_dict(),
+        })
+        projection["fixture_position_m"] = calibration.get("position_m")
+        position = _point_from_mapping(raw_calibration.get("position"))
+        height = _optional_physical_dimension(raw_calibration.get("mounting_height_m"), allow_zero=True)
+        if projection["fixture_position_m"] is None and position is not None and height is not None:
+            try:
+                projection["fixture_position_m"] = venue_normalized_to_meters(
+                    position, geometry, height_m=height
+                ).as_dict()
+            except ValueError:
+                pass
+        result[str(slot_id)] = projection
+    return result
+
+
+def _vector3_from_mapping(value):
+    if not isinstance(value, dict):
+        return None
+    try:
+        components = [float(value[key]) for key in ("x", "y", "z")]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(component) for component in components):
+        return None
+    return VenueVector3(*components)
+
+
+def _physical_point_from_mapping(value):
+    """Decode canonical metre XYZ without clamping legitimate venue positions."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        components = [float(value[key]) for key in ("x", "y", "z")]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(component) for component in components):
+        return None
+    return VenuePhysicalPoint(*components)
+
+
+def _point_from_mapping(value):
+    if not isinstance(value, dict):
+        return None
+    try:
+        x = float(value["x"])
+        y = float(value["y"])
+        # Calibration XY remains normalized. Legacy normalized ``z`` values
+        # are deliberately ignored; physical height has its own metre field.
+        return VenuePoint(x, y)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _clean_kinematic_calibration(value):
+    raw = value if isinstance(value, dict) else {}
+    anchors = {}
+    for raw_target, raw_anchor in (raw.get("anchors") or {}).items():
+        target_id = canonical_venue_target_id(raw_target)
+        if target_id not in KINEMATIC_REQUIRED_ANCHORS or not isinstance(raw_anchor, dict):
+            continue
+        try:
+            anchor = {
+                "target": target_id,
+                "target_xyz_m": {key: float(raw_anchor["target_xyz_m"][key]) for key in ("x", "y", "z")},
+                "target_vector_m": {key: float(raw_anchor["target_vector_m"][key]) for key in ("x", "y", "z")},
+                "desired_pan_degrees": float(raw_anchor["desired_pan_degrees"]),
+                "desired_tilt_degrees": float(raw_anchor["desired_tilt_degrees"]),
+                "actual_pan_raw": int(raw_anchor["actual_pan_raw"]),
+                "actual_tilt_raw": int(raw_anchor["actual_tilt_raw"]),
+                "actual_output": {
+                    key: (None if raw_anchor["actual_output"].get(key) is None else clamp_dmx(raw_anchor["actual_output"][key]))
+                    for key in ("pan", "pan_fine", "tilt", "tilt_fine")
+                },
+                "geometry_signature": str(raw_anchor.get("geometry_signature") or ""),
+                "saved_at": float(raw_anchor.get("saved_at") or 0.0),
+            }
+        except (KeyError, TypeError, ValueError):
+            continue
+        finite_values = (
+            list(anchor["target_xyz_m"].values())
+            + list(anchor["target_vector_m"].values())
+            + [anchor["desired_pan_degrees"], anchor["desired_tilt_degrees"]]
+        )
+        if all(math.isfinite(value) for value in finite_values):
+            anchors[target_id] = anchor
+    model = raw.get("model") if isinstance(raw.get("model"), dict) else None
+    validation = raw.get("validation") if isinstance(raw.get("validation"), dict) else None
+    if validation:
+        result = str(validation.get("result") or "").upper()
+        validation = {
+            "target": KINEMATIC_VALIDATION_TARGET,
+            "result": result if result in {"PASS", "ADJUSTMENT_REQUIRED"} else None,
+            "recorded_at": float(validation.get("recorded_at") or 0.0),
+            "geometry_signature": str(validation.get("geometry_signature") or ""),
+        }
+    return {
+        "version": KINEMATIC_CALIBRATION_VERSION,
+        "geometry_signature": str(raw.get("geometry_signature") or ""),
+        "anchors": anchors,
+        "model": model,
+        "validation": validation,
+    }
+
+
+def kinematic_calibration_state(slot_id, slot_config, geometry=None):
+    geometry = geometry if isinstance(geometry, VenueGeometry) else venue_geometry_from_mapping(geometry)
+    raw = _clean_kinematic_calibration(slot_config.get("kinematic_calibration"))
+    try:
+        signature = kinematic_calibration_signature(slot_config, geometry)
+        fixture = find_fixture(FIXTURE_LIBRARY, slot_config.get("fixture"))
+        mode = find_mode(fixture, slot_config.get("mode"))
+        capabilities = mode_capabilities(mode)
+    except Exception:
+        return {"status": "UNSUPPORTED", "anchor_count": 0, "required_anchor_count": 3, "anchors": {}, "model": None}
+    if not (capabilities.get("pan") and capabilities.get("tilt")):
+        return {"status": "UNSUPPORTED", "anchor_count": 0, "required_anchor_count": 3, "anchors": {}, "model": None}
+    anchors = raw["anchors"]
+    stale = bool(anchors) and raw.get("geometry_signature") != signature
+    fitted = fit_kinematic_calibration(
+        anchors,
+        pan_supports_fine=bool(capabilities.get("pan_fine") and slot_config.get("use_fine_pan_tilt", True)),
+        tilt_supports_fine=bool(capabilities.get("tilt_fine") and slot_config.get("use_fine_pan_tilt", True)),
+    )
+    persisted_model = raw.get("model")
+    model_matches = isinstance(persisted_model, dict) and persisted_model == fitted
+    if stale:
+        status, reason = "STALE", "FOUNDATIONAL_GEOMETRY_CHANGED"
+    elif fitted.get("status") == "CALIBRATED" and model_matches:
+        status, reason = "CALIBRATED", None
+    else:
+        status, reason = fitted.get("status", "PARTIAL"), fitted.get("reason")
+    return {
+        "version": KINEMATIC_CALIBRATION_VERSION,
+        "slot_id": str(slot_id),
+        "status": status,
+        "reason": reason,
+        "anchor_count": len(anchors),
+        "required_anchor_count": len(KINEMATIC_REQUIRED_ANCHORS),
+        "required_anchors": list(KINEMATIC_REQUIRED_ANCHORS),
+        "missing_anchors": [anchor for anchor in KINEMATIC_REQUIRED_ANCHORS if anchor not in anchors],
+        "anchors": anchors,
+        "model": persisted_model if status == "CALIBRATED" else fitted,
+        "current_geometry_signature": signature,
+        "stored_geometry_signature": raw.get("geometry_signature"),
+        "validation": raw.get("validation"),
+    }
+
+
+def _venue_calibration_for_slot(slot_id, slot_config, geometry, *, use_kinematic=True, use_axis_mapping_v2=True, current_pan_raw=None, current_tilt_raw=None):
+    diagnostic = fixture_calibration_state(slot_id, slot_config, geometry)
+    capabilities = diagnostic.get("capabilities") or {}
+    raw_venue = slot_config.get("venue_calibration") if isinstance(slot_config.get("venue_calibration"), dict) else {}
+    aim = kinematic_calibration_state(slot_id, slot_config, geometry)
+    axis_v2 = axis_mapping_v2_state(slot_id, slot_config, geometry)
+    axis_model = axis_v2.get("model") if use_axis_mapping_v2 and axis_v2.get("status") == "ACTIVE" else None
+    return VenueFixtureCalibration(
+        supports_pan_tilt=bool(capabilities.get("pan") and capabilities.get("tilt")),
+        position_m=_physical_point_from_mapping(raw_venue.get("position_m")),
+        position=_point_from_mapping(raw_venue.get("position")),
+        mounting_height_m=_optional_physical_dimension(raw_venue.get("mounting_height_m"), allow_zero=True),
+        physical_forward=_vector3_from_mapping(raw_venue.get("physical_forward")),
+        physical_up=_vector3_from_mapping(raw_venue.get("physical_up")),
+        pan_min_degrees=-(capabilities.get("pan_range_degrees") or 0) / 2.0,
+        pan_max_degrees=(capabilities.get("pan_range_degrees") or 0) / 2.0,
+        tilt_min_degrees=-(capabilities.get("tilt_range_degrees") or 0) / 2.0,
+        tilt_max_degrees=(capabilities.get("tilt_range_degrees") or 0) / 2.0,
+        **physical_tilt_calibration_fields(slot_config),
+        pan_invert=bool(slot_config.get("pan_invert")),
+        tilt_invert=bool(slot_config.get("tilt_invert")),
+        pan_correction_degrees=float(raw_venue.get("pan_correction_degrees") or 0),
+        tilt_correction_degrees=float(raw_venue.get("tilt_correction_degrees") or 0),
+        use_fine_pan_tilt=bool(slot_config.get("use_fine_pan_tilt", True)),
+        supports_pan_fine=bool(capabilities.get("pan_fine")),
+        supports_tilt_fine=bool(capabilities.get("tilt_fine")),
+        kinematic_model=aim.get("model") if use_kinematic and axis_model is None and aim.get("status") == "CALIBRATED" else None,
+        axis_mapping_v2=axis_model,
+        current_pan_raw=current_pan_raw,
+        current_tilt_raw=current_tilt_raw,
+    )
+
+
+def fixture_calibration_state(slot_id, slot_config, geometry=None):
+    raw = slot_config.get("venue_calibration") if isinstance(slot_config, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+    position_m = _physical_point_from_mapping(raw.get("position_m"))
+    position = _point_from_mapping(raw.get("position"))
+    mounting_height_m = _optional_physical_dimension(
+        raw.get("mounting_height_m"), allow_zero=True
+    )
+    effective_position_m = position_m
+    position_migration_status = "NOT_REQUIRED"
+    if effective_position_m is None and position is not None and mounting_height_m is not None:
+        try:
+            effective_position_m = venue_normalized_to_meters(
+                position,
+                geometry if isinstance(geometry, VenueGeometry) else venue_geometry_from_mapping(geometry),
+                height_m=mounting_height_m,
+            )
+            position_migration_status = "LEGACY_FREEZE_PENDING_PERSISTENCE"
+        except ValueError:
+            # A legacy normalized coordinate has no independent physical
+            # meaning until the venue scale is known.  Do not silently keep
+            # converting it against later geometry edits.
+            position_migration_status = "POSITION_MIGRATION_REQUIRES_VENUE_SCALE"
+    forward = _vector3_from_mapping(raw.get("physical_forward"))
+    up = _vector3_from_mapping(raw.get("physical_up"))
+    basis = fixture_orientation_basis(forward, up)
+    try:
+        fixture = find_fixture(FIXTURE_LIBRARY, slot_config.get("fixture"))
+        mode = find_mode(fixture, slot_config.get("mode"))
+        capabilities = mode_capabilities(mode)
+        supports_pan_tilt = bool(capabilities.get("pan") and capabilities.get("tilt"))
+        pan_range = float(fixture.get("pan_range")) if fixture.get("pan_range") is not None else None
+        tilt_range = float(fixture.get("tilt_range")) if fixture.get("tilt_range") is not None else None
+        physical_tilt_limits = fixture_physical_tilt_limits(slot_config)
+    except Exception:
+        capabilities = {}
+        supports_pan_tilt = False
+        pan_range = tilt_range = None
+        physical_tilt_limits = None
+    missing = []
+    if position_m is None and position is None:
+        missing.append("position_m")
+    if forward is None:
+        missing.append("physical_forward")
+    if up is None:
+        missing.append("physical_up")
+    if position_m is None and mounting_height_m is None:
+        missing.append("fixture_height")
+    if pan_range is None:
+        missing.append("pan_range")
+    if tilt_range is None:
+        missing.append("tilt_range")
+    if position_migration_status == "POSITION_MIGRATION_REQUIRES_VENUE_SCALE":
+        status = "POSITION_MIGRATION_REQUIRES_VENUE_SCALE"
+    elif not supports_pan_tilt:
+        status = "UNSUPPORTED"
+    elif basis["status"] == "INVALID":
+        status = "INVALID"
+    elif position_m is None and position is None and forward is None and up is None:
+        status = "UNCALIBRATED"
+    elif missing:
+        status = "PARTIAL"
+    else:
+        status = "VALID"
+    calibration = VenueFixtureCalibration(
+        supports_pan_tilt=supports_pan_tilt,
+        position_m=position_m,
+        position=position,
+        mounting_height_m=mounting_height_m,
+        physical_forward=forward,
+        physical_up=up,
+        pan_min_degrees=None if pan_range is None else -pan_range / 2.0,
+        pan_max_degrees=None if pan_range is None else pan_range / 2.0,
+        tilt_min_degrees=None if tilt_range is None else -tilt_range / 2.0,
+        tilt_max_degrees=None if tilt_range is None else tilt_range / 2.0,
+        **physical_tilt_calibration_fields(slot_config),
+        pan_invert=bool(slot_config.get("pan_invert")),
+        tilt_invert=bool(slot_config.get("tilt_invert")),
+        pan_correction_degrees=float(raw.get("pan_correction_degrees") or 0.0),
+        tilt_correction_degrees=float(raw.get("tilt_correction_degrees") or 0.0),
+        use_fine_pan_tilt=bool(slot_config.get("use_fine_pan_tilt", True)),
+        supports_pan_fine=bool(capabilities.get("pan_fine")),
+        supports_tilt_fine=bool(capabilities.get("tilt_fine")),
+    )
+    target = VENUE_TARGETS["AUDIENCE_MID_CENTER"]
+    audience_test = resolve_venue_target(calibration, target, geometry)
+    result = {
+        "slot_id": str(slot_id),
+        "label": str(slot_config.get("label") or slot_id),
+        "status": status,
+        "missing_calibration": missing,
+        "position_m": None if effective_position_m is None else effective_position_m.as_dict(),
+        "position_source": "METER_SPACE" if position_m is not None else (
+            "LEGACY_NORMALIZED" if position is not None else "MISSING"
+        ),
+        "position_migration_status": position_migration_status,
+        "position": None if position is None else position.as_dict(),
+        "mounting_height_m": mounting_height_m,
+        "physical_forward": None if forward is None else forward.as_dict(),
+        "physical_up": None if up is None else up.as_dict(),
+        "derived_right": None,
+        "basis_reason": basis.get("reason"),
+        "pan_correction_degrees": calibration.pan_correction_degrees,
+        "tilt_correction_degrees": calibration.tilt_correction_degrees,
+        "capabilities": {
+            "pan": bool(capabilities.get("pan")),
+            "pan_fine": bool(capabilities.get("pan_fine")),
+            "tilt": bool(capabilities.get("tilt")),
+            "tilt_fine": bool(capabilities.get("tilt_fine")),
+            "pan_range_degrees": pan_range,
+            "tilt_range_degrees": tilt_range,
+            "physical_tilt_min_deg": None if physical_tilt_limits is None else physical_tilt_limits["min_deg"],
+            "physical_tilt_center_deg": None if physical_tilt_limits is None else physical_tilt_limits["center_deg"],
+            "physical_tilt_max_deg": None if physical_tilt_limits is None else physical_tilt_limits["max_deg"],
+            "physical_tilt_limits_source": None if physical_tilt_limits is None else physical_tilt_limits["source"],
+            "pan_zero_reference": "PHYSICAL_FORWARD",
+            "tilt_zero_reference": "PHYSICAL_FORWARD_PLANE",
+        },
+        "audience_center_test": audience_test,
+    }
+    if basis["status"] == "VALID":
+        result["physical_forward"] = basis["forward"].as_dict()
+        result["physical_up"] = basis["up"].as_dict()
+        result["derived_right"] = basis["right"].as_dict()
+    result["kinematic_calibration"] = kinematic_calibration_state(slot_id, slot_config, geometry)
+    result["axis_mapping_v2"] = axis_mapping_v2_state(slot_id, slot_config, geometry)
+    return result
+
+
+def venue_space_state(config=None):
+    """Additive physical Venue Geometry contract and safe target diagnostics."""
+    geometry = venue_geometry_from_mapping(
+        config.get("venue_geometry") if isinstance(config, dict) else None
+    )
+    fixtures = []
+    if isinstance(config, dict):
+        slots = config.get("slots") if isinstance(config.get("slots"), dict) else {}
+        for slot_id in config.get("slot_order") or list(slots):
+            if slot_id in slots:
+                fixture_state = fixture_calibration_state(slot_id, slots[slot_id], geometry)
+                if fixture_state["status"] != "UNSUPPORTED":
+                    fixtures.append(fixture_state)
+    valid_count = sum(item["status"] == "VALID" for item in fixtures)
+    missing_scale = venue_geometry_missing_fields(geometry)
+    vertical_layers = venue_target_vertical_layer_state(geometry)
+    if missing_scale:
+        geometry_status = "MISSING_VENUE_SCALE"
+    elif geometry.audience_target_height_m is None:
+        geometry_status = "MISSING_TARGET_HEIGHT"
+    else:
+        geometry_status = "READY"
+    targets = []
+    for target_id, point in VENUE_TARGETS.items():
+        physical = None
+        target_missing_geometry = venue_geometry_missing_fields(geometry, point)
+        if geometry_status == "READY" and not target_missing_geometry:
+            physical = venue_normalized_to_meters(
+                point,
+                geometry,
+                height_m=geometry.audience_target_height_m,
+            ).as_dict()
+        target_parts = target_id.split("_")
+        targets.append({
+            "id": target_id,
+            "zone": target_parts[1] if target_id.startswith("AUDIENCE_") else "REAR",
+            "position": target_parts[-1],
+            "point": point.as_dict(),
+            "physical_point_m": physical,
+            "missing_geometry": target_missing_geometry,
+        })
+    return {
+        "version": 4,
+        "viewpoint": "DJ",
+        "origin": VenuePoint(0.0, 0.0).as_dict(),
+        "axes": {
+            "x_negative": "DJ_LEFT",
+            "x_positive": "DJ_RIGHT",
+            "y_positive": "AUDIENCE",
+            "y_negative": "REAR",
+        },
+        "venue_geometry": {
+            **geometry.as_dict(),
+            "status": geometry_status,
+            "missing_geometry": missing_scale
+            + (["audience_target_height_m"] if geometry.audience_target_height_m is None else []),
+        },
+        "vertical_layers": [
+            {"id": layer.value, **vertical_layers[layer.value]}
+            for layer in VenueTargetVerticalLayer
+        ],
+        "default_vertical_layer": VenueTargetVerticalLayer.NORMAL.value,
+        "targets": targets,
+        "resolver": {
+            "status": (
+                geometry_status
+                if geometry_status != "READY"
+                else "READY" if fixtures and valid_count == len(fixtures) else VENUE_TARGET_RESOLVER_HOLD
+            ),
+            "missing_calibration": [
+                "backend_authoritative_fixture_venue_position",
+                "physical_pan_zero_heading_in_venue_space",
+                "physical_tilt_zero_elevation",
+                "fixture_mount_height_and_target_elevation",
+                "verified_safe_pan_tilt_angle_limits",
+            ],
+        },
+        "fixtures": fixtures,
+        "audience_effect_migration": "VENUE_NATIVE_METERS_V1",
+    }
 PLAYBACK_DISCONTINUITY_MINIMUM_MS = 750.0
 DEFAULT_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS = 100
 MINIMUM_VIRTUALDJ_BEAT_PULSE_DURATION_MILLISECONDS = 40
@@ -1185,6 +3383,19 @@ class SongAnalyzerStructureHandoff:
                         "start_bar": event.start_bar,
                         "end_bar": event.end_bar,
                         "origin_observation_id": event.origin_observation_id,
+                        # Compact directional evidence lets BeatBeam distinguish
+                        # a strong release arrival from an ordinary arrival
+                        # without changing SongAnalyzer's source contract.
+                        "character_context": {
+                            "origin_relative_energy": event.character_context.origin_relative_energy,
+                            "destination_relative_energy": event.character_context.destination_relative_energy,
+                            "energy_trajectory": event.character_context.energy_trajectory,
+                            "energy_direction": event.character_context.energy_direction,
+                            "onset_direction": event.character_context.onset_direction,
+                            "silence_direction": event.character_context.silence_direction,
+                            "entry_contrast": event.character_context.entry_contrast,
+                            "boundary_novelty": event.character_context.boundary_novelty,
+                        },
                     } for event in track.rich_musical_events.events]
             if track.availability == "missing":
                 return result
@@ -1814,6 +4025,157 @@ AUTO_SHOW_MANUAL_PRESET_PALETTES = {
     "pink_blue": ("pink", "blue", "white"),
 }
 
+# V2 recipes describe musical zone intent, never DMX addresses.  The fixture
+# profile remains the authority for the number and ordering of RGB zones.
+WALL_WASH_V2_RECIPES = MappingProxyType({
+    "wash_chase_forward": MappingProxyType({"label": "Wash Chase Forward", "kind": "chase", "speed": 2.0}),
+    "wash_chase_reverse": MappingProxyType({"label": "Wash Chase Reverse", "kind": "chase_reverse", "speed": 2.0}),
+    "wash_bounce": MappingProxyType({"label": "Wash Bounce", "kind": "bounce", "speed": 1.5}),
+    "wash_center_out": MappingProxyType({"label": "Wash Center Out", "kind": "center_out", "speed": 1.5}),
+    "wash_outside_in": MappingProxyType({"label": "Wash Outside In", "kind": "outside_in", "speed": 1.5}),
+    "wash_alternating_halves": MappingProxyType({"label": "Wash Alternating Halves", "kind": "halves", "speed": 1.0}),
+    "wash_zone_alternate": MappingProxyType({"label": "Wash Zone Alternate", "kind": "alternate", "speed": 2.0}),
+    "wash_wave_forward": MappingProxyType({"label": "Wash Wave Forward", "kind": "wave", "speed": 0.75}),
+    "wash_wave_reverse": MappingProxyType({"label": "Wash Wave Reverse", "kind": "wave_reverse", "speed": 0.75}),
+    "wash_ripple": MappingProxyType({"label": "Wash Ripple", "kind": "ripple", "speed": 1.0}),
+    "wash_color_wipe": MappingProxyType({"label": "Wash Color Wipe", "kind": "wipe", "speed": 0.50}),
+    "wash_zone_hits": MappingProxyType({"label": "Wash Zone Hits", "kind": "hits", "speed": 2.0}),
+    "wash_build_fill": MappingProxyType({"label": "Wash Build Fill", "kind": "build", "speed": 1.0}),
+    "wash_drop_explosion": MappingProxyType({"label": "Wash Drop Explosion", "kind": "drop", "speed": 1.0}),
+    "wash_mirror_chase": MappingProxyType({"label": "Wash Mirror Chase", "kind": "mirror_chase", "speed": 2.0}),
+    "wash_opposing_wave": MappingProxyType({"label": "Wash Opposing Wave", "kind": "opposing_wave", "speed": 0.75}),
+    "wash_cannon": MappingProxyType({"label": "Wash Cannon", "kind": "cannon", "speed": 2.0}),
+    "wash_call_response": MappingProxyType({"label": "Wash Call Response", "kind": "call_response", "speed": 1.0}),
+    "wash_cross_ripple": MappingProxyType({"label": "Wash Cross Ripple", "kind": "cross_ripple", "speed": 1.0}),
+})
+
+
+def wall_wash_zone_count(mode):
+    """Return the profile-declared logical RGB zone count, safely."""
+    zones = []
+    for channel in (mode or {}).get("channels", []):
+        try:
+            zone = int(channel.get("zone"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if zone > 0 and channel.get("type") == "color":
+            zones.append(zone)
+    return max(zones, default=0)
+
+
+def _wall_wash_rgb_scale(rgbw, level):
+    level = max(0.0, min(1.0, float(level)))
+    return tuple(clamp_dmx(round(int(component) * level)) for component in tuple(rgbw)[:4])
+
+
+def wall_wash_v2_zone_rgb(cue_name, zone_count, beat_value, palette_rgbw,
+                          fixture_index=0, fixture_count=1, section_progress=0.0,
+                          phase_offset=0):
+    """Resolve one deterministic V2 wash recipe into logical RGBW zones.
+
+    This function deliberately has no renderer or wall-clock dependency.  It
+    is also useful for profiles with another number of RGB zones in tests.
+    """
+    recipe = WALL_WASH_V2_RECIPES.get(str(cue_name))
+    count = max(0, int(zone_count or 0))
+    if recipe is None or count == 0:
+        return [(0, 0, 0, 0)] * count
+    palette = tuple(palette_rgbw or ())
+    primary = tuple(palette[0]) if len(palette) > 0 else MANUAL_COLOR_PRESETS["blue"]
+    secondary = tuple(palette[1]) if len(palette) > 1 else primary
+    accent = tuple(palette[2]) if len(palette) > 2 else MANUAL_COLOR_PRESETS["white"]
+    white = MANUAL_COLOR_PRESETS["white"]
+    beat = max(0.0, float(beat_value or 0.0)) + float(phase_offset or 0.0)
+    fixture_index = max(0, int(fixture_index or 0))
+    fixture_count = max(1, int(fixture_count or 1))
+    progress = max(0.0, min(1.0, float(section_progress or 0.0)))
+    kind = recipe["kind"]
+    step = int(math.floor(beat * float(recipe["speed"])))
+    phase = beat * float(recipe["speed"])
+
+    def blank():
+        return [(0, 0, 0, 0) for _ in range(count)]
+
+    def point(index, color=accent, level=1.0, trail=True):
+        values = blank()
+        index %= count
+        values[index] = _wall_wash_rgb_scale(color, level)
+        if trail and count > 1:
+            values[(index - 1) % count] = _wall_wash_rgb_scale(primary, level * .24)
+            values[(index + 1) % count] = _wall_wash_rgb_scale(primary, level * .24)
+        return values
+
+    def center_order(outward=True):
+        return sorted(range(count), key=lambda index: (abs(index - (count - 1) / 2.0), index), reverse=not outward)
+
+    if kind in {"chase", "chase_reverse", "mirror_chase", "cannon"}:
+        offset = fixture_index if kind == "cannon" else 0
+        direction = -1 if kind == "chase_reverse" else 1
+        if kind == "mirror_chase" and fixture_index % 2:
+            direction = -1
+        return point(direction * (step - offset), accent if step % 2 else primary)
+    if kind == "bounce":
+        route = list(range(count)) + list(range(max(0, count - 2), 0, -1))
+        return point(route[step % max(1, len(route))], accent if step % 2 else primary)
+    if kind in {"center_out", "outside_in"}:
+        center = (count - 1) / 2.0
+        distance_layers = sorted({abs(index - center) for index in range(count)})
+        layer = step % max(1, len(distance_layers))
+        threshold = distance_layers[layer if kind == "center_out" else -1 - layer]
+        if kind == "center_out":
+            active = {index for index in range(count) if abs(index - center) <= threshold}
+        else:
+            active = {index for index in range(count) if abs(index - center) >= threshold}
+        return [_wall_wash_rgb_scale(primary if index in active else secondary, 1.0 if index in active else .16) for index in range(count)]
+    if kind == "halves":
+        side = step % 2
+        split = (count + 1) // 2
+        return [_wall_wash_rgb_scale(primary if (index < split) == (side == 0) else secondary, 1.0 if (index < split) == (side == 0) else .18) for index in range(count)]
+    if kind == "alternate":
+        parity = step % 2
+        return [_wall_wash_rgb_scale(primary if index % 2 == parity else secondary, 1.0 if index % 2 == parity else .30) for index in range(count)]
+    if kind in {"wave", "wave_reverse", "opposing_wave"}:
+        direction = -1.0 if kind == "wave_reverse" else 1.0
+        if kind == "opposing_wave" and fixture_index % 2:
+            direction *= -1.0
+        return [_wall_wash_rgb_scale(primary if index % 2 == 0 else secondary,
+                .16 + .84 * (0.5 + 0.5 * math.sin((phase * direction - index / max(1, count - 1)) * math.tau)))
+                for index in range(count)]
+    if kind in {"ripple", "cross_ripple"}:
+        handoff = fixture_index * (count / 2.0) if kind == "cross_ripple" else 0.0
+        radius = (phase - handoff) % max(1.0, count)
+        center = (count - 1) / 2.0
+        return [_wall_wash_rgb_scale(accent if abs(abs(index - center) - radius / 2.0) < .62 else primary,
+                1.0 if abs(abs(index - center) - radius / 2.0) < .62 else .12)
+                for index in range(count)]
+    if kind == "wipe":
+        edge = int((phase % (count + 1)))
+        return [primary if index < edge else secondary for index in range(count)]
+    if kind == "hits":
+        index = (step * 3 + fixture_index * 2) % count
+        values = point(index, white if step % 4 == 0 else accent, trail=False)
+        if step % 3 == 0 and count > 2:
+            values[(index + count // 2) % count] = _wall_wash_rgb_scale(accent, .82)
+        return values
+    if kind == "build":
+        extent = max(1, min(count, int(math.ceil((.12 + .88 * progress) * count))))
+        order = center_order(outward=True)
+        active = set(order[:extent])
+        level = .46 + .54 * progress
+        return [_wall_wash_rgb_scale(primary if index in active else secondary, level if index in active else .10 + .16 * progress) for index in range(count)]
+    if kind == "drop":
+        local = beat % 2.0
+        if local < .18:
+            return [_wall_wash_rgb_scale(white if index % 2 == 0 else accent, 1.0) for index in range(count)]
+        if local < .72:
+            return [_wall_wash_rgb_scale(accent if (index + step) % 2 == 0 else primary, .88 if (index + step) % 2 == 0 else .34) for index in range(count)]
+        return [_wall_wash_rgb_scale(primary, .28) for _ in range(count)]
+    if kind == "call_response":
+        caller = int(math.floor(beat / 2.0)) % fixture_count
+        active = fixture_index == caller
+        return [(_wall_wash_rgb_scale(accent if index % 2 == 0 else primary, .94) if active else _wall_wash_rgb_scale(secondary, .14)) for index in range(count)]
+    return blank()
+
 AUTO_SHOW_STYLES = {
     "adaptive": {
         "label": "Adaptive",
@@ -2158,6 +4520,11 @@ AUTO_SHOW_WASH_CUE_POOLS = {
         "center_glow_blue",
         "warm_center_glow",
         "rainbow_static",
+        "wash_chase_forward",
+        "wash_chase_reverse",
+        "wash_zone_alternate",
+        "wash_call_response",
+        "wash_color_wipe",
     ],
     "build": [
         "center_out_build",
@@ -2165,6 +4532,9 @@ AUTO_SHOW_WASH_CUE_POOLS = {
         "right_to_left_build",
         "blue_chase_left_to_right",
         "blue_chase_right_to_left",
+        "wash_center_out",
+        "wash_build_fill",
+        "wash_ripple",
     ],
     "chorus": [
         "alternating_white_blue",
@@ -2174,6 +4544,11 @@ AUTO_SHOW_WASH_CUE_POOLS = {
         "knight_rider_red",
         "red_blue_split",
         "blue_white_split",
+        "wash_bounce",
+        "wash_mirror_chase",
+        "wash_opposing_wave",
+        "wash_wave_forward",
+        "wash_wave_reverse",
     ],
     "drop": [
         "full_white_flash",
@@ -2183,6 +4558,10 @@ AUTO_SHOW_WASH_CUE_POOLS = {
         "alternating_red_blue",
         "center_white_punch",
         "edge_white_punch",
+        "wash_drop_explosion",
+        "wash_zone_hits",
+        "wash_cannon",
+        "wash_cross_ripple",
     ],
     "down": [
         "deep_blue_wash",
@@ -2202,6 +4581,9 @@ AUTO_SHOW_WASH_CUE_POOLS = {
         "center_glow_blue",
         "warm_center_glow",
         "soft_white_wash",
+        "wash_wave_forward",
+        "wash_color_wipe",
+        "wash_alternating_halves",
     ],
     "outro": [
         "soft_white_wash",
@@ -3221,7 +5603,114 @@ AUTO_SHOW_MOTION_PROFILES.update({
     "break_warm_low_glow": _motion_profile("center_hold", pan_center=128, tilt_center=195, pan_tilt_speed_static=180, dimmer_static=100, rgbw=[255, 130, 20, 80]),
     "break_no_movement_fade": _motion_profile("hold_pulse", pan_center=128, tilt_center=170, pulse_phase_scale=0.22, pan_tilt_speed_static=200, dimmer_min=0, dimmer_max=160, rgbw=[0, 60, 255, 80]),
     "live_audience_tilt_sweep": _motion_profile("tilt_sweep", use_full_tilt_range=True, tilt_phase_scale=2.0, full_tilt_curve=0.58, pan_base=12, pan_extra=10, tilt_base=188, tilt_wave=34, tilt_extra=12, pan_tilt_speed_static=26, dimmer_static=255, rgbw=[255, 255, 255, 255]),
+    # Named data profiles expose the V3 directional family through the same
+    # automatic effect catalogue as all production movement. Their V3 recipe
+    # is authoritative; these contain no new fixture-local aiming contract.
+    "full_sphere_explode": _motion_profile("circle", phase_scale=1.0, pan_tilt_speed_static=12, dimmer_static=255),
+    "floor_hit": _motion_profile("circle", phase_scale=1.0, pan_tilt_speed_static=8, dimmer_static=255),
+    "floor_hold_explode": _motion_profile("circle", phase_scale=.92, pan_tilt_speed_static=12, dimmer_static=255),
+    "full_sphere_cannon": _motion_profile("circle", phase_scale=1.08, pan_tilt_speed_static=10, dimmer_static=255),
+    "floor_forward_cannon": _motion_profile("circle", phase_scale=1.0, pan_tilt_speed_static=10, dimmer_static=255),
+    "dome_sweep_3d": _motion_profile("circle", phase_scale=.82, pan_tilt_speed_static=34, dimmer_static=255),
+    "floor_forward_sweep": _motion_profile("circle", phase_scale=.78, pan_tilt_speed_static=42, dimmer_static=230),
+    "forward_rear_arc": _motion_profile("circle", phase_scale=.82, pan_tilt_speed_static=34, dimmer_static=240),
+    "cross_3d": _motion_profile("circle", phase_scale=1.0, pan_tilt_speed_static=12, dimmer_static=255),
+    "volumetric_orbit": _motion_profile("circle", phase_scale=.86, pan_tilt_speed_static=36, dimmer_static=245),
+    "volumetric_figure_8": _motion_profile("circle", phase_scale=.90, pan_tilt_speed_static=36, dimmer_static=245),
+    "energy_scatter": _motion_profile("circle", phase_scale=1.0, pan_tilt_speed_static=8, dimmer_static=255),
+    "fan_3d": _motion_profile("circle", phase_scale=.78, pan_tilt_speed_static=28, dimmer_static=240),
+    "rear_hold_split": _motion_profile("circle", phase_scale=.84, pan_tilt_speed_static=24, dimmer_static=245),
 })
+
+# Venue Space is the hard default for production movement. The three entries
+# below deliberately do not move a fixture: they modulate light while retaining
+# the renderer's current Pan/Tilt. Raw manual positioning remains an explicit
+# operator/maintenance exception and calibration paths remain diagnostic only.
+MOVEMENT_SPACE_VENUE_NATIVE = "VENUE_NATIVE_SPATIAL"
+MOVEMENT_SPACE_FIXTURE_RELATIVE = "INTENTIONALLY_FIXTURE_RELATIVE"
+MOVEMENT_SPACE_CALIBRATION_ONLY = "CALIBRATION_DIAGNOSTIC_ONLY"
+MOVEMENT_SPACE_NON_MOVEMENT = "NON_MOVEMENT"
+
+NON_MOVEMENT_AUTO_SHOW_EFFECTS = frozenset({
+    "build_dimmer_pulse",
+    "build_white_flash_prep",
+    "break_no_movement_fade",
+})
+
+MOVEMENT_SPACE_CLASSIFICATION = {
+    name: (
+        MOVEMENT_SPACE_NON_MOVEMENT
+        if name in NON_MOVEMENT_AUTO_SHOW_EFFECTS
+        else MOVEMENT_SPACE_VENUE_NATIVE
+    )
+    for name in AUTO_SHOW_MOTION_PROFILES
+}
+MOVEMENT_SPACE_CLASSIFICATION.update({
+    "baseline_phrase_motion": MOVEMENT_SPACE_VENUE_NATIVE,
+    "audience_riser": MOVEMENT_SPACE_VENUE_NATIVE,
+    "snap_fan": MOVEMENT_SPACE_VENUE_NATIVE,
+    "manual_pan_tilt": MOVEMENT_SPACE_FIXTURE_RELATIVE,
+    "fixture_home": MOVEMENT_SPACE_FIXTURE_RELATIVE,
+    "physical_axis_mapping_v2": MOVEMENT_SPACE_CALIBRATION_ONLY,
+    "legacy_physical_aim": MOVEMENT_SPACE_CALIBRATION_ONLY,
+    "venue_target_test": MOVEMENT_SPACE_CALIBRATION_ONLY,
+    "white_hit": MOVEMENT_SPACE_NON_MOVEMENT,
+    "color_burst": MOVEMENT_SPACE_NON_MOVEMENT,
+    "par_chase_burst": MOVEMENT_SPACE_NON_MOVEMENT,
+})
+
+FIXTURE_RELATIVE_MOVEMENT_JUSTIFICATIONS = {
+    "manual_pan_tilt": "Direct operator motor positioning intentionally addresses the selected fixture's local mechanism.",
+    "fixture_home": "Fixture-home is a mechanical service pose, not a named venue location.",
+}
+
+CALIBRATION_MOVEMENT_SOURCES = frozenset({
+    "physical_axis_mapping_v2", "legacy_physical_aim", "venue_target_test"
+})
+
+
+def movement_space_classification(effect_id):
+    return MOVEMENT_SPACE_CLASSIFICATION.get(str(effect_id or "").strip().lower())
+
+
+def production_movement_inventory():
+    """Machine-checkable inventory: no production movement stays unclassified."""
+    inventory = []
+    for name, profile in sorted(AUTO_SHOW_MOTION_PROFILES.items()):
+        classification = movement_space_classification(name)
+        inventory.append({
+            "name": name,
+            "call_site": "DmxController._motion_for_config -> styled_phrase_motion",
+            "current_input_domain": "MUSICAL_PROGRESS_AND_FIXTURE_TOPOLOGY",
+            "current_output_domain": (
+                "NON_MOVEMENT" if classification == MOVEMENT_SPACE_NON_MOVEMENT else "WORLD_TARGET"
+            ),
+            "current_authority": classification,
+            "venue_semantic": classification == MOVEMENT_SPACE_VENUE_NATIVE,
+            "currently_venue_native": classification == MOVEMENT_SPACE_VENUE_NATIVE,
+            "action": "RETAIN_NO_MOVEMENT" if classification == MOVEMENT_SPACE_NON_MOVEMENT else "ROUTE_SHARED_SPATIAL_RESOLVER",
+            "pattern": profile.get("pattern"),
+        })
+    for name in sorted(set(MOVEMENT_SPACE_CLASSIFICATION) - set(AUTO_SHOW_MOTION_PROFILES)):
+        classification = movement_space_classification(name)
+        inventory.append({
+            "name": name,
+            "call_site": "operator/one-shot/calibration production path",
+            "current_input_domain": (
+                "RAW_PAN_TILT" if classification == MOVEMENT_SPACE_FIXTURE_RELATIVE
+                else "CALIBRATION_ONLY" if classification == MOVEMENT_SPACE_CALIBRATION_ONLY
+                else "MUSICAL_PROGRESS"
+            ),
+            "current_output_domain": (
+                "WORLD_TARGET" if classification == MOVEMENT_SPACE_VENUE_NATIVE else classification
+            ),
+            "current_authority": classification,
+            "venue_semantic": classification == MOVEMENT_SPACE_VENUE_NATIVE,
+            "currently_venue_native": classification == MOVEMENT_SPACE_VENUE_NATIVE,
+            "action": "EXPLICIT_EXCEPTION" if classification == MOVEMENT_SPACE_FIXTURE_RELATIVE else "RETAIN",
+            "pattern": None,
+        })
+    return inventory
 
 AUTO_SHOW_COLOR_PROFILES = {
     "yellow_blue": {
@@ -3721,6 +6210,1079 @@ def wave_triangle(position):
 
 def wave_square(position):
     return 1.0 if (position % 1.0) < 0.5 else -1.0
+
+
+MOVEMENT_CHARACTER_MOTIFS = frozenset({
+    "UNISON", "CHASE", "PAIR", "MIRROR", "RIPPLE", "CANNON", "BLOOM",
+    "HOLD_RELEASE", "INNER_OUTER", "CONVERGE_EXPLODE", "WIDEN", "PULSE",
+})
+
+
+@dataclass(frozen=True)
+class MovementCharacter:
+    """A compact, deterministic layer between a world path and its timing.
+
+    It deliberately contains no fixture-local Pan/Tilt values.  The path
+    remains a DJ-world target or direction and the normal calibrated resolver
+    remains its only physical realization.
+    """
+
+    family: str
+    motif: str
+    participant_role: str
+    effective_phase_offset: float
+    phase_direction: float
+    range_factor: float
+    vertical_factor: float
+    speed_factor: float
+    temporal_envelope: str
+    snap: bool
+    seed: int
+
+    def as_dict(self):
+        return {
+            "family": self.family,
+            "motif": self.motif,
+            "participant_role": self.participant_role,
+            "effective_phase_offset": self.effective_phase_offset,
+            "phase_direction": self.phase_direction,
+            "range_factor": self.range_factor,
+            "vertical_factor": self.vertical_factor,
+            "speed_factor": self.speed_factor,
+            "temporal_envelope": self.temporal_envelope,
+            "snap": self.snap,
+            "seed": self.seed,
+        }
+
+
+def _movement_character_family(effect_id, profile):
+    pattern = str((profile or {}).get("pattern") or "")
+    effect = str(effect_id or "")
+    if pattern in {"circle", "pulse_circle", "figure_8"}:
+        return "CIRCLE"
+    if pattern in {"static_positions", "fan_open", "fan_morph"} or effect in {"snap_fan", "drop_snap_fan"}:
+        return "FAN"
+    if pattern in {"crossing_beams", "mirror_bounce"}:
+        return "MIRROR_CROSS"
+    if pattern in {
+        "horizontal_sweep", "smooth_sweep", "vertical_sweep", "tilt_sweep",
+        "rising_sweep", "diagonal_sweep", "reverse_diagonal_sweep", "arc_sweep",
+    }:
+        return "SWEEP"
+    return "OTHER"
+
+
+def _movement_character_role(index, count):
+    if count <= 1:
+        return "SOLO"
+    if count == 2:
+        return "LEFT" if index == 0 else "RIGHT"
+    if index == 0:
+        return "OUTER_LEFT"
+    if index == count - 1:
+        return "OUTER_RIGHT"
+    if index < count / 2:
+        return "INNER_LEFT"
+    return "INNER_RIGHT"
+
+
+def _movement_character_motif(family, section, event_type, seed):
+    """Choose a coordinated motif once per deterministic show context."""
+    event = str(event_type or "").upper()
+    section = phrase_bucket(section)
+    if family == "FAN":
+        if event == "DROP" or section == "drop":
+            choices = ("CONVERGE_EXPLODE", "INNER_OUTER")
+        elif event == "BUILD" or section == "build":
+            choices = ("WIDEN", "INNER_OUTER")
+        elif section in {"break", "verse", "intro", "outro"}:
+            choices = ("UNISON", "INNER_OUTER")
+        else:
+            choices = ("PULSE", "INNER_OUTER", "WIDEN")
+        # WIDEN/PULSE are family envelope names; map them to the public motif
+        # vocabulary while retaining the precise envelope below.
+        return choices[seed % len(choices)]
+    if family == "CIRCLE":
+        if event == "DROP" or section == "drop":
+            choices = ("BLOOM", "CHASE")
+        elif event == "BUILD" or section == "build":
+            choices = ("RIPPLE", "BLOOM")
+        elif section in {"break", "verse", "intro", "outro"}:
+            choices = ("PAIR", "MIRROR")
+        else:
+            choices = ("CHASE", "RIPPLE", "MIRROR")
+        return choices[seed % len(choices)]
+    if family == "SWEEP":
+        if event == "DROP" or section == "drop":
+            choices = ("HOLD_RELEASE", "CANNON")
+        elif event == "BUILD" or section == "build":
+            choices = ("CANNON", "CHASE")
+        elif section in {"break", "verse", "intro", "outro"}:
+            choices = ("PAIR", "HOLD_RELEASE", "MIRROR")
+        else:
+            choices = ("CANNON", "CHASE", "MIRROR")
+        return choices[seed % len(choices)]
+    if family == "MIRROR_CROSS":
+        return "HOLD_RELEASE" if (event == "DROP" or section == "drop") else "MIRROR"
+    return "UNISON"
+
+
+def movement_character_for_context(effect_id, beat_value, slot_context=None, profile=None, progress=None):
+    """Return a deterministic, per-participant world choreography character."""
+    context = dict(slot_context or {})
+    profile = profile or auto_show_motion_profile(effect_id)
+    family = _movement_character_family(effect_id, profile)
+    count = max(1, int(context.get("artistic_participant_count", context.get("role_count", 1)) or 1))
+    index = max(0, min(count - 1, int(context.get("artistic_participant_index", context.get("role_index", 0)) or 0)))
+    section = context.get("section") or context.get("phrase") or "unknown"
+    event_type = context.get("event_type") or ""
+    parameters = context.get("motion_parameters") if isinstance(context.get("motion_parameters"), dict) else {}
+    variation = (
+        context.get("movement_character_seed")
+        or context.get("variation_seed")
+        or parameters.get("variation_seed")
+        or context.get("track_identity")
+        or "default"
+    )
+    seed = stable_hash(f"character|{effect_id}|{section}|{event_type}|{variation}|{count}")
+    requested_motif = str(context.get("movement_character_motif") or "").upper()
+    motif = requested_motif if requested_motif in MOVEMENT_CHARACTER_MOTIFS else _movement_character_motif(
+        family, section, event_type, seed
+    )
+    if motif not in MOVEMENT_CHARACTER_MOTIFS:
+        motif = "UNISON"
+
+    # These intentionally uneven tables restore follow/pair/cannon identity
+    # without frame randomness or the old exact 0/.25/.50/.75 default.
+    phase_tables = {
+        "UNISON": (0.0,),
+        "CHASE": (0.0, .17, .43, .71, .86),
+        "RIPPLE": (0.0, .12, .34, .63, .82),
+        "CANNON": (0.0, .10, .31, .58, .80),
+        "PAIR": (0.0, .045, .50, .545, .76),
+        "BLOOM": (0.0, .14, .39, .68, .84),
+        "HOLD_RELEASE": (0.0, .08, .30, .60, .80),
+        "INNER_OUTER": (0.0, .08, .35, .66, .86),
+        "CONVERGE_EXPLODE": (0.0, .04, .10, .16, .22),
+        "MIRROR": (0.0, .13, .13, 0.0, .10),
+        "WIDEN": (0.0,),
+        "PULSE": (0.0, .04, .08, .12, .16),
+    }
+    table = phase_tables[motif]
+    phase_offset = table[min(index, len(table) - 1)] if count > 1 else 0.0
+    try:
+        phase_spread = max(.12, min(.54, float(parameters.get("phase_spread")))) \
+            if parameters.get("phase_spread") is not None else None
+    except (TypeError, ValueError):
+        phase_spread = None
+    if phase_spread is not None:
+        phase_offset *= .72 + phase_spread
+    role = _movement_character_role(index, count)
+    phase_direction = 1.0
+    if motif == "MIRROR" and family in {"CIRCLE", "MIRROR_CROSS"}:
+        # Right-side motion is the DJ-X mirror of left-side motion. This is a
+        # path-space reflection, never an inversion of a raw Pan channel.
+        phase_direction = 1.0 if index < count / 2 else -1.0
+
+    try:
+        composer_range = max(.72, min(1.0, float(parameters.get("range_scale", 1.0))))
+    except (TypeError, ValueError):
+        composer_range = 1.0
+    try:
+        composer_speed = max(.82, min(1.16, float(parameters.get("speed_scale", 1.0))))
+    except (TypeError, ValueError):
+        composer_speed = 1.0
+    try:
+        section_progress = clamp_unit(context.get("section_progress", progress if progress is not None else 0.0))
+    except (TypeError, ValueError):
+        section_progress = 0.0
+    try:
+        energy = clamp_unit(context.get("energy", 0.5))
+    except (TypeError, ValueError):
+        energy = 0.5
+    build_gain = .18 * section_progress if (str(event_type).upper() == "BUILD" or phrase_bucket(section) == "build") else 0.0
+    range_factor = max(.55, min(1.24, composer_range * (1.0 + build_gain)))
+    if motif == "BLOOM":
+        range_factor = min(1.24, range_factor * 1.08)
+    vertical_evidence = min(.18, abs(float(profile.get("orbit_tilt", 0) or 0)) / 255.0 + abs(float(profile.get("tilt_lift", 0) or 0)) / 180.0)
+    vertical_factor = max(.72, min(1.24, 1.0 + vertical_evidence + build_gain * .7))
+    speed_factor = max(.78, min(1.24, composer_speed * (1.0 + (.14 * section_progress if phrase_bucket(section) == "build" else 0.0))))
+    temporal_envelope = "CONTINUOUS"
+    if motif in {"HOLD_RELEASE", "CONVERGE_EXPLODE"}:
+        temporal_envelope = motif
+    snap = bool(profile.get("snap")) or (motif == "CONVERGE_EXPLODE" and (str(event_type).upper() == "DROP" or phrase_bucket(section) == "drop"))
+    return MovementCharacter(
+        family=family, motif=motif, participant_role=role,
+        effective_phase_offset=phase_offset, phase_direction=phase_direction,
+        range_factor=range_factor, vertical_factor=vertical_factor,
+        speed_factor=speed_factor, temporal_envelope=temporal_envelope,
+        snap=snap, seed=seed,
+    )
+
+
+def _movement_character_temporal_phase(phase, character):
+    """Apply a small deterministic hold/release or accent envelope to a path."""
+    phase = float(phase)
+    base = math.floor(phase)
+    fraction = phase - base
+    held = False
+    if character.temporal_envelope == "HOLD_RELEASE":
+        if fraction < .18:
+            fraction, held = 0.0, True
+        elif fraction > .84:
+            fraction, held = 1.0, True
+        else:
+            fraction = (fraction - .18) / .66
+    elif character.temporal_envelope == "CONVERGE_EXPLODE":
+        if fraction < .16:
+            fraction, held = 0.0, True
+        else:
+            fraction = (fraction - .16) / .84
+    if character.snap:
+        fraction = round(fraction * 4.0) / 4.0
+    return base + fraction, held
+
+
+def _movement_character_amplitude_factor(character, phase):
+    """Bounded world-path radius/width envelope; geometry itself never moves."""
+    cycle = float(phase) % 1.0
+    factor = character.range_factor
+    if character.motif == "BLOOM":
+        factor *= .84 + .32 * (0.5 + 0.5 * wave_sine(cycle))
+    elif character.family == "FAN" and character.motif == "WIDEN":
+        factor *= .62 + .42 * cycle  # WIDEN behavior, selected deterministically.
+    elif character.family == "FAN" and character.motif == "INNER_OUTER":
+        factor *= 1.12 if character.participant_role.startswith("OUTER") else .72
+    elif character.family == "FAN" and character.motif == "PULSE":
+        factor *= .78 + .20 * (0.5 + 0.5 * wave_sine(cycle))
+    elif character.motif == "CONVERGE_EXPLODE":
+        factor *= .18 + .82 * max(0.0, min(1.0, (cycle - .16) / .84))
+    return max(.10, min(1.24, factor))
+
+
+def _venue_native_effect_intent_v2(effect_id, beat_value, geometry, slot_context=None, progress=None):
+    """Create one finite world-space path sample for a production effect.
+
+    Profiles still own musical timing, colour and dimmer metadata. Their legacy
+    raw Pan/Tilt choreography is now only a fail-safe for missing geometry or
+    missing fixture calibration; with usable Venue Space every spatial profile
+    reaches the shared resolver through this function.
+    """
+    effect_id = str(effect_id or "").strip().lower()
+    if movement_space_classification(effect_id) != MOVEMENT_SPACE_VENUE_NATIVE:
+        return None
+    geometry = geometry if isinstance(geometry, VenueGeometry) else venue_geometry_from_mapping(geometry)
+    if geometry.audience_target_height_m is None:
+        return None
+    context = dict(slot_context or {})
+    profile = auto_show_motion_profile(effect_id)
+    pattern = str(profile.get("pattern") or "center_hold")
+    beat_value = float(beat_value or 0.0)
+    base_adjusted = beat_value * float(profile.get("phase_scale", 1.0) or 1.0)
+    member = max(-1.0, min(1.0, float(
+        context.get("role_centered", context.get("member_centered", context.get("group_centered", 0.0))) or 0.0
+    )))
+    alternate = -1.0 if float(context.get("member_alternate", context.get("group_alternate", 1.0)) or 1.0) < 0 else 1.0
+    count = max(1, int(context.get("role_count", context.get("member_count", 1)) or 1))
+    index = max(0, int(context.get("role_index", context.get("member_index", 0)) or 0))
+    # These values are deliberately global to the participating moving-fixture
+    # set.  ``member_*`` remains group-local for Composer compatibility, while
+    # artistic world movement must not repeat A/B lanes across separate groups.
+    participant_count = max(1, int(context.get("artistic_participant_count", count) or count))
+    participant_index = max(0, min(
+        participant_count - 1,
+        int(context.get("artistic_participant_index", index) or 0),
+    ))
+    participant_centered = max(-1.0, min(1.0, float(
+        context.get("artistic_participant_centered", member) or 0.0
+    )))
+    participant_closed_phase_offset = float(
+        context.get("artistic_closed_phase_offset", participant_index / participant_count if participant_count > 1 else 0.0)
+        or 0.0
+    ) % 1.0
+    # Open paths use a compact staged span rather than a full 360-degree wrap.
+    participant_open_phase_offset = participant_centered * 0.18
+    character = movement_character_for_context(
+        effect_id, beat_value, context, profile=profile, progress=progress,
+    )
+    # A profile's native phase scale remains the base identity. Composer speed
+    # modulates it once here, in world-path time, rather than in raw channels.
+    adjusted = base_adjusted * character.speed_factor
+    if "artistic_participant_index" in context:
+        participant_closed_phase_offset = character.effective_phase_offset
+        participant_open_phase_offset += (character.effective_phase_offset - .5) * .36
+    character_hold_state = False
+    phase = adjusted / 24.0
+    target_height = float(geometry.audience_target_height_m)
+    forward_depth = float(geometry.forward_depth_m or 0.0)
+    x, y, z = 0.0, 0.78, target_height
+    semantic_path = "AUDIENCE_CENTER"
+    world_direction = None
+
+    if effect_id == "audience_riser":
+        amount = clamp_unit(progress or 0.0)
+        x = participant_centered * (0.12 + 0.53 * amount)
+        y = 0.38 + 0.40 * amount
+        z += forward_depth * 0.48 * amount
+        semantic_path = "RISE_NEAR_TO_MID"
+    elif effect_id == "baseline_phrase_motion":
+        phrase = str(context.get("phrase") or "unknown")
+        speed = {"intro": 0.35, "verse": 0.55, "build": 0.72, "drop": 0.90}.get(phrase_bucket(phrase), 0.48)
+        path_phase = beat_value * speed / 24.0
+        x = 0.52 * wave_sine(path_phase)
+        y = 0.76 + 0.12 * wave_triangle(path_phase + 0.25)
+        semantic_path = "BASELINE_AUDIENCE_SWEEP"
+    elif pattern in {"horizontal_sweep", "smooth_sweep"}:
+        sweep_phase, character_hold_state = _movement_character_temporal_phase(
+            adjusted / (28.0 if pattern == "smooth_sweep" else 24.0), character
+        )
+        sweep_phase += participant_open_phase_offset
+        x = 0.65 * wave_sine(sweep_phase)
+        y = 0.94 if "deep" in effect_id else 0.78
+        if "high" in effect_id or effect_id == "ceiling_sweep":
+            z += forward_depth * (0.50 if effect_id == "ceiling_sweep" else 0.25)
+        semantic_path = "LEFT_TO_RIGHT"
+    elif effect_id == "live_audience_tilt_sweep":
+        # The operator-facing Audience Sweep is a DJ-world left/centre/right
+        # traversal. Its former tilt-heavy motor profile no longer defines the
+        # spatial meaning, while the established 32-beat phase stays intact.
+        sweep_phase, character_hold_state = _movement_character_temporal_phase(adjusted / 32.0, character)
+        sweep_phase += participant_open_phase_offset
+        x = 0.65 * wave_sine(sweep_phase)
+        y = 0.78
+        semantic_path = "LEFT_TO_RIGHT"
+    elif pattern == "vertical_sweep":
+        phase, character_hold_state = _movement_character_temporal_phase(phase, character)
+        phase += participant_open_phase_offset
+        amount = 0.5 + 0.5 * wave_sine(phase)
+        x = participant_centered * 0.22
+        y = 0.44 + 0.44 * amount
+        z += forward_depth * 0.42 * amount
+        semantic_path = "RISE_AND_FALL"
+    elif pattern in {"tilt_sweep", "rising_sweep"}:
+        phase, character_hold_state = _movement_character_temporal_phase(phase, character)
+        phase += participant_open_phase_offset
+        amount = (
+            0.5 + 0.5 * wave_triangle(phase / 1.8)
+            if pattern == "rising_sweep"
+            else 0.5 + 0.5 * wave_sine(phase)
+        )
+        x = 0.28 * wave_sine(phase / 2.0)
+        y = 0.42 + 0.46 * amount
+        z += forward_depth * (0.44 if pattern == "rising_sweep" else 0.16) * amount
+        semantic_path = "RISE" if pattern == "rising_sweep" else "NEAR_TO_FAR"
+    elif pattern in {"diagonal_sweep", "reverse_diagonal_sweep"}:
+        phase, character_hold_state = _movement_character_temporal_phase(phase, character)
+        phase += participant_open_phase_offset
+        amount = 0.5 + 0.5 * wave_sine(phase)
+        direction = -1.0 if pattern == "reverse_diagonal_sweep" else 1.0
+        x = direction * (amount * 1.30 - 0.65)
+        y = 0.40 + 0.52 * amount
+        z += forward_depth * 0.18 * amount
+        semantic_path = "REVERSE_DIAGONAL" if direction < 0 else "DIAGONAL"
+    elif pattern == "arc_sweep":
+        arc_phase, character_hold_state = _movement_character_temporal_phase(adjusted / 28.0, character)
+        arc_phase += participant_open_phase_offset
+        x = 0.66 * wave_sine(arc_phase)
+        arc_height = 0.5 + 0.5 * wave_triangle(arc_phase / 1.8)
+        y = 0.58 + 0.30 * arc_height
+        z += forward_depth * 0.26 * arc_height
+        semantic_path = "ARC"
+    elif pattern in {"circle", "pulse_circle"}:
+        circle_phase = (adjusted / 28.0 + participant_closed_phase_offset) * character.phase_direction
+        circle_phase, character_hold_state = _movement_character_temporal_phase(circle_phase, character)
+        oval = "oval" in effect_id
+        x_radius = 0.68 if oval else 0.58
+        y_radius = (0.10 if oval else 0.17) * character.vertical_factor
+        # Keep the canonical closed circle closed at every whole revolution,
+        # while profile vertical timing bends the vertical traversal within the
+        # cycle. This translates legacy vertical character without turning the
+        # world path into an unbounded non-repeating mechanical orbit.
+        vertical_phase = (
+            circle_phase
+            + wave_sine(circle_phase) * .18 * (_profile_tilt_phase_scale(profile, 1.0) - 1.0)
+            + _profile_tilt_phase_offset(profile, 0.0)
+        )
+        x = x_radius * wave_sine(circle_phase)
+        y = 0.76 + y_radius * wave_cosine(vertical_phase)
+        semantic_path = "OVAL" if oval else "CIRCLE"
+    elif pattern == "figure_8":
+        figure_phase = (adjusted / 28.0 + participant_closed_phase_offset) * character.phase_direction
+        figure_phase, character_hold_state = _movement_character_temporal_phase(figure_phase, character)
+        x = (0.42 if "small" in effect_id else 0.62) * wave_sine(figure_phase)
+        y = 0.78 + (0.10 if "small" in effect_id else 0.15) * character.vertical_factor * wave_sine(
+            figure_phase * 2.0 * _profile_tilt_phase_scale(profile, 1.0) + _profile_tilt_phase_offset(profile, 0.0)
+        )
+        semantic_path = "FIGURE_EIGHT"
+    elif pattern == "random_searchlight":
+        window_beats = max(1.0, float(profile.get("window_beats", 8.0)))
+        window = math.floor(beat_value / window_beats)
+        fraction = clamp_unit((beat_value % window_beats) / window_beats)
+        smooth = fraction * fraction * (3.0 - 2.0 * fraction)
+        def sample(sample_window):
+            # Put the global ordinal before the common prefix: the lightweight
+            # deterministic hash is order-sensitive, and a trailing 0/1/2/3
+            # would otherwise create almost identical four-fixture samples.
+            seed = stable_hash(f"{participant_index}|{participant_count}|{effect_id}|{sample_window}")
+            return (
+                ((seed & 0xffff) / 0xffff) * 1.30 - 0.65,
+                0.38 + (((seed >> 16) & 0xffff) / 0xffff) * 0.56,
+            )
+        start_x, start_y = sample(window)
+        end_x, end_y = sample(window + 1)
+        x = start_x + (end_x - start_x) * smooth
+        y = start_y + (end_y - start_y) * smooth
+        semantic_path = "SEARCHLIGHT_AREA_SCAN"
+    elif pattern == "snap_hits":
+        points = ((-0.65, 0.42), (0.65, 0.42), (0.65, 0.92), (-0.65, 0.92), (0.0, 0.78))
+        x, y = points[int(math.floor(adjusted)) % len(points)]
+        semantic_path = "STATIC_REGION_HITS"
+    elif pattern in {"static_positions", "fan_open"} or effect_id in {"snap_fan", "drop_snap_fan"}:
+        x = participant_centered * (0.48 if "narrow" in effect_id else 0.68)
+        # A fan is an angular world-space spread, not a set of fixtures aiming
+        # at a common finite point.  Keep the existing lateral/forward shape
+        # while emitting the resolver's native direction primitive.
+        world_direction = {"x": x, "y": 0.80, "z": 0.0}
+        semantic_path = "FAN_SPREAD"
+    elif pattern == "fan_morph":
+        fan_phase, character_hold_state = _movement_character_temporal_phase(adjusted / 20.0, character)
+        amount = 0.5 + 0.5 * wave_sine(fan_phase)
+        x = participant_centered * (0.16 + 0.52 * amount)
+        world_direction = {"x": x, "y": 0.80, "z": 0.0}
+        semantic_path = "CENTER_OUT_FAN"
+    elif pattern == "fan_wave":
+        x = participant_centered * 0.65
+        wave = 0.5 + 0.5 * wave_sine(
+            (phase * _profile_tilt_phase_scale(profile, 1.0)) / 1.8
+            + participant_centered * 0.18
+            + _profile_tilt_phase_offset(profile, 0.0)
+        )
+        y = 0.66 + 0.18 * wave
+        z += forward_depth * 0.20 * wave
+        semantic_path = "AUDIENCE_WAVE"
+    elif pattern == "crossing_beams":
+        cross_phase, character_hold_state = _movement_character_temporal_phase(adjusted / 4.0, character)
+        swap = -1.0 if int(math.floor(cross_phase)) % 2 else 1.0
+        x = -participant_centered * 0.65 * swap
+        y = 0.80
+        semantic_path = "WORLD_CROSS"
+    elif pattern == "mirror_bounce":
+        bounce_phase, character_hold_state = _movement_character_temporal_phase(adjusted / 16.0, character)
+        bounce = wave_triangle(bounce_phase * character.phase_direction)
+        mirror = participant_centered if bool(profile.get("member_mirror") or context.get("member_mirror_enabled")) else 1.0
+        x = 0.65 * bounce * mirror
+        y = 0.66 + 0.20 * abs(bounce)
+        semantic_path = "WORLD_MIRROR_BOUNCE"
+    elif pattern in {"center_hold", "blinder_flash", "blackout_hit"}:
+        x = member * 0.65 if "fan" in effect_id and effect_id != "fan_close" else 0.0
+        y = 0.94 if any(token in effect_id for token in ("low", "full_audience", "blinder", "blackout")) else 0.78
+        if "high" in effect_id:
+            z += forward_depth * 0.25
+        semantic_path = "AUDIENCE_HOLD"
+    else:
+        # The inventory guard makes a new pattern visible before it can silently
+        # ship with raw venue semantics.
+        return None
+
+    parameters = context.get("motion_parameters")
+    if isinstance(parameters, dict):
+        try:
+            x += max(-0.12, min(0.12, float(parameters.get("horizontal_center_offset", 0.0)) / 100.0))
+            z += forward_depth * max(-0.08, min(0.08, float(parameters.get("vertical_center_offset", 0.0)) / 112.5))
+        except (TypeError, ValueError):
+            pass
+    amplitude_factor = _movement_character_amplitude_factor(character, adjusted / 28.0)
+    x *= amplitude_factor
+    y = 0.78 + (y - 0.78) * amplitude_factor
+    z = target_height + (z - target_height) * character.vertical_factor
+    x = max(-1.0, min(1.0, x))
+    y = max(-1.0, min(1.0, y))
+    if world_direction is not None:
+        # Dynamic Composer's bounded horizontal shaping applies to the same
+        # artistic lateral component for directional fans.
+        world_direction["x"] = x
+        return {
+            "kind": "WORLD_DIRECTION",
+            "effect": effect_id.upper(),
+            "movement_space": "VENUE_NATIVE",
+            "semantic_path": semantic_path,
+            "progress": progress,
+            "world_direction": world_direction,
+            "path_metadata": {
+                "profile_pattern": pattern,
+                "member_index": index,
+                "member_count": count,
+                "participant_index": participant_index,
+                "participant_count": participant_count,
+                "participant_centered": participant_centered,
+                "participant_closed_phase_offset": participant_closed_phase_offset,
+                "participant_open_phase_offset": participant_open_phase_offset,
+                "movement_character": character.as_dict(),
+                "effective_phase": adjusted / 28.0,
+                "range_envelope": amplitude_factor,
+                "hold_state": character_hold_state,
+                "dj_world_axes": "-X_LEFT_+X_RIGHT_+Y_AUDIENCE_+Z_UP",
+            },
+        }
+    point = venue_design_point_m(geometry, x=x, y=y, z=z)
+    if point is None:
+        return None
+    return {
+        "kind": "WORLD_TARGET_XYZ_M",
+        "effect": effect_id.upper(),
+        "movement_space": "VENUE_NATIVE",
+        "semantic_path": semantic_path,
+        "progress": progress,
+        "world_target_xyz_m": point.as_dict(),
+        "path_metadata": {
+            "profile_pattern": pattern,
+            "member_index": index,
+            "member_count": count,
+            "participant_index": participant_index,
+            "participant_count": participant_count,
+            "participant_centered": participant_centered,
+            "participant_closed_phase_offset": participant_closed_phase_offset,
+            "participant_open_phase_offset": participant_open_phase_offset,
+            "movement_character": character.as_dict(),
+            "effective_phase": adjusted / 28.0,
+            "range_envelope": amplitude_factor,
+            "hold_state": character_hold_state,
+            "dj_world_axes": "-X_LEFT_+X_RIGHT_+Y_AUDIENCE_+Z_UP",
+        },
+    }
+
+
+@dataclass(frozen=True)
+class MovementEffectRecipeV3:
+    """Immutable artistic recipe; it intentionally has no Pan/Tilt fields."""
+
+    identity: str
+    family: str
+    primitive: str
+    horizontal_beats: float
+    vertical_beats: float
+    horizontal_range: float
+    vertical_range: float
+    role_phase_offsets: tuple
+    vertical_phase_offsets: tuple
+    temporal_envelope: str = "CONTINUOUS"
+    snap: bool = False
+    variation_amount: float = 0.0
+    spatial_type: str = "PATH_EFFECT"
+    lane_range: float = 0.0
+    depth_lane_range: float = 0.0
+
+    def as_dict(self):
+        return {
+            "engine": "V3",
+            "identity": self.identity,
+            "family": self.family,
+            "primitive": self.primitive,
+            "horizontal_beats": self.horizontal_beats,
+            "vertical_beats": self.vertical_beats,
+            "horizontal_range": self.horizontal_range,
+            "vertical_range": self.vertical_range,
+            "role_phase_offsets": list(self.role_phase_offsets),
+            "vertical_phase_offsets": list(self.vertical_phase_offsets),
+            "temporal_envelope": self.temporal_envelope,
+            "snap": self.snap,
+            "variation_amount": self.variation_amount,
+            "spatial_type": self.spatial_type,
+            "lane_range": self.lane_range,
+            "depth_lane_range": self.depth_lane_range,
+        }
+
+
+# These role tables are artistic world directions. They contain neither a
+# fixture coordinate nor raw motor data; calibration remains responsible for
+# the hanging fixture's eventual mechanical result.
+FULL_SPHERE_DIRECTIONAL_ROLES = MappingProxyType({
+    "EXPLODE": (
+        {"x": -.62, "y": .18, "z": -.96},   # floor / down-left
+        {"x": -1.12, "y": .72, "z": .12},   # wide forward-left
+        # Proven cannon geometry: a clear rear role, not merely a rear-side
+        # diagonal. It keeps the explode's floor/side/high role contrast.
+        {"x": .26, "y": -.92, "z": .52},    # clear rear-right
+        {"x": .48, "y": .24, "z": .94},     # high forward-right
+    ),
+    "SCATTER": (
+        {"x": -.88, "y": -.52, "z": -.42},
+        {"x": -.26, "y": .88, "z": -.86},
+        {"x": .90, "y": .20, "z": .46},
+        {"x": .32, "y": -.90, "z": .78},
+    ),
+    "REAR_HOLD_SPLIT": (
+        {"x": -.64, "y": .16, "z": -1.0},
+        {"x": .26, "y": -.92, "z": .52},
+        {"x": -1.02, "y": .46, "z": .24},
+        {"x": .42, "y": .72, "z": .86},
+    ),
+})
+
+
+def full_sphere_clear_rear(direction):
+    """Return whether an explicit role is visually readable as world rear.
+
+    This is deliberately separate from the broad directional-region classifier:
+    rear-diagonal remains useful choreography.  It only supports authored
+    clear-rear roles and uses normalized world geometry, never raw Pan/Tilt.
+    """
+    source = direction if isinstance(direction, dict) else {}
+    try:
+        values = tuple(float(source[axis]) for axis in ("x", "y", "z"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    magnitude = math.sqrt(sum(value * value for value in values))
+    return bool(math.isfinite(magnitude) and magnitude > 1e-8 and values[1] / magnitude <= -.70)
+
+
+def full_sphere_direction_region(direction):
+    """Classify a world direction for diagnostics; this is not a target API."""
+    source = direction if isinstance(direction, dict) else {}
+    try:
+        x, y, z = (float(source[axis]) for axis in ("x", "y", "z"))
+    except (KeyError, TypeError, ValueError):
+        return "UNKNOWN"
+    if z <= -.58:
+        return "FLOOR_DOWN"
+    if y <= -.42:
+        return "REAR_LEFT" if x < -.28 else "REAR_RIGHT" if x > .28 else "REAR"
+    if abs(x) >= .62:
+        return "SIDE_LEFT" if x < 0 else "SIDE_RIGHT"
+    if z >= .58:
+        return "HIGH_OBLIQUE"
+    if y >= .42:
+        return "FORWARD_LEFT" if x < -.28 else "FORWARD_RIGHT" if x > .28 else "FORWARD"
+    return "DIAGONAL"
+
+
+def full_sphere_directional_diversity(intents):
+    """Compact evidence for a sampled set of V3 world-direction intents."""
+    directions = [item.get("world_direction") for item in intents if isinstance(item, dict) and item.get("kind") == "WORLD_DIRECTION"]
+    if not directions:
+        return {"count": 0, "regions": [], "x_range": 0.0, "y_range": 0.0, "z_range": 0.0, "min_pairwise_separation": 0.0}
+    axes = {axis: [float(direction[axis]) for direction in directions] for axis in "xyz"}
+    separations = [
+        math.sqrt(sum((float(left[axis]) - float(right[axis])) ** 2 for axis in "xyz"))
+        for index, left in enumerate(directions) for right in directions[index + 1:]
+    ]
+    return {
+        "count": len(directions),
+        "regions": sorted({full_sphere_direction_region(direction) for direction in directions}),
+        "x_range": max(axes["x"]) - min(axes["x"]),
+        "y_range": max(axes["y"]) - min(axes["y"]),
+        "z_range": max(axes["z"]) - min(axes["z"]),
+        "min_pairwise_separation": min(separations, default=0.0),
+        "floor_facing_count": sum(full_sphere_direction_region(direction) == "FLOOR_DOWN" for direction in directions),
+        "rear_or_side_count": sum(full_sphere_direction_region(direction).startswith(("REAR", "SIDE")) for direction in directions),
+    }
+
+
+# These are deliberate translations of the old named-show evidence, not a
+# generic speed multiplier.  Uneven phase tables preserve follow/cannon energy
+# across the global X,Y,slot participant order.
+_V3_RECIPES = {}
+
+
+def _register_v3_recipe(names, **kwargs):
+    recipe = MovementEffectRecipeV3(**kwargs)
+    for name in names:
+        _V3_RECIPES[name] = recipe
+
+
+_V3_CHASE = (0.00, .13, .37, .64, .84)
+_V3_VERTICAL = (0.00, .07, .19, .33, .48)
+_V3_PAIR = (0.00, .04, .50, .55, .78)
+_V3_FAN = (0.00, .09, .29, .61, .85)
+_V3_MIRROR = (0.00, .13, .13, .00, .10)
+
+# Artistic ranges deliberately may exceed normalized Venue Space.  They are
+# translated from legacy character (wide pan sweeps, independent tilt timing,
+# mirror/cross fractions and open fan arrays), then sent unchanged to the
+# calibrated bounded solver.  Venue geometry is reference, never an artistic
+# movement cage.
+_register_v3_recipe(("slow_circle", "slow_audience_circle", "break_slow_pulse_circle"), identity="SLOW_CIRCLE", family="CIRCLE", primitive="CIRCLE", horizontal_beats=36.0, vertical_beats=29.0, horizontal_range=1.08, vertical_range=.24, role_phase_offsets=_V3_PAIR, vertical_phase_offsets=_V3_VERTICAL, variation_amount=.025, lane_range=.22)
+_register_v3_recipe(("fast_circle", "fast_audience_circle", "drop_fast_circle_white"), identity="FAST_CIRCLE", family="CIRCLE", primitive="CIRCLE", horizontal_beats=12.0, vertical_beats=9.0, horizontal_range=1.18, vertical_range=.30, role_phase_offsets=_V3_CHASE, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="ACCENT", variation_amount=.04, lane_range=.28)
+_register_v3_recipe(("oval_circle", "slow_audience_oval", "break_purple_oval"), identity="OVAL", family="CIRCLE", primitive="OVAL", horizontal_beats=28.0, vertical_beats=17.0, horizontal_range=1.28, vertical_range=.18, role_phase_offsets=_V3_PAIR, vertical_phase_offsets=_V3_VERTICAL, variation_amount=.03, lane_range=.20)
+_register_v3_recipe(("figure_8", "small_figure_8", "slow_audience_figure_8", "fast_audience_figure_8", "break_cyan_figure_8"), identity="FIGURE_EIGHT", family="CIRCLE", primitive="FIGURE_EIGHT", horizontal_beats=16.0, vertical_beats=11.0, horizontal_range=1.12, vertical_range=.28, role_phase_offsets=_V3_CHASE, vertical_phase_offsets=_V3_VERTICAL, variation_amount=.035, lane_range=.24)
+_register_v3_recipe(("slow_left_right_sweep", "slow_audience_sweep_white", "slow_audience_sweep_blue", "slow_deep_audience_sweep", "slow_high_audience_sweep", "audience_sweep", "live_audience_tilt_sweep", "break_high_cool_sweep"), identity="AUDIENCE_SWEEP", family="SWEEP", primitive="HORIZONTAL_SWEEP", horizontal_beats=30.0, vertical_beats=21.0, horizontal_range=1.28, vertical_range=.14, role_phase_offsets=_V3_PAIR, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="HOLD_RELEASE", variation_amount=.025)
+_register_v3_recipe(("fast_left_right_sweep", "fast_audience_sweep", "drop_strobe_sweep", "strobe_sweep", "build_strobe_ramp", "color_chase_movement"), identity="FAST_AUDIENCE_SWEEP", family="SWEEP", primitive="HORIZONTAL_SWEEP", horizontal_beats=12.0, vertical_beats=8.0, horizontal_range=1.48, vertical_range=.20, role_phase_offsets=_V3_CHASE, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="ACCENT", variation_amount=.04)
+_register_v3_recipe(("diagonal_sweep", "fast_diagonal_sweep", "reverse_diagonal_sweep", "reverse_fast_diagonal", "sweep_arc", "sweep_high", "ceiling_sweep"), identity="DIAGONAL_ARC", family="SWEEP", primitive="DIAGONAL_ARC", horizontal_beats=14.0, vertical_beats=10.0, horizontal_range=1.34, vertical_range=.38, role_phase_offsets=_V3_CHASE, vertical_phase_offsets=_V3_VERTICAL, variation_amount=.03)
+_register_v3_recipe(("fan_open", "wide_fan_white", "wide_fan_blue", "narrow_fan_white", "crossing_static_beams", "break_dimmed_fan", "snap_fan", "drop_snap_fan"), identity="FAN", family="FAN", primitive="FAN_DIRECTION", horizontal_beats=24.0, vertical_beats=17.0, horizontal_range=1.48, vertical_range=.16, role_phase_offsets=_V3_FAN, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="HOLD_RELEASE", snap=True, variation_amount=.02, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("fan_wave", "build_audience_wave", "build_narrow_to_wide_fan"), identity="FAN_WAVE", family="FAN", primitive="FAN_WAVE_DIRECTION", horizontal_beats=18.0, vertical_beats=8.0, horizontal_range=1.42, vertical_range=.30, role_phase_offsets=_V3_FAN, vertical_phase_offsets=_V3_VERTICAL, variation_amount=.04, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("crossing_beams", "drop_crossing_beams"), identity="CROSS", family="MIRROR_CROSS", primitive="CROSS", horizontal_beats=6.0, vertical_beats=5.0, horizontal_range=1.36, vertical_range=.12, role_phase_offsets=_V3_PAIR, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="ACCENT", snap=True, lane_range=.12)
+_register_v3_recipe(("mirror_bounce", "mirror_bounce_show", "drop_red_blue_bounce"), identity="MIRROR", family="MIRROR_CROSS", primitive="MIRROR_BOUNCE", horizontal_beats=16.0, vertical_beats=9.0, horizontal_range=1.20, vertical_range=.26, role_phase_offsets=_V3_MIRROR, vertical_phase_offsets=_V3_VERTICAL, variation_amount=.03)
+_register_v3_recipe(("build_rising_sweep",), identity="BUILD_RISING", family="BUILD", primitive="RISING", horizontal_beats=12.0, vertical_beats=8.0, horizontal_range=1.15, vertical_range=.62, role_phase_offsets=_V3_CHASE, vertical_phase_offsets=_V3_VERTICAL, variation_amount=.025, lane_range=.18, depth_lane_range=.10)
+_register_v3_recipe(("random_searchlight", "slow_random_searchlight", "random_search_hits"), identity="SEARCHLIGHT", family="SEARCHLIGHT", primitive="SEARCHLIGHT_WINDOW", horizontal_beats=8.0, vertical_beats=8.0, horizontal_range=1.20, vertical_range=.36, role_phase_offsets=_V3_CHASE, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="WINDOW", variation_amount=.03, lane_range=.12)
+# V3 full-sphere energy family. These recipes deliberately describe world
+# directions only. Axis mapping, calibration and the bounded physical solver
+# remain the sole owners of any resulting Pan/Tilt values.
+_register_v3_recipe(("full_sphere_explode",), identity="FULL_SPHERE_EXPLODE", family="FULL_SPHERE", primitive="FULL_SPHERE_EXPLODE", horizontal_beats=8.0, vertical_beats=7.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_FAN, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="ACCENT", snap=True, variation_amount=.035, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("floor_hit",), identity="FLOOR_HIT", family="FLOOR", primitive="FLOOR_HIT", horizontal_beats=4.0, vertical_beats=4.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_FAN, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="ACCENT", snap=True, variation_amount=.02, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("floor_hold_explode",), identity="FLOOR_HOLD_EXPLODE", family="FULL_SPHERE", primitive="FLOOR_HOLD_EXPLODE", horizontal_beats=8.0, vertical_beats=7.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_FAN, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="HOLD_RELEASE", snap=True, variation_amount=.03, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("full_sphere_cannon",), identity="FULL_SPHERE_CANNON", family="CANNON", primitive="FULL_SPHERE_CANNON", horizontal_beats=8.0, vertical_beats=8.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_CHASE, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="ACCENT", snap=True, variation_amount=.03, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("floor_forward_cannon",), identity="FLOOR_FORWARD_CANNON", family="CANNON", primitive="FLOOR_FORWARD_CANNON", horizontal_beats=8.0, vertical_beats=8.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_CHASE, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="ACCENT", snap=True, variation_amount=.025, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("dome_sweep_3d",), identity="DOME_SWEEP", family="SWEEP", primitive="DOME_SWEEP", horizontal_beats=12.0, vertical_beats=9.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_PAIR, vertical_phase_offsets=_V3_VERTICAL, variation_amount=.035, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("floor_forward_sweep",), identity="FLOOR_FORWARD_SWEEP", family="BUILD", primitive="FLOOR_FORWARD_SWEEP", horizontal_beats=10.0, vertical_beats=8.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_FAN, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="HOLD_RELEASE", variation_amount=.025, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("forward_rear_arc",), identity="FORWARD_REAR_ARC", family="SWEEP", primitive="FORWARD_REAR_ARC", horizontal_beats=12.0, vertical_beats=10.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_PAIR, vertical_phase_offsets=_V3_VERTICAL, variation_amount=.03, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("cross_3d",), identity="CROSS_3D", family="MIRROR_CROSS", primitive="CROSS_3D", horizontal_beats=8.0, vertical_beats=7.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_PAIR, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="ACCENT", snap=True, variation_amount=.025, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("volumetric_orbit",), identity="VOLUMETRIC_ORBIT", family="CIRCLE", primitive="VOLUMETRIC_ORBIT", horizontal_beats=12.0, vertical_beats=9.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_CHASE, vertical_phase_offsets=_V3_VERTICAL, variation_amount=.035, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("volumetric_figure_8",), identity="VOLUMETRIC_FIGURE_EIGHT", family="CIRCLE", primitive="VOLUMETRIC_FIGURE_EIGHT", horizontal_beats=12.0, vertical_beats=9.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_CHASE, vertical_phase_offsets=_V3_VERTICAL, variation_amount=.035, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("energy_scatter",), identity="ENERGY_SCATTER", family="SCATTER", primitive="ENERGY_SCATTER", horizontal_beats=8.0, vertical_beats=8.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_FAN, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="WINDOW", snap=True, variation_amount=.04, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("fan_3d",), identity="FAN_3D", family="FAN", primitive="FAN_3D", horizontal_beats=12.0, vertical_beats=9.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_FAN, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="HOLD_RELEASE", variation_amount=.025, spatial_type="DIRECTIONAL_EFFECT")
+_register_v3_recipe(("rear_hold_split",), identity="REAR_HOLD_SPLIT", family="FULL_SPHERE", primitive="REAR_HOLD_SPLIT", horizontal_beats=8.0, vertical_beats=8.0, horizontal_range=1.0, vertical_range=1.0, role_phase_offsets=_V3_FAN, vertical_phase_offsets=_V3_VERTICAL, temporal_envelope="HOLD_RELEASE", variation_amount=.02, spatial_type="DIRECTIONAL_EFFECT")
+V3_EFFECT_RECIPES: Mapping[str, MovementEffectRecipeV3] = MappingProxyType(dict(_V3_RECIPES))
+del _V3_RECIPES
+
+
+def movement_engine_v3_recipe(effect_id):
+    return V3_EFFECT_RECIPES.get(str(effect_id or "").strip().lower())
+
+
+def _v3_temporal_phase(phase, recipe):
+    fraction = float(phase) % 1.0
+    held = False
+    if recipe.temporal_envelope == "HOLD_RELEASE":
+        if fraction < .13:
+            fraction, held = 0.0, True
+        elif fraction > .88:
+            fraction, held = 1.0, True
+        else:
+            fraction = (fraction - .13) / .75
+    elif recipe.temporal_envelope == "ACCENT":
+        fraction = fraction * fraction * (3.0 - 2.0 * fraction)
+    if recipe.snap:
+        fraction = round(fraction * 8.0) / 8.0
+    return fraction, held
+
+
+def movement_engine_v3_effect_intent(effect_id, beat_value, geometry, slot_context=None, progress=None):
+    """Render a V3 recipe as a DJ-world target/direction, never raw motors."""
+    effect_id = str(effect_id or "").strip().lower()
+    recipe = movement_engine_v3_recipe(effect_id)
+    if recipe is None or movement_space_classification(effect_id) != MOVEMENT_SPACE_VENUE_NATIVE:
+        return None
+    geometry = geometry if isinstance(geometry, VenueGeometry) else venue_geometry_from_mapping(geometry)
+    if geometry.audience_target_height_m is None:
+        return None
+    context = dict(slot_context or {})
+    count = max(1, int(context.get("artistic_participant_count", context.get("role_count", 1)) or 1))
+    index = max(0, min(count - 1, int(context.get("artistic_participant_index", context.get("role_index", 0)) or 0)))
+    centered = float(context.get(
+        "artistic_participant_centered",
+        context.get("role_centered", context.get("member_centered", -1.0 + (2.0 * index / (count - 1)) if count > 1 else 0.0)),
+    ) or 0.0)
+    role = _movement_character_role(index, count)
+    profile = auto_show_motion_profile(effect_id)
+    character = movement_character_for_context(effect_id, beat_value, context, profile=profile, progress=progress)
+    has_global_participant = "artistic_participant_index" in context
+    recipe_h_offset = recipe.role_phase_offsets[min(index, len(recipe.role_phase_offsets) - 1)] if count > 1 and has_global_participant else 0.0
+    # An explicitly requested V1 motif remains an intentional production
+    # composition choice.  Otherwise V3's own recipe table is the source of
+    # the uneven global phase relationship.
+    h_offset = character.effective_phase_offset if context.get("movement_character_motif") else recipe_h_offset
+    v_offset = recipe.vertical_phase_offsets[min(index, len(recipe.vertical_phase_offsets) - 1)] if count > 1 and has_global_participant else 0.0
+    if str(context.get("movement_character_motif") or "").upper() == "MIRROR":
+        # Mirror pairs share a vertical moment while their horizontal path is
+        # reflected; this is a world-space symmetry, not a Tilt inversion.
+        v_offset = 0.0
+    variation_seed = context.get("movement_lab_variation", context.get("movement_character_seed", context.get("variation_seed")))
+    variation = 0.0 if variation_seed is None else ((stable_hash(f"v3|{effect_id}|{variation_seed}") % 2001) / 1000.0 - 1.0) * recipe.variation_amount
+    beat_value = float(beat_value or 0.0)
+    h_source = (beat_value * character.speed_factor / recipe.horizontal_beats + h_offset + variation) * character.phase_direction
+    if not has_global_participant and recipe.primitive in {"CIRCLE", "OVAL", "FIGURE_EIGHT"}:
+        # Direct diagnostic callers retain the legacy closed-path convention.
+        # Production carries explicit global participants and uses the V3
+        # timing/role table above.
+        h_source = beat_value * float(profile.get("phase_scale", 1.0) or 1.0) / 28.0
+    h_source, character_held = _movement_character_temporal_phase(h_source, character)
+    h_phase, held = _v3_temporal_phase(h_source, recipe)
+    # Accent/hold state belongs to the phrase, not to an individual fixture's
+    # chase offset. Role offsets remain available inside the active 3D path.
+    global_h_source = (beat_value * character.speed_factor / recipe.horizontal_beats + variation) * character.phase_direction
+    global_h_source, _ = _movement_character_temporal_phase(global_h_source, character)
+    global_h_phase, _ = _v3_temporal_phase(global_h_source, recipe)
+    v_phase, vertical_held = _v3_temporal_phase(beat_value * character.speed_factor / recipe.vertical_beats + v_offset + variation * .5, recipe)
+    if not has_global_participant and recipe.primitive in {"CIRCLE", "OVAL", "FIGURE_EIGHT"}:
+        # Legacy single-path diagnostics expect a closed sample after one
+        # complete profile cycle. Production remains independently timed.
+        v_phase = h_phase
+    if character_held:
+        # A V1 HOLD_RELEASE remains a whole-path hold: vertical traversal must
+        # not drift while horizontal sweep endpoints are held.
+        v_phase = 0.0
+        vertical_held = True
+    range_envelope = _movement_character_amplitude_factor(character, h_source)
+    forward_depth = float(geometry.forward_depth_m or 0.0)
+    target_height = float(geometry.audience_target_height_m)
+    x, y, z = 0.0, .78, target_height
+    direction = None
+    semantic_path = recipe.primitive
+    lane_x = centered * recipe.lane_range if count > 1 and has_global_participant else 0.0
+    lane_y = centered * recipe.depth_lane_range if count > 1 and has_global_participant else 0.0
+    def directional_role(table, phase_rotation=0):
+        return dict(table[(index + phase_rotation) % len(table)])
+
+    def direction_blend(start, end, amount):
+        amount = clamp_unit(amount)
+        return {axis: float(start[axis]) + (float(end[axis]) - float(start[axis])) * amount for axis in ("x", "y", "z")}
+    if recipe.primitive in {"CIRCLE", "OVAL"}:
+        # Stable role lanes recover the old inner/outer and paired-world
+        # character while preserving a fully world-space path.
+        x = lane_x + recipe.horizontal_range * range_envelope * wave_sine(h_phase)
+        y = .78 + lane_y + recipe.vertical_range * range_envelope * wave_cosine(v_phase)
+    elif recipe.primitive == "FIGURE_EIGHT":
+        x = lane_x + recipe.horizontal_range * range_envelope * wave_sine(h_phase)
+        y = .78 + lane_y + recipe.vertical_range * range_envelope * wave_sine(v_phase * 2.0)
+    elif recipe.primitive == "HORIZONTAL_SWEEP":
+        x = recipe.horizontal_range * range_envelope * wave_sine(h_phase)
+        y = .78 + recipe.vertical_range * range_envelope * wave_triangle(v_phase)
+    elif recipe.primitive == "DIAGONAL_ARC":
+        amount = .5 + .5 * wave_sine(h_phase)
+        reverse = "reverse" in effect_id
+        x = (-1.0 if reverse else 1.0) * recipe.horizontal_range * range_envelope * (amount * 2.0 - 1.0)
+        y = .52 + .34 * amount
+        z += forward_depth * recipe.vertical_range * (.35 + .65 * (.5 + .5 * wave_triangle(v_phase)))
+    elif recipe.primitive in {"FAN_DIRECTION", "FAN_WAVE_DIRECTION"}:
+        fan_amount = 1.0 if recipe.primitive == "FAN_DIRECTION" else (.38 + .62 * (.5 + .5 * wave_sine(h_phase)))
+        if effect_id == "narrow_fan_white":
+            fan_amount *= .42
+        elif effect_id == "build_narrow_to_wide_fan":
+            candidate_progress = progress if progress is not None else context.get("section_progress")
+            try:
+                candidate_progress = float(candidate_progress)
+                if not math.isfinite(candidate_progress):
+                    candidate_progress = None
+            except (TypeError, ValueError):
+                candidate_progress = None
+            # Build growth is evidence-led only: absent progress retains the
+            # normal wave instead of inventing a section position.
+            if candidate_progress is not None:
+                fan_amount *= .22 + .78 * max(0.0, min(1.0, candidate_progress))
+        x = centered * recipe.horizontal_range * range_envelope * fan_amount
+        if recipe.primitive == "FAN_WAVE_DIRECTION" and effect_id in {"fan_wave", "build_audience_wave"}:
+            # The historical audience-wave identity is a finite audience path;
+            # retain that public semantic while still deriving it from V3.
+            y = .66 + recipe.vertical_range * wave_sine(v_phase)
+            z += forward_depth * .20 * (.5 + .5 * wave_sine(v_phase))
+            semantic_path = "AUDIENCE_WAVE"
+        else:
+            direction = {"x": x, "y": .80 + recipe.vertical_range * wave_sine(v_phase), "z": 0.0}
+    elif recipe.primitive == "FULL_SPHERE_EXPLODE":
+        # A compact pre-hit becomes four genuinely distinct world directions:
+        # floor, forward-side, rear-side and high-oblique. It is not a Tilt
+        # centre convention and carries no fixture-local orientation.
+        if global_h_phase < .20:
+            direction = {"x": centered * .14, "y": .36, "z": -.24}
+            held = True
+            semantic_path = "COMPACT_TO_FULL_SPHERE_EXPLODE"
+        else:
+            direction = directional_role(FULL_SPHERE_DIRECTIONAL_ROLES["EXPLODE"], int(abs(variation) * 1000) % 4)
+            semantic_path = "FULL_SPHERE_EXPLODE"
+    elif recipe.primitive == "FLOOR_HIT":
+        # Every participating role has a substantial -Z component; small X
+        # lanes avoid a pile-up while retaining an unmistakable floor hit.
+        direction = {"x": centered * .72, "y": .16, "z": -1.0}
+        semantic_path = "FLOOR_HIT"
+    elif recipe.primitive == "FLOOR_HOLD_EXPLODE":
+        if global_h_phase < .25:
+            direction = {"x": centered * .42, "y": .12, "z": -1.0}
+            held = True
+            semantic_path = "FLOOR_HOLD"
+        else:
+            direction = directional_role(FULL_SPHERE_DIRECTIONAL_ROLES["EXPLODE"], 1)
+            semantic_path = "FLOOR_HOLD_TO_FULL_SPHERE_EXPLODE"
+    elif recipe.primitive == "FULL_SPHERE_CANNON":
+        # The phase table makes each role launch a different 3D region in a
+        # deterministic cannon, rather than making all heads point forward.
+        cannon_regions = (
+            {"x": centered * .45, "y": .12, "z": -1.0},
+            {"x": -1.0, "y": .30, "z": .28},
+            {"x": .62, "y": .96, "z": .12},
+            {"x": .26, "y": -.92, "z": .52},
+        )
+        region = (index + min(3, int(global_h_phase * 4.0))) % 4
+        direction = dict(cannon_regions[region])
+        semantic_path = "FULL_SPHERE_CANNON"
+    elif recipe.primitive == "FLOOR_FORWARD_CANNON":
+        local = (h_phase + index / max(1, count)) % 1.0
+        direction = direction_blend(
+            {"x": centered * .76, "y": .10, "z": -1.0},
+            {"x": centered * .90, "y": 1.0, "z": .18},
+            .5 + .5 * wave_sine(local),
+        )
+        semantic_path = "FLOOR_TO_FORWARD_CANNON"
+    elif recipe.primitive == "DOME_SWEEP":
+        direction = {
+            "x": 1.04 * wave_sine(h_phase),
+            "y": .04 + .96 * wave_cosine(h_phase),
+            "z": -.44 + .92 * wave_sine(v_phase + .25),
+        }
+        semantic_path = "DOME_SWEEP"
+    elif recipe.primitive == "FLOOR_FORWARD_SWEEP":
+        candidate_progress = progress if progress is not None else context.get("section_progress")
+        try:
+            growth = .28 + .72 * clamp_unit(float(candidate_progress))
+        except (TypeError, ValueError):
+            growth = .72
+        amount = .5 + .5 * wave_sine(h_phase)
+        direction = direction_blend(
+            {"x": centered * .84 * growth, "y": .14, "z": -1.0},
+            {"x": centered * 1.04 * growth, "y": .96, "z": .18},
+            amount,
+        )
+        semantic_path = "FLOOR_TO_FORWARD_SWEEP"
+    elif recipe.primitive == "FORWARD_REAR_ARC":
+        direction = {
+            "x": 1.02 * wave_sine(h_phase),
+            "y": .98 * wave_cosine(h_phase),
+            "z": -.16 + .72 * wave_sine(v_phase),
+        }
+        semantic_path = "FORWARD_TO_REAR_ARC"
+    elif recipe.primitive == "CROSS_3D":
+        crossing = wave_sine(h_phase)
+        direction = {
+            "x": -centered * 1.04 * crossing,
+            "y": .76 if index % 2 else -.72,
+            "z": -.90 if abs(centered) >= .40 else .52,
+        }
+        semantic_path = "THREE_DIMENSIONAL_CROSS"
+    elif recipe.primitive == "VOLUMETRIC_ORBIT":
+        direction = {
+            "x": 1.04 * wave_sine(h_phase),
+            "y": .04 + .96 * wave_cosine(v_phase),
+            "z": -.24 + .98 * wave_sine(h_phase + .25),
+        }
+        semantic_path = "VOLUMETRIC_ORBIT"
+    elif recipe.primitive == "VOLUMETRIC_FIGURE_EIGHT":
+        direction = {
+            "x": 1.04 * wave_sine(h_phase),
+            "y": .92 * wave_sine(h_phase * 2.0),
+            "z": -.20 + .94 * wave_cosine(v_phase),
+        }
+        semantic_path = "VOLUMETRIC_FIGURE_EIGHT"
+    elif recipe.primitive == "ENERGY_SCATTER":
+        scatter_window = math.floor(beat_value / recipe.horizontal_beats)
+        rotation = stable_hash(f"v3-scatter|{effect_id}|{variation_seed}|{scatter_window}") % 4
+        direction = directional_role(FULL_SPHERE_DIRECTIONAL_ROLES["SCATTER"], rotation)
+        semantic_path = "ENERGY_SCATTER"
+    elif recipe.primitive == "REAR_HOLD_SPLIT":
+        # One stable role deliberately holds the proven clear-rear vector;
+        # floor, side/forward and high/diagonal retain the full-sphere split.
+        # A supplied variation rotates roles deterministically, never toward a
+        # converged rear target and never through fixture-local motor values.
+        rotation = stable_hash(f"v3-rear-hold|{effect_id}|{variation_seed}") % 4 if variation_seed is not None else 0
+        direction = directional_role(FULL_SPHERE_DIRECTIONAL_ROLES["REAR_HOLD_SPLIT"], rotation)
+        semantic_path = "CLEAR_REAR_HOLD_SPLIT"
+    elif recipe.primitive == "FAN_3D":
+        # Preserve horizontal fan character, now with a separate depth and
+        # elevation lane for each role. Existing 2D fan recipes remain intact.
+        fan_roles = (
+            {"x": -1.08, "y": .34, "z": .34},
+            {"x": -.34, "y": .84, "z": -.92},
+            {"x": .34, "y": -.78, "z": -.76},
+            {"x": 1.08, "y": .42, "z": .58},
+        )
+        direction = directional_role(fan_roles, min(3, int(global_h_phase * 4.0)))
+        semantic_path = "THREE_DIMENSIONAL_FAN"
+    elif recipe.primitive == "CROSS":
+        crossing = -1.0 if int(math.floor(beat_value / recipe.horizontal_beats + h_offset)) % 2 else 1.0
+        x = -centered * recipe.horizontal_range * range_envelope * crossing + lane_x
+        y = .80 + lane_y
+    elif recipe.primitive == "MIRROR_BOUNCE":
+        # A mirror bounce meets at the world centre as one phrase; fixture
+        # roles describe the reflected sides rather than staggered crossings.
+        # Preserve the old named effect's zero-crossing phrase while retaining
+        # the V3 world path and wider amplitude.
+        bounce = wave_triangle(beat_value * float(profile.get("phase_scale", 1.0) or 1.0) / recipe.horizontal_beats + variation)
+        mirror = centered if abs(centered) > .01 else 1.0
+        x = recipe.horizontal_range * range_envelope * bounce * mirror
+        y = .68 + recipe.vertical_range * abs(bounce)
+    elif recipe.primitive == "RISING":
+        # A rising V3 path needs real continuous-state progress.  An absent
+        # event is valid, but an absent numeric progress is not a meaningful
+        # instruction to start a rise at zero; let the explicit V2 route keep
+        # the active output instead of fabricating that value or raising.
+        rise_progress = progress if progress is not None else context.get("section_progress")
+        if isinstance(rise_progress, bool):
+            return None
+        try:
+            rise_progress = float(rise_progress)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(rise_progress):
+            return None
+        rise = max(0.0, min(1.0, rise_progress + (.5 + .5 * wave_triangle(v_phase)) * .18))
+        spatial_growth = .30 + .70 * rise
+        x = lane_x + recipe.horizontal_range * range_envelope * spatial_growth * wave_sine(h_phase)
+        y = .42 + lane_y + .42 * rise
+        z += forward_depth * recipe.vertical_range * rise
+    elif recipe.primitive == "SEARCHLIGHT_WINDOW":
+        window_beats = recipe.horizontal_beats
+        window = math.floor(beat_value / window_beats)
+        fraction = clamp_unit((beat_value % window_beats) / window_beats)
+        smooth = fraction * fraction * (3.0 - 2.0 * fraction)
+        def sample(sample_window):
+            seed = stable_hash(f"v3-search|{index}|{count}|{effect_id}|{variation_seed}|{sample_window}")
+            return (((seed & 0xffff) / 0xffff) * recipe.horizontal_range * 2.0 - recipe.horizontal_range, .48 + (((seed >> 16) & 0xffff) / 0xffff) * .40)
+        start_x, start_y = sample(window)
+        end_x, end_y = sample(window + 1)
+        x, y = lane_x + start_x + (end_x - start_x) * smooth, lane_y + start_y + (end_y - start_y) * smooth
+    else:
+        return None
+    if recipe.primitive == "HORIZONTAL_SWEEP":
+        semantic_path = "LEFT_TO_RIGHT"
+    # Deliberately do not clamp artistic coordinates to mapped Venue Space.
+    # The physical solver remains the only physical authority and bounds every
+    # resolved Pan/Tilt command.  Finite values still fail closed here.
+    if not all(math.isfinite(float(value)) for value in (x, y, z)):
+        return None
+    artistic_x_span = 2.0 * (abs(recipe.horizontal_range * range_envelope) + abs(recipe.lane_range))
+    artistic_y_span = 2.0 * (abs(recipe.vertical_range * range_envelope) + abs(recipe.depth_lane_range))
+    trace = {
+        "engine": "V3", "route": "V3_RECIPE", "recipe": recipe.as_dict(),
+        "participant_ordinal": index, "participant_count": count, "participant_role": role,
+        "horizontal_phase": h_phase, "vertical_phase": v_phase,
+        "horizontal_range": recipe.horizontal_range, "vertical_range": recipe.vertical_range,
+        "hold_state": held or vertical_held or character_held, "snap": recipe.snap or character.snap,
+        "movement_character": character.as_dict(), "effective_phase": h_source,
+        "range_envelope": range_envelope,
+        "spatial_type": recipe.spatial_type,
+        "artistic_world": "EXTENDED_BEYOND_VENUE_ALLOWED",
+        "path_center_normalized": {"x": lane_x, "y": .78 + lane_y, "z": target_height},
+        "artistic_span_normalized": {"x": artistic_x_span, "y": artistic_y_span, "z": 0.0},
+        "artistic_span_m": {
+            "x": artistic_x_span * float(geometry.width_m) / 2.0,
+            "y": artistic_y_span * float(geometry.forward_depth_m),
+            "z": abs(forward_depth * recipe.vertical_range),
+        },
+        "effective_horizontal_beats": recipe.horizontal_beats / max(.001, character.speed_factor),
+        "effective_vertical_beats": recipe.vertical_beats / max(.001, character.speed_factor),
+        "requested_world_primitive": "WORLD_DIRECTION" if direction is not None else "WORLD_TARGET_XYZ_M",
+        "dj_world_axes": "-X_LEFT_+X_RIGHT_+Y_AUDIENCE_+Z_UP",
+    }
+    if direction is not None:
+        trace["directional_spread"] = abs(float(direction["x"]))
+        trace["directional_region"] = full_sphere_direction_region(direction)
+        trace["floor_facing"] = trace["directional_region"] == "FLOOR_DOWN"
+        trace["clear_rear"] = full_sphere_clear_rear(direction)
+        return {"kind": "WORLD_DIRECTION", "effect": effect_id.upper(), "movement_space": "VENUE_NATIVE", "semantic_path": semantic_path, "progress": progress, "world_direction": direction, "path_metadata": trace}
+    point = venue_design_point_m(geometry, x=x, y=y, z=z)
+    if point is None:
+        return None
+    return {"kind": "WORLD_TARGET_XYZ_M", "effect": effect_id.upper(), "movement_space": "VENUE_NATIVE", "semantic_path": semantic_path, "progress": progress, "world_target_xyz_m": point.as_dict(), "path_metadata": trace}
+
+
+def venue_native_effect_intent(effect_id, beat_value, geometry, slot_context=None, progress=None):
+    """Production router: V3 recipes first, V2 only for unmigrated effects."""
+    intent = movement_engine_v3_effect_intent(effect_id, beat_value, geometry, slot_context, progress)
+    if intent is not None:
+        return intent
+    intent = _venue_native_effect_intent_v2(effect_id, beat_value, geometry, slot_context, progress)
+    if intent is not None:
+        metadata = intent.setdefault("path_metadata", {})
+        metadata.update({"engine": "V2", "route": "V2_WORLD_NATIVE_FALLBACK", "recipe": None})
+    return intent
 
 
 def clamp_motion(center, amplitude, wave):
@@ -6530,6 +10092,9 @@ def auto_show_motion_profile(name):
 
 
 def auto_show_wall_wash_cue(name):
+    recipe = WALL_WASH_V2_RECIPES.get(str(name or ""))
+    if recipe is not None:
+        return {"label": recipe["label"], "v2": True}
     return WALL_WASH_CUES.get(name, WALL_WASH_CUES["soft_blue_wash"])
 
 
@@ -10241,6 +13806,10 @@ class DmxController:
         # only the final pan/tilt bytes for one fixture.  It never modifies the
         # persisted show configuration or broadens into colour/dimmer/effects.
         self.venue_target_test_authority = None
+        # Movement Lab is a renderer-facing production audition.  It is never
+        # persisted, does not own raw motor bytes, and therefore starts empty
+        # after every application restart.
+        self.movement_lab_authority = None
         self.track_preview_summaries = {}
         self.track_show_plans = {}
         self.track_path_plan_cache = {}
@@ -10398,6 +13967,10 @@ class DmxController:
             "pose_audience_center": None,
             "pose_audience_right": None,
             "pose_ceiling_center": None,
+            "venue_calibration": None,
+            "kinematic_calibration": None,
+            "axis_mapping_v2": None,
+            "axis_mapping_v2_remount_revision": 0,
         }
         if fixture_id is None:
             fixture_id = (
@@ -10560,8 +14133,12 @@ class DmxController:
         if not active:
             return values
         output = dict(values)
+        try:
+            master = clamp_unit(float((self.config or {}).get("master_dimmer", 1.0)))
+        except (TypeError, ValueError):
+            master = 1.0
         for channel in active["channels"]:
-            output[channel] = 255
+            output[channel] = clamp_dmx(round(255 * master))
         return output
 
     def _apply_virtualdj_beat_pulse_preview_overlay_locked(self, slot_previews):
@@ -11530,6 +15107,12 @@ class DmxController:
             fps = self.fps
             self.running = False
             self.active_one_shot_cue = None
+            self.manual_smoke_active = False
+            # A Stage Map preview lease is renderer-only and must remain usable
+            # without an Enttec connection.  Physical/calibration leases still
+            # release immediately when DMX goes away.
+            if (self.venue_target_test_authority or {}).get("mode") != "VENUE_TARGET_PREVIEW":
+                self._release_venue_target_test_locked("dmx_disconnected")
 
         self.virtualdj_beat_pulse_scheduler.stop("dmx_disconnected")
 
@@ -11553,12 +15136,1104 @@ class DmxController:
         self.stop_show_engine()
         self.disconnect()
 
+    def _release_venue_target_test_locked(self, reason):
+        authority = self.venue_target_test_authority
+        if authority is not None:
+            self.debug_log.log(
+                "VENUE_TARGET_TEST_RELEASE",
+                fixture_count=len(authority.get("participants") or {}),
+                target=authority.get("target"),
+                reason=reason,
+            )
+        self.venue_target_test_authority = None
+
+    def _movement_lab_state_locked(self):
+        authority = self.movement_lab_authority
+        if authority is None:
+            return {"status": "READY", "active": False, "engine": "V3", "route": None}
+        effect_id = str(authority.get("effect_id") or "")
+        return {
+            "status": "ACTIVE",
+            "active": True,
+            "engine": "V3",
+            "effect_id": effect_id,
+            "section": authority.get("section"),
+            "variation": authority.get("variation"),
+            "bpm": authority.get("bpm"),
+            "route": "V3_RECIPE" if movement_engine_v3_recipe(effect_id) else "V2_WORLD_NATIVE_FALLBACK",
+            "started_at_monotonic": authority.get("started_at_monotonic"),
+            "dmx_connected": self.connected,
+        }
+
+    def start_movement_lab(self, payload):
+        payload = payload if isinstance(payload, dict) else {}
+        effect_id = str(payload.get("effect_id") or "fast_audience_circle").strip().lower()
+        if movement_space_classification(effect_id) != MOVEMENT_SPACE_VENUE_NATIVE:
+            raise ValueError("Movement Lab needs a production venue-native effect")
+        try:
+            bpm = max(40.0, min(240.0, float(payload.get("bpm", 124.0))))
+        except (TypeError, ValueError):
+            bpm = 124.0
+        section = phrase_bucket(payload.get("section") or "chorus")
+        if section not in {"intro", "verse", "break", "build", "chorus", "drop", "outro"}:
+            section = "chorus"
+        variation = max(0, min(31, int(payload.get("variation", 0) or 0)))
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            if self.venue_target_test_authority is not None:
+                return {"accepted": False, "reason": "Release the active calibration/target lease first.", "movement_lab": self._movement_lab_state_locked()}
+            self.movement_lab_authority = {
+                "effect_id": effect_id,
+                "section": section,
+                "variation": variation,
+                "bpm": bpm,
+                "started_at_monotonic": time.monotonic(),
+            }
+            self.debug_log.log("MOVEMENT_LAB_PLAY", effect=effect_id, section=section, variation=variation)
+            return {"accepted": True, "movement_lab": self._movement_lab_state_locked()}
+
+    def stop_movement_lab(self, reason="operator_stop"):
+        with self.lock:
+            if self.movement_lab_authority is not None:
+                self.debug_log.log("MOVEMENT_LAB_STOP", reason=reason, effect=self.movement_lab_authority.get("effect_id"))
+            self.movement_lab_authority = None
+            return {"accepted": True, "movement_lab": self._movement_lab_state_locked()}
+
+    def _reap_venue_target_test_locked(self, now=None):
+        authority = self.venue_target_test_authority
+        if authority is None:
+            return
+        now = time.monotonic() if now is None else float(now)
+        if now >= float(authority.get("expires_at", 0.0)):
+            self._release_venue_target_test_locked("lease_expired")
+
+    @staticmethod
+    def _venue_target_test_status_for_resolution(resolution):
+        status = str((resolution or {}).get("status") or "ERROR")
+        return {
+            "MISSING_FIXTURE_CALIBRATION": "CALIBRATION_INCOMPLETE",
+            "INVALID_CALIBRATION": "CALIBRATION_INCOMPLETE",
+            "MISSING_FIXTURE_HEIGHT": "CALIBRATION_INCOMPLETE",
+            "MISSING_VENUE_SCALE": "GEOMETRY_INCOMPLETE",
+            "MISSING_TARGET_HEIGHT": "GEOMETRY_INCOMPLETE",
+            "CEILING_HEIGHT_UNSET": "CEILING_UNAVAILABLE",
+            "CEILING_HEIGHT_REQUIRES_NORMAL_HEIGHT": "CEILING_UNAVAILABLE",
+            "CEILING_HEIGHT_INVALID": "CEILING_UNAVAILABLE",
+            "VERTICAL_LAYER_INVALID": "GEOMETRY_INCOMPLETE",
+            "UNREACHABLE": "UNREACHABLE",
+            "UNSUPPORTED": "UNSUPPORTED",
+        }.get(status, "ERROR")
+
+    def _current_pan_raw_for_slot_locked(self, slot_config):
+        try:
+            fixture = find_fixture(FIXTURE_LIBRARY, slot_config["fixture"])
+            mode = find_mode(fixture, slot_config["mode"])
+            capabilities = mode_capabilities(mode)
+            address = int(slot_config["address"])
+            offsets = {channel.get("type"): address + int(channel.get("offset") or 1) - 1 for channel in mode.get("channels", [])}
+            coarse = _final_motion_byte(self.current_final_values, offsets.get("pan"))
+            fine = _final_motion_byte(self.current_final_values, offsets.get("pan_fine"))
+            if coarse is None:
+                return None
+            return _axis_bytes_to_raw(coarse, fine, bool(capabilities.get("pan_fine") and slot_config.get("use_fine_pan_tilt", True)))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _current_tilt_raw_for_slot_locked(self, slot_config):
+        try:
+            fixture = find_fixture(FIXTURE_LIBRARY, slot_config["fixture"])
+            mode = find_mode(fixture, slot_config["mode"])
+            capabilities = mode_capabilities(mode)
+            address = int(slot_config["address"])
+            offsets = {channel.get("type"): address + int(channel.get("offset") or 1) - 1 for channel in mode.get("channels", [])}
+            coarse = _final_motion_byte(self.current_final_values, offsets.get("tilt"))
+            fine = _final_motion_byte(self.current_final_values, offsets.get("tilt_fine"))
+            if coarse is None:
+                return None
+            return _axis_bytes_to_raw(coarse, fine, bool(capabilities.get("tilt_fine") and slot_config.get("use_fine_pan_tilt", True)))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _venue_target_test_gate_locked(self, slot_id, target_id, vertical_layer=VenueTargetVerticalLayer.NORMAL):
+        config = self._clean_full_config(dict(self.config))
+        if slot_id not in config["slots"]:
+            return {"status": "ERROR", "reason": "Unknown fixture."}
+        if target_id not in VENUE_TARGETS:
+            return {"status": "ERROR", "reason": "Unknown venue target."}
+        slot_config = config["slots"][slot_id]
+        calibration_state = fixture_calibration_state(
+            slot_id,
+            slot_config,
+            venue_geometry_from_mapping(config.get("venue_geometry")),
+        )
+        if calibration_state["status"] == "UNSUPPORTED":
+            return {"status": "UNSUPPORTED", "reason": "Selected fixture has no pan/tilt.", "calibration": calibration_state}
+        axis_v2 = axis_mapping_v2_state(slot_id, slot_config, config.get("venue_geometry"))
+        if calibration_state["status"] != "VALID" and axis_v2.get("status") != "ACTIVE":
+            return {"status": "CALIBRATION_INCOMPLETE", "reason": "Fixture calibration is incomplete.", "calibration": calibration_state}
+        resolution = resolve_venue_target(
+            _venue_calibration_for_slot(
+                slot_id,
+                slot_config,
+                venue_geometry_from_mapping(config.get("venue_geometry")),
+                current_pan_raw=self._current_pan_raw_for_slot_locked(slot_config),
+                current_tilt_raw=self._current_tilt_raw_for_slot_locked(slot_config),
+            ),
+            VENUE_TARGETS[target_id],
+            venue_geometry_from_mapping(config.get("venue_geometry")),
+            vertical_layer=vertical_layer,
+        )
+        if resolution.get("status") != "RESOLVED":
+            return {
+                "status": self._venue_target_test_status_for_resolution(resolution),
+                "reason": "Target cannot be safely resolved.",
+                "calibration": calibration_state,
+                "resolution": resolution,
+            }
+        if not (self.render_active and self.renderer_error is None):
+            return {"status": "ERROR", "reason": "Renderer is unhealthy.", "calibration": calibration_state, "resolution": resolution}
+        if not self.connected or self.dmx is None:
+            return {"status": "DMX_DISCONNECTED", "reason": "DMX NOT CONNECTED.", "calibration": calibration_state, "resolution": resolution}
+        return {"status": "READY", "calibration": calibration_state, "resolution": resolution}
+
+    @staticmethod
+    def _venue_target_fixture_classification(resolution):
+        return {
+            "RESOLVED": "TARGETABLE",
+            "MISSING_FIXTURE_CALIBRATION": "SKIPPED_UNCALIBRATED",
+            "MISSING_FIXTURE_HEIGHT": "SKIPPED_UNCALIBRATED",
+            "INVALID_CALIBRATION": "SKIPPED_INVALID",
+            "UNREACHABLE": "SKIPPED_UNREACHABLE",
+            "UNSUPPORTED": "SKIPPED_UNSUPPORTED",
+            "MISSING_VENUE_SCALE": "SKIPPED_MISSING_GEOMETRY",
+            "MISSING_TARGET_HEIGHT": "SKIPPED_MISSING_GEOMETRY",
+            "CEILING_HEIGHT_UNSET": "SKIPPED_CEILING_UNAVAILABLE",
+            "CEILING_HEIGHT_REQUIRES_NORMAL_HEIGHT": "SKIPPED_CEILING_UNAVAILABLE",
+            "CEILING_HEIGHT_INVALID": "SKIPPED_CEILING_UNAVAILABLE",
+            "VERTICAL_LAYER_INVALID": "SKIPPED_MISSING_GEOMETRY",
+        }.get(str((resolution or {}).get("status") or ""), "SKIPPED_INVALID")
+
+    def _venue_target_result_set_locked(self, target_id, vertical_layer=VenueTargetVerticalLayer.NORMAL):
+        """Resolve the all-moving-head snapshot shared by preview and DMX."""
+        target_id = canonical_venue_target_id(target_id)
+        vertical_layer = canonical_venue_target_vertical_layer(vertical_layer)
+        if target_id is None:
+            raise ValueError("unknown venue target")
+        if vertical_layer is None:
+            raise ValueError("unknown vertical layer")
+        config = self._clean_full_config(dict(self.config))
+        geometry = venue_geometry_from_mapping(config.get("venue_geometry"))
+        results = []
+        for slot_id in config["slot_order"]:
+            slot_config = config["slots"].get(slot_id)
+            if not slot_config or not slot_config.get("enabled", True):
+                continue
+            calibration_state = fixture_calibration_state(slot_id, slot_config, geometry)
+            capabilities = calibration_state.get("capabilities") or {}
+            # Fixed fixtures never enter the candidate denominator.
+            if not (capabilities.get("pan") and capabilities.get("tilt")):
+                continue
+            resolution = resolve_venue_target(
+                _venue_calibration_for_slot(
+                    slot_id,
+                    slot_config,
+                    geometry,
+                    current_pan_raw=self._current_pan_raw_for_slot_locked(slot_config),
+                    current_tilt_raw=self._current_tilt_raw_for_slot_locked(slot_config),
+                ),
+                VENUE_TARGETS[target_id],
+                geometry,
+                vertical_layer=vertical_layer,
+            )
+            results.append({
+                "slot_id": slot_id,
+                "label": str(slot_config.get("label") or slot_id),
+                "classification": self._venue_target_fixture_classification(resolution),
+                "resolver_status": resolution.get("status"),
+                "resolution": resolution,
+            })
+        targeted_count = sum(item["classification"] == "TARGETABLE" for item in results)
+        return {
+            "target": target_id,
+            "vertical_layer": vertical_layer.value,
+            "target_point": VENUE_TARGETS[target_id].as_dict(),
+            "candidate_count": len(results),
+            "targeted_count": targeted_count,
+            "skipped_count": len(results) - targeted_count,
+            "renderer_healthy": bool(self.render_active and self.renderer_error is None),
+            "dmx_connected": bool(self.connected and self.dmx is not None),
+            "physical_ready": bool(
+                targeted_count > 0
+                and self.render_active
+                and self.renderer_error is None
+                and self.connected
+                and self.dmx is not None
+            ),
+            "results": results,
+        }
+
+    def _venue_target_group_gate_locked(self, target_id, vertical_layer=VenueTargetVerticalLayer.NORMAL, *, require_dmx=True):
+        try:
+            result_set = self._venue_target_result_set_locked(target_id, vertical_layer)
+        except ValueError as exc:
+            return {"status": "ERROR", "reason": str(exc)}
+        if result_set["targeted_count"] == 0:
+            classifications = {item["classification"] for item in result_set["results"]}
+            if not result_set["results"]:
+                status, reason = "UNSUPPORTED", "No enabled pan/tilt fixtures are configured."
+            elif classifications <= {"SKIPPED_MISSING_GEOMETRY"}:
+                status, reason = "GEOMETRY_INCOMPLETE", "Venue geometry is incomplete for this target."
+            elif classifications <= {"SKIPPED_CEILING_UNAVAILABLE"}:
+                status, reason = "CEILING_UNAVAILABLE", "Ceiling height is unset or invalid for this target."
+            elif classifications <= {"SKIPPED_UNREACHABLE"}:
+                status, reason = "UNREACHABLE", "No moving head can safely reach this target."
+            else:
+                status, reason = "CALIBRATION_INCOMPLETE", "No calibrated moving head can safely resolve this target."
+            return {"status": status, "reason": reason, "result_set": result_set}
+        if not (self.render_active and self.renderer_error is None):
+            return {"status": "ERROR", "reason": "Renderer is unhealthy.", "result_set": result_set}
+        if require_dmx and (not self.connected or self.dmx is None):
+            return {"status": "DMX_DISCONNECTED", "reason": "DMX NOT CONNECTED.", "result_set": result_set}
+        return {"status": "READY", "result_set": result_set}
+
+    def _venue_target_test_state_locked(self):
+        self._reap_venue_target_test_locked()
+        authority = self.venue_target_test_authority
+        if authority is None:
+            return {"status": "READY", "active": False, "scope": "PAN_TILT_ONLY"}
+        remaining = max(0.0, float(authority["expires_at"]) - time.monotonic())
+        selected_slot_id = authority.get("selected_fixture_id")
+        selected_resolution = (authority.get("participants") or {}).get(selected_slot_id) if selected_slot_id else None
+        if authority.get("mode") in {"PHYSICAL_AXIS_MAPPING_V2", "PHYSICAL_AXIS_MAPPING_V2_REFERENCE"}:
+            selected_resolution = None
+        return {
+            "status": "ACTIVE",
+            "active": True,
+            "scope": "PAN_TILT_ONLY",
+            "mode": authority.get("mode", "VENUE_TARGET_TEST"),
+            "axis": authority.get("axis"),
+            "sample_index": authority.get("sample_index"),
+            "sample_raw": authority.get("sample_raw"),
+            "selected_fixture_id": authority.get("selected_fixture_id"),
+            "target": authority["target"],
+            "vertical_layer": authority.get("vertical_layer", VenueTargetVerticalLayer.NORMAL.value),
+            "lease_remaining_seconds": remaining,
+            "participating_fixture_ids": list(authority["participants"]),
+            "result_set": dict(authority["result_set"]),
+            "rendered_outputs": dict(authority.get("rendered_outputs") or {}),
+            "theoretical_output": dict(authority.get("theoretical_output") or {}) or None,
+            "selected_resolution": dict(selected_resolution or {}) or None,
+        }
+
+    def _activate_venue_target_test_locked(self, target_id, vertical_layer=VenueTargetVerticalLayer.NORMAL, *, mode, require_dmx):
+        vertical_layer = canonical_venue_target_vertical_layer(vertical_layer)
+        if vertical_layer is None:
+            return {"accepted": False, "status": "VERTICAL_LAYER_INVALID", "reason": "Unknown vertical layer.", "authority": self._venue_target_test_state_locked()}
+        existing = self.venue_target_test_authority
+        if existing and (existing["target"] != target_id or existing.get("vertical_layer", VenueTargetVerticalLayer.NORMAL.value) != vertical_layer.value):
+            return {"accepted": False, "status": "ACTIVE", "reason": "Release the active target test before changing target or vertical layer.", "authority": self._venue_target_test_state_locked()}
+        gate = self._venue_target_group_gate_locked(target_id, vertical_layer, require_dmx=require_dmx)
+        if gate["status"] != "READY":
+            return {"accepted": False, **gate, "authority": self._venue_target_test_state_locked()}
+        now = time.monotonic()
+        participants = {
+            item["slot_id"]: dict(item["resolution"])
+            for item in gate["result_set"]["results"]
+            if item["classification"] == "TARGETABLE"
+        }
+        self.venue_target_test_authority = {
+            "mode": mode,
+            "target": target_id,
+            "vertical_layer": vertical_layer.value,
+            "participants": participants,
+            "result_set": dict(gate["result_set"]),
+            "expires_at": now + VENUE_TARGET_TEST_LEASE_SECONDS,
+            "rendered_outputs": {},
+        }
+        self.debug_log.log("VENUE_TARGET_TEST_ACTIVE", mode=mode, target=target_id, vertical_layer=vertical_layer.value, fixture_count=len(participants))
+        return {"accepted": True, "status": "ACTIVE", "authority": self._venue_target_test_state_locked()}
+
+    def activate_venue_target_preview_test(self, payload):
+        """Lease authoritative final pan/tilt for Stage Map preview only.
+
+        It deliberately shares the physical target resolver and final renderer,
+        but never requires or writes to a connected DMX transport.
+        """
+        target_id = canonical_venue_target_id((payload or {}).get("target"))
+        vertical_layer = canonical_venue_target_vertical_layer((payload or {}).get("vertical_layer"))
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            return self._activate_venue_target_test_locked(
+                target_id, vertical_layer, mode="VENUE_TARGET_PREVIEW", require_dmx=False
+            )
+
+    def activate_venue_target_test(self, payload):
+        target_id = canonical_venue_target_id((payload or {}).get("target"))
+        vertical_layer = canonical_venue_target_vertical_layer((payload or {}).get("vertical_layer"))
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            return self._activate_venue_target_test_locked(
+                target_id, vertical_layer, mode="VENUE_TARGET_TEST", require_dmx=True
+            )
+
+    def renew_venue_target_test(self, payload):
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            authority = self.venue_target_test_authority
+            if authority is None:
+                return {"accepted": False, "status": "READY", "reason": "No active target test.", "authority": self._venue_target_test_state_locked()}
+            if not (self.render_active and self.renderer_error is None):
+                self._release_venue_target_test_locked("gate_lost")
+                return {"accepted": False, "status": "ERROR", "reason": "Renderer is unhealthy.", "authority": self._venue_target_test_state_locked()}
+            if authority.get("mode") != "VENUE_TARGET_PREVIEW" and (not self.connected or self.dmx is None):
+                self._release_venue_target_test_locked("gate_lost")
+                return {"accepted": False, "status": "DMX_DISCONNECTED", "reason": "DMX NOT CONNECTED.", "authority": self._venue_target_test_state_locked()}
+            authority["expires_at"] = time.monotonic() + VENUE_TARGET_TEST_LEASE_SECONDS
+            return {"accepted": True, "status": "ACTIVE", "authority": self._venue_target_test_state_locked()}
+
+    def release_venue_target_test(self, payload=None):
+        with self.lock:
+            self._release_venue_target_test_locked(str((payload or {}).get("reason") or "operator_release"))
+            return {"accepted": True, "status": "READY", "authority": self._venue_target_test_state_locked()}
+
+    def _aim_calibration_gate_locked(self, slot_id, target_id):
+        config = self._clean_full_config(dict(self.config))
+        if slot_id not in config["slots"]:
+            return {"status": "ERROR", "reason": "Unknown fixture."}
+        slot = config["slots"][slot_id]
+        venue = fixture_calibration_state(slot_id, slot, venue_geometry_from_mapping(config.get("venue_geometry")))
+        if venue.get("status") != "VALID":
+            return {"status": "CALIBRATION_INCOMPLETE", "reason": "Venue/mounting calibration must be VALID.", "venue_calibration": venue}
+        if target_id not in (*KINEMATIC_REQUIRED_ANCHORS, KINEMATIC_VALIDATION_TARGET):
+            return {"status": "ERROR", "reason": "Target is not a V1 aim-calibration anchor or validation target."}
+        if not (self.render_active and self.renderer_error is None):
+            return {"status": "ERROR", "reason": "Renderer is unhealthy."}
+        if not self.connected or self.dmx is None:
+            return {"status": "DMX_DISCONNECTED", "reason": "DMX NOT CONNECTED."}
+        aim = kinematic_calibration_state(slot_id, slot, venue_geometry_from_mapping(config.get("venue_geometry")))
+        if target_id == KINEMATIC_VALIDATION_TARGET and aim.get("status") != "CALIBRATED":
+            return {"status": "KINEMATIC_UNCALIBRATED", "reason": "Save three sufficient anchors before FAR RIGHT validation.", "aim_calibration": aim}
+        resolution = resolve_venue_target(
+            _venue_calibration_for_slot(
+                slot_id,
+                slot,
+                venue_geometry_from_mapping(config.get("venue_geometry")),
+                use_kinematic=(target_id == KINEMATIC_VALIDATION_TARGET),
+            ),
+            VENUE_TARGETS[target_id],
+            venue_geometry_from_mapping(config.get("venue_geometry")),
+        )
+        if resolution.get("status") != "RESOLVED":
+            return {"status": self._venue_target_test_status_for_resolution(resolution), "reason": "Anchor cannot be safely resolved.", "resolution": resolution}
+        return {"status": "READY", "resolution": resolution, "aim_calibration": aim, "slot": slot}
+
+    def activate_aim_calibration(self, payload):
+        slot_id = str((payload or {}).get("slot_id") or "").strip()
+        target_id = canonical_venue_target_id((payload or {}).get("target"))
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            if self.venue_target_test_authority is not None:
+                return {"accepted": False, "status": "ACTIVE", "reason": "Release the active movement lease first.", "authority": self._venue_target_test_state_locked()}
+            gate = self._aim_calibration_gate_locked(slot_id, target_id)
+            if gate.get("status") != "READY":
+                return {"accepted": False, **gate, "authority": self._venue_target_test_state_locked()}
+            resolution = dict(gate["resolution"])
+            output = dict(resolution.get("predicted_output") or {})
+            now = time.monotonic()
+            self.venue_target_test_authority = {
+                "mode": "PHYSICAL_AIM_CALIBRATION",
+                "target": target_id,
+                "selected_fixture_id": slot_id,
+                "participants": {slot_id: {**resolution, "predicted_output": output}},
+                "result_set": {
+                    "target": target_id,
+                    "target_point": VENUE_TARGETS[target_id].as_dict(),
+                    "candidate_count": 1,
+                    "targeted_count": 1,
+                    "skipped_count": 0,
+                    "renderer_healthy": True,
+                    "dmx_connected": True,
+                    "physical_ready": True,
+                    "results": [{"slot_id": slot_id, "label": gate["slot"].get("label", slot_id), "classification": "TARGETABLE", "resolver_status": "RESOLVED", "resolution": resolution}],
+                },
+                "theoretical_output": dict(resolution.get("theoretical_output") or output),
+                "expires_at": now + VENUE_TARGET_TEST_LEASE_SECONDS,
+                "rendered_outputs": {},
+            }
+            self.debug_log.log("PHYSICAL_AIM_CALIBRATION_ACTIVE", slot=slot_id, target=target_id)
+            return {"accepted": True, "status": "ACTIVE", "authority": self._venue_target_test_state_locked()}
+
+    def nudge_aim_calibration(self, payload):
+        axis = str((payload or {}).get("axis") or "").strip().lower()
+        direction = str((payload or {}).get("direction") or "").strip().lower()
+        granularity = str((payload or {}).get("granularity") or "FINE").strip().upper()
+        if axis not in {"pan", "tilt"} or direction not in {"negative", "positive"}:
+            raise ValueError("axis must be pan/tilt and direction negative/positive")
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            authority = self.venue_target_test_authority
+            if not authority or authority.get("mode") != "PHYSICAL_AIM_CALIBRATION":
+                return {"accepted": False, "status": "READY", "reason": "No active physical aim calibration.", "authority": self._venue_target_test_state_locked()}
+            slot_id = authority["selected_fixture_id"]
+            gate = self._aim_calibration_gate_locked(slot_id, authority["target"])
+            if gate.get("status") != "READY":
+                self._release_venue_target_test_locked("gate_lost")
+                return {"accepted": False, **gate, "authority": self._venue_target_test_state_locked()}
+            slot = gate["slot"]
+            mode = find_mode(find_fixture(FIXTURE_LIBRARY, slot["fixture"]), slot["mode"])
+            capabilities = mode_capabilities(mode)
+            supports_fine = bool(capabilities.get(f"{axis}_fine") and slot.get("use_fine_pan_tilt", True))
+            output = authority["participants"][slot_id]["predicted_output"]
+            raw = _axis_bytes_to_raw(output[axis], output.get(f"{axis}_fine"), supports_fine)
+            step = (1536 if granularity == "COARSE" else 128) if supports_fine else (6 if granularity == "COARSE" else 1)
+            raw += step * (-1 if direction == "negative" else 1)
+            adjusted = _axis_raw_to_bytes(raw, supports_fine)
+            output[axis] = adjusted["coarse"]
+            output[f"{axis}_fine"] = adjusted["fine"]
+            authority["expires_at"] = time.monotonic() + VENUE_TARGET_TEST_LEASE_SECONDS
+            return {"accepted": True, "status": "ACTIVE", "authority": self._venue_target_test_state_locked()}
+
+    def save_aim_calibration_anchor(self, payload=None):
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            authority = self.venue_target_test_authority
+            if not authority or authority.get("mode") != "PHYSICAL_AIM_CALIBRATION":
+                return {"accepted": False, "status": "READY", "reason": "No active physical aim calibration.", "authority": self._venue_target_test_state_locked()}
+            target_id = authority["target"]
+            if target_id not in KINEMATIC_REQUIRED_ANCHORS:
+                return {"accepted": False, "status": "VALIDATION_ONLY", "reason": "FAR RIGHT is validation evidence, not a V1 anchor.", "authority": self._venue_target_test_state_locked()}
+            slot_id = authority["selected_fixture_id"]
+            config = self._clean_full_config(dict(self.config))
+            slot = config["slots"][slot_id]
+            geometry = venue_geometry_from_mapping(config.get("venue_geometry"))
+            signature = kinematic_calibration_signature(slot, geometry)
+            resolution = authority["participants"][slot_id]
+            output = dict(resolution["predicted_output"])
+            mode = find_mode(find_fixture(FIXTURE_LIBRARY, slot["fixture"]), slot["mode"])
+            capabilities = mode_capabilities(mode)
+            pan_fine = bool(capabilities.get("pan_fine") and slot.get("use_fine_pan_tilt", True))
+            tilt_fine = bool(capabilities.get("tilt_fine") and slot.get("use_fine_pan_tilt", True))
+            aim = _clean_kinematic_calibration(slot.get("kinematic_calibration"))
+            if aim.get("geometry_signature") != signature:
+                aim = _clean_kinematic_calibration(None)
+            anchor = {
+                "target": target_id,
+                "target_xyz_m": dict(resolution["target_xyz_m"]),
+                "target_vector_m": dict(resolution["target_vector_m"]),
+                "desired_pan_degrees": float(resolution["pan_degrees"]),
+                "desired_tilt_degrees": float(resolution["tilt_degrees"]),
+                "actual_pan_raw": _axis_bytes_to_raw(output["pan"], output.get("pan_fine"), pan_fine),
+                "actual_tilt_raw": _axis_bytes_to_raw(output["tilt"], output.get("tilt_fine"), tilt_fine),
+                "actual_output": output,
+                "geometry_signature": signature,
+                "saved_at": time.time(),
+            }
+            aim["geometry_signature"] = signature
+            aim["anchors"][target_id] = anchor
+            aim["model"] = fit_kinematic_calibration(aim["anchors"], pan_supports_fine=pan_fine, tilt_supports_fine=tilt_fine)
+            aim["validation"] = None
+            slot["kinematic_calibration"] = aim
+            self.config = self._clean_full_config(config)
+            self._schedule_save_locked()
+            state = kinematic_calibration_state(slot_id, self.config["slots"][slot_id], geometry)
+            self._release_venue_target_test_locked("anchor_saved")
+            self.debug_log.log("PHYSICAL_AIM_ANCHOR_SAVED", slot=slot_id, target=target_id, status=state["status"])
+            return {"accepted": True, "status": state["status"], "aim_calibration": state, "authority": self._venue_target_test_state_locked()}
+
+    def record_aim_calibration_validation(self, payload):
+        result = str((payload or {}).get("result") or "").upper()
+        if result not in {"PASS", "ADJUSTMENT_REQUIRED"}:
+            raise ValueError("validation result must be PASS or ADJUSTMENT_REQUIRED")
+        with self.lock:
+            authority = self.venue_target_test_authority
+            if not authority or authority.get("mode") != "PHYSICAL_AIM_CALIBRATION" or authority.get("target") != KINEMATIC_VALIDATION_TARGET:
+                return {"accepted": False, "status": "READY", "reason": "FAR RIGHT validation is not active."}
+            slot_id = authority["selected_fixture_id"]
+            config = self._clean_full_config(dict(self.config))
+            slot = config["slots"][slot_id]
+            geometry = venue_geometry_from_mapping(config.get("venue_geometry"))
+            aim = _clean_kinematic_calibration(slot.get("kinematic_calibration"))
+            aim["validation"] = {"target": KINEMATIC_VALIDATION_TARGET, "result": result, "recorded_at": time.time(), "geometry_signature": kinematic_calibration_signature(slot, geometry)}
+            slot["kinematic_calibration"] = aim
+            self.config = self._clean_full_config(config)
+            self._schedule_save_locked()
+            self._release_venue_target_test_locked("validation_recorded")
+            return {"accepted": True, "status": result, "aim_calibration": kinematic_calibration_state(slot_id, self.config["slots"][slot_id], geometry), "authority": self._venue_target_test_state_locked()}
+
+    def reset_aim_calibration(self, payload):
+        if (payload or {}).get("confirm") is not True:
+            raise ValueError("confirm=true is required to reset aim calibration")
+        slot_id = str((payload or {}).get("slot_id") or "").strip()
+        with self.lock:
+            config = self._clean_full_config(dict(self.config))
+            if slot_id not in config["slots"]:
+                raise ValueError("unknown slot_id")
+            self._release_venue_target_test_locked("aim_calibration_reset")
+            config["slots"][slot_id]["kinematic_calibration"] = None
+            self.config = self._clean_full_config(config)
+            self._schedule_save_locked()
+            return {"accepted": True, "status": "KINEMATIC_UNCALIBRATED", "authority": self._venue_target_test_state_locked()}
+
+    def _axis_mapping_v2_gate_locked(self, slot_id):
+        config = self._clean_full_config(dict(self.config))
+        slot = config.get("slots", {}).get(slot_id)
+        if not slot:
+            return {"status": "ERROR", "reason": "Unknown fixture."}
+        fixture = find_fixture(FIXTURE_LIBRARY, slot["fixture"])
+        mode = find_mode(fixture, slot["mode"])
+        capabilities = mode_capabilities(mode)
+        if not (capabilities.get("pan") and capabilities.get("tilt")):
+            return {"status": "UNSUPPORTED", "reason": "Selected fixture has no Pan/Tilt."}
+        if not (self.render_active and self.renderer_error is None):
+            return {"status": "ERROR", "reason": "Renderer is unhealthy."}
+        if not self.connected or self.dmx is None:
+            return {"status": "DMX_DISCONNECTED", "reason": "DMX NOT CONNECTED."}
+        state = axis_mapping_v2_state(slot_id, slot, config.get("venue_geometry"))
+        return {"status": "READY", "slot": slot, "capabilities": capabilities, "axis_mapping_v2": state}
+
+    def begin_axis_mapping_v2(self, payload):
+        slot_id = str((payload or {}).get("slot_id") or "").strip()
+        axis = str((payload or {}).get("axis") or "TILT").upper()
+        if axis not in {"PAN", "TILT"}:
+            raise ValueError("axis must be PAN or TILT")
+        with self.lock:
+            self._release_venue_target_test_locked("axis_mapping_v2_begin")
+            gate = self._axis_mapping_v2_gate_locked(slot_id)
+            if gate["status"] != "READY":
+                return {"accepted": False, **gate, "authority": self._venue_target_test_state_locked()}
+            state = gate["axis_mapping_v2"]
+            if axis == "PAN" and not state.get("pan_start_allowed"):
+                return {"accepted": False, "status": state.get("status"), "reason": "CALIBRATE TILT FIRST. Lock a Pan-sweep elevation from the measured Tilt map.", "axis_mapping_v2": state, "authority": self._venue_target_test_state_locked()}
+            if axis == "TILT" and not state.get("tilt_start_allowed"):
+                return {"accepted": False, "status": state.get("status"), "reason": "Set and lock a stable Pan reference before measuring Tilt.", "axis_mapping_v2": state, "authority": self._venue_target_test_state_locked()}
+            return {"accepted": True, "status": "READY", "axis": axis, "axis_mapping_v2": state, "authority": self._venue_target_test_state_locked()}
+
+    def _set_axis_mapping_v2_reference_authority_locked(self, slot_id, slot, capabilities, *, pan_raw, tilt_raw, target):
+        pan_fine = bool(capabilities.get("pan_fine") and slot.get("use_fine_pan_tilt", True))
+        tilt_fine = bool(capabilities.get("tilt_fine") and slot.get("use_fine_pan_tilt", True))
+        pan_output = _axis_raw_to_bytes(pan_raw, pan_fine)
+        tilt_output = _axis_raw_to_bytes(tilt_raw, tilt_fine)
+        output = {"pan": pan_output["coarse"], "pan_fine": pan_output["fine"], "tilt": tilt_output["coarse"], "tilt_fine": tilt_output["fine"]}
+        now = time.monotonic()
+        self.venue_target_test_authority = {
+            "mode": "PHYSICAL_AXIS_MAPPING_V2_REFERENCE", "target": target,
+            "selected_fixture_id": slot_id, "axis": "PAN_REFERENCE", "sample_index": None,
+            "sample_raw": pan_raw, "reference_raw": tilt_raw,
+            "participants": {slot_id: {"predicted_output": output}},
+            "result_set": {"target": target, "target_point": {"x": 0.0, "y": 0.0}, "candidate_count": 1, "targeted_count": 1, "skipped_count": 0, "renderer_healthy": True, "dmx_connected": True, "physical_ready": True, "results": []},
+            "expires_at": now + VENUE_TARGET_TEST_LEASE_SECONDS, "rendered_outputs": {},
+        }
+
+    def nudge_axis_mapping_v2_tilt_reference(self, payload):
+        axis = str((payload or {}).get("axis") or "PAN").upper()
+        direction = str((payload or {}).get("direction") or "").upper()
+        granularity = str((payload or {}).get("granularity") or "FINE").upper()
+        if axis not in {"PAN", "TILT"} or granularity not in {"COARSE", "FINE"}:
+            raise ValueError("axis must be PAN/TILT and granularity COARSE/FINE")
+        allowed_directions = {"LEFT", "RIGHT"} if axis == "PAN" else {"UP", "DOWN"}
+        if direction not in allowed_directions:
+            raise ValueError(f"direction must be {'/'.join(sorted(allowed_directions))} for {axis}")
+        slot_id = str((payload or {}).get("slot_id") or "").strip()
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            authority = self.venue_target_test_authority
+            if authority is not None and (
+                authority.get("mode") != "PHYSICAL_AXIS_MAPPING_V2_REFERENCE"
+                or authority.get("selected_fixture_id") != slot_id
+            ):
+                return {"accepted": False, "status": "ACTIVE", "reason": "Release the active movement lease first.", "authority": self._venue_target_test_state_locked()}
+            gate = self._axis_mapping_v2_gate_locked(slot_id)
+            if gate["status"] != "READY":
+                return {"accepted": False, **gate, "authority": self._venue_target_test_state_locked()}
+            slot, capabilities = gate["slot"], gate["capabilities"]
+            pan_fine = bool(capabilities.get("pan_fine") and slot.get("use_fine_pan_tilt", True))
+            tilt_fine = bool(capabilities.get("tilt_fine") and slot.get("use_fine_pan_tilt", True))
+            if authority is not None:
+                pan_raw = int(authority["sample_raw"])
+                tilt_raw = int(authority["reference_raw"])
+            else:
+                pan_raw = self._current_pan_raw_for_slot_locked(slot)
+                tilt_raw = self._current_tilt_raw_for_slot_locked(slot)
+                pan_raw = _axis_raw_limit(pan_fine) // 2 if pan_raw is None else pan_raw
+                tilt_raw = _axis_raw_limit(tilt_fine) // 2 if tilt_raw is None else tilt_raw
+            supports_fine = pan_fine if axis == "PAN" else tilt_fine
+            step = max(1, _axis_raw_limit(supports_fine) // (20 if granularity == "COARSE" else 500))
+            direction_sign = 1 if direction in {"RIGHT", "UP"} else -1
+            if axis == "PAN":
+                pan_raw = max(0, min(_axis_raw_limit(pan_fine), pan_raw + direction_sign * step))
+            else:
+                tilt_raw = max(0, min(_axis_raw_limit(tilt_fine), tilt_raw + direction_sign * step))
+            self._set_axis_mapping_v2_reference_authority_locked(
+                slot_id,
+                slot,
+                capabilities,
+                pan_raw=pan_raw,
+                tilt_raw=tilt_raw,
+                target="TILT_REFERENCE_VIEWING_POSE",
+            )
+            self.debug_log.log(
+                "AXIS_MAPPING_V2_REFERENCE_NUDGE",
+                slot=slot_id,
+                axis=axis,
+                direction=direction,
+                granularity=granularity,
+                pan_raw=pan_raw,
+                tilt_raw=tilt_raw,
+            )
+            return {"accepted": True, "status": "ACTIVE", "authority": self._venue_target_test_state_locked(), "axis_mapping_v2": gate["axis_mapping_v2"]}
+
+    def lock_axis_mapping_v2_tilt_reference(self, payload):
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            authority = self.venue_target_test_authority
+            if not authority or authority.get("mode") != "PHYSICAL_AXIS_MAPPING_V2_REFERENCE":
+                return {"accepted": False, "status": "READY", "reason": "Position Pan first, then lock the reference.", "authority": self._venue_target_test_state_locked()}
+            slot_id = authority["selected_fixture_id"]
+            config = self._clean_full_config(dict(self.config)); slot = config["slots"][slot_id]
+            mapping = _clean_axis_mapping_v2(slot.get("axis_mapping_v2"), slot)
+            mapping["profile_signature"] = axis_mapping_v2_signature(slot)
+            mapping["tilt_sweep_reference_pan_raw"] = int(authority["sample_raw"])
+            # A new Tilt reference changes the pose of every Tilt observation.
+            mapping["tilt_samples"] = {}
+            # Do not discard previously measured PAN evidence. It was observed at
+            # an unknown Tilt pose, so keep it visible but explicitly require a
+            # fresh review before it can regain candidate authority.
+            mapping["pan_samples_review_required"] = bool(mapping["pan_samples"])
+            mapping["pan_sweep_reference_tilt_plane_degrees"] = None
+            mapping["pan_sweep_reference_tilt_raw"] = None
+            mapping["model"] = fit_axis_mapping_v2({}, {})
+            mapping["validations"] = {}; mapping["active"] = False
+            mapping["workflow_phase"] = "TILT"
+            mapping["workflow_sample_index"] = 0
+            mapping["workflow_move_status"] = "MOVE_REQUIRED"
+            mapping["workflow_move_error"] = None
+            slot["axis_mapping_v2"] = mapping; self.config = self._clean_full_config(config); self._schedule_save_locked()
+            self._release_venue_target_test_locked("axis_mapping_v2_tilt_reference_locked")
+            move = self._activate_axis_mapping_v2_sample_locked(slot_id, "TILT", 0)
+            state = axis_mapping_v2_state(slot_id, self.config["slots"][slot_id], self.config.get("venue_geometry"))
+            return {
+                "accepted": True,
+                "status": move.get("status", state["status"]),
+                "reason": move.get("reason"),
+                "axis_mapping_v2": state,
+                "authority": self._venue_target_test_state_locked(),
+            }
+
+    def set_axis_mapping_v2_pan_reference(self, payload):
+        slot_id = str((payload or {}).get("slot_id") or "").strip()
+        requested = (payload or {}).get("tilt_plane_degrees", (payload or {}).get("elevation_degrees"))
+        try: tilt_plane_degrees = _normalize_directed_tilt_plane_angle(requested)
+        except (TypeError, ValueError): raise ValueError("tilt_plane_degrees is required")
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            authority = self.venue_target_test_authority
+            if authority is not None and not (
+                authority.get("mode") == "PHYSICAL_AXIS_MAPPING_V2"
+                and authority.get("selected_fixture_id") == slot_id
+            ):
+                return {"accepted": False, "status": "ACTIVE", "reason": "Release the active movement lease first.", "authority": self._venue_target_test_state_locked()}
+            self._release_venue_target_test_locked("axis_mapping_v2_manual_pan_reference")
+            gate = self._axis_mapping_v2_gate_locked(slot_id)
+            if gate["status"] != "READY": return {"accepted": False, **gate, "authority": self._venue_target_test_state_locked()}
+            slot = gate["slot"]; mapping = _clean_axis_mapping_v2(slot.get("axis_mapping_v2"), slot)
+            tilt = (fit_axis_mapping_v2(mapping["pan_samples"], mapping["tilt_samples"]).get("tilt") or {})
+            raw = axis_mapping_v2_inverse_tilt(tilt_plane_degrees, tilt)
+            if raw is None:
+                return {"accepted": False, "status": "REFERENCE_TILT_DIRECTION_UNREACHABLE", "reason": "REFERENCE TILT DIRECTION UNREACHABLE: choose a FRONT-side direction inside measured Tilt coverage.", "axis_mapping_v2": gate["axis_mapping_v2"], "authority": self._venue_target_test_state_locked()}
+            mapping["pan_sweep_reference_tilt_plane_degrees"] = tilt_plane_degrees
+            mapping["pan_sweep_reference_tilt_raw"] = int(round(raw))
+            if mapping["pan_samples"]:
+                mapping["pan_samples"] = {}; mapping["pan_samples_review_required"] = True
+            mapping["workflow_phase"] = "PAN"
+            mapping["workflow_sample_index"] = 0
+            mapping["workflow_move_status"] = "MOVE_REQUIRED"
+            mapping["workflow_move_error"] = None
+            mapping["model"] = fit_axis_mapping_v2(mapping["pan_samples"], mapping["tilt_samples"]); mapping["validations"] = {}; mapping["active"] = False
+            config = self._clean_full_config(dict(self.config)); config["slots"][slot_id]["axis_mapping_v2"] = mapping; self.config = self._clean_full_config(config); self._schedule_save_locked()
+            move = self._activate_axis_mapping_v2_sample_locked(slot_id, "PAN", 0)
+            state = axis_mapping_v2_state(slot_id, self.config["slots"][slot_id], self.config.get("venue_geometry"))
+            return {"accepted": True, "status": move.get("status", state["status"]), "reason": move.get("reason"), "axis_mapping_v2": state, "authority": self._venue_target_test_state_locked()}
+
+    def _activate_axis_mapping_v2_sample_locked(self, slot_id, axis, index):
+        """Lease exactly one selected fixture at one known raw sample position."""
+        fractions = AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS if axis == "PAN" else AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS if axis == "TILT" else None
+        if fractions is None or not 0 <= index < len(fractions):
+            return {"accepted": False, "status": "ERROR", "reason": "Invalid axis sample."}
+        gate = self._axis_mapping_v2_gate_locked(slot_id)
+        if gate["status"] != "READY":
+            return {"accepted": False, **gate}
+        slot, capabilities = gate["slot"], gate["capabilities"]
+        pan_fine = bool(capabilities.get("pan_fine") and slot.get("use_fine_pan_tilt", True))
+        tilt_fine = bool(capabilities.get("tilt_fine") and slot.get("use_fine_pan_tilt", True))
+        pan_raw = self._current_pan_raw_for_slot_locked(slot)
+        tilt_raw = self._current_tilt_raw_for_slot_locked(slot)
+        pan_raw = _axis_raw_limit(pan_fine) // 2 if pan_raw is None else pan_raw
+        tilt_raw = _axis_raw_limit(tilt_fine) // 2 if tilt_raw is None else tilt_raw
+        state = gate["axis_mapping_v2"]
+        if axis == "PAN":
+            if not state.get("pan_start_allowed"):
+                return {"accepted": False, "status": state.get("status"), "reason": "CALIBRATE TILT FIRST. FRONT reference is unavailable."}
+            pan_raw = _axis_mapping_sample_positions(fractions, pan_fine)[index]
+            tilt_raw = int(state["pan_sweep_reference_tilt_raw"])
+        else:
+            if not state.get("tilt_start_allowed"):
+                return {"accepted": False, "status": state.get("status"), "reason": "Lock a stable Pan reference before measuring Tilt."}
+            tilt_raw = _axis_mapping_sample_positions(fractions, tilt_fine)[index]
+            pan_raw = int(state["tilt_sweep_reference_pan_raw"])
+        pan_output = _axis_raw_to_bytes(pan_raw, pan_fine)
+        tilt_output = _axis_raw_to_bytes(tilt_raw, tilt_fine)
+        output = {"pan": pan_output["coarse"], "pan_fine": pan_output["fine"], "tilt": tilt_output["coarse"], "tilt_fine": tilt_output["fine"]}
+        now = time.monotonic()
+        self.venue_target_test_authority = {
+            "mode": "PHYSICAL_AXIS_MAPPING_V2",
+            "target": f"{axis}_SAMPLE_{index + 1}",
+            "selected_fixture_id": slot_id,
+            "axis": axis,
+            "sample_index": index,
+            "sample_raw": pan_raw if axis == "PAN" else tilt_raw,
+            "reference_raw": tilt_raw if axis == "PAN" else pan_raw,
+            "participants": {slot_id: {"predicted_output": output}},
+            "result_set": {
+                "target": f"{axis}_SAMPLE_{index + 1}", "target_point": {"x": 0.0, "y": 0.0},
+                "candidate_count": 1, "targeted_count": 1, "skipped_count": 0,
+                "renderer_healthy": True, "dmx_connected": True, "physical_ready": True,
+                "results": [],
+            },
+            "expires_at": now + VENUE_TARGET_TEST_LEASE_SECONDS,
+            "rendered_outputs": {},
+        }
+        self.debug_log.log("AXIS_MAPPING_V2_SAMPLE_MOVE", slot=slot_id, axis=axis, index=index, raw=self.venue_target_test_authority["sample_raw"])
+        return {"accepted": True, "status": "ACTIVE", "axis_mapping_v2": state}
+
+    def move_axis_mapping_v2_sample(self, payload):
+        slot_id = str((payload or {}).get("slot_id") or "").strip()
+        axis = str((payload or {}).get("axis") or "").upper()
+        try:
+            index = int((payload or {}).get("index"))
+        except (TypeError, ValueError):
+            raise ValueError("sample index is required")
+        fractions = AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS if axis == "PAN" else AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS if axis == "TILT" else None
+        if fractions is None or not 0 <= index < len(fractions):
+            raise ValueError("invalid axis sample")
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            authority = self.venue_target_test_authority
+            if authority is not None and not (
+                authority.get("mode") == "PHYSICAL_AXIS_MAPPING_V2"
+                and authority.get("selected_fixture_id") == slot_id
+            ):
+                return {"accepted": False, "status": "ACTIVE", "reason": "Release the active movement lease first.", "authority": self._venue_target_test_state_locked()}
+            self._release_venue_target_test_locked("axis_mapping_v2_manual_sample_select")
+            gate = self._axis_mapping_v2_gate_locked(slot_id)
+            if gate["status"] != "READY":
+                return {"accepted": False, **gate, "authority": self._venue_target_test_state_locked()}
+            config = self._clean_full_config(dict(self.config))
+            mapping = _clean_axis_mapping_v2(config["slots"][slot_id].get("axis_mapping_v2"), config["slots"][slot_id])
+            mapping["workflow_phase"] = axis
+            mapping["workflow_sample_index"] = index
+            mapping["workflow_move_status"] = "MOVE_REQUIRED"
+            mapping["workflow_move_error"] = None
+            config["slots"][slot_id]["axis_mapping_v2"] = mapping
+            self.config = self._clean_full_config(config)
+            self._schedule_save_locked()
+            move = self._activate_axis_mapping_v2_sample_locked(slot_id, axis, index)
+            return {**move, "authority": self._venue_target_test_state_locked()}
+
+    def save_axis_mapping_v2_sample(self, payload):
+        axis = str((payload or {}).get("axis") or "").upper()
+        measured_key = "measured_azimuth_degrees" if axis == "PAN" else "measured_tilt_plane_degrees" if axis == "TILT" else None
+        if measured_key is None:
+            raise ValueError("axis must be PAN or TILT")
+        try:
+            measured = float((payload or {}).get("measured_degrees"))
+        except (TypeError, ValueError):
+            raise ValueError("measured_degrees is required")
+        if not math.isfinite(measured):
+            raise ValueError("measured direction is invalid")
+        if axis == "TILT":
+            measured = _normalize_directed_tilt_plane_angle(measured)
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            authority = self.venue_target_test_authority
+            if not authority or authority.get("mode") != "PHYSICAL_AXIS_MAPPING_V2" or authority.get("axis") != axis:
+                return {"accepted": False, "status": "READY", "reason": "No matching axis sample is active."}
+            slot_id = authority["selected_fixture_id"]
+            config = self._clean_full_config(dict(self.config))
+            slot = config["slots"][slot_id]
+            mapping = _clean_axis_mapping_v2(slot.get("axis_mapping_v2"), slot)
+            signature = axis_mapping_v2_signature(slot)
+            if mapping["profile_signature"] and mapping["profile_signature"] != signature:
+                return {"accepted": False, "status": "STALE", "reason": "Reset stale Axis Mapping V2 before saving new evidence."}
+            mapping["profile_signature"] = signature
+            index = int(authority["sample_index"])
+            raw = int(authority["sample_raw"])
+            mode = find_mode(find_fixture(FIXTURE_LIBRARY, slot["fixture"]), slot["mode"])
+            capabilities = mode_capabilities(mode)
+            supports_fine = bool(capabilities.get(f"{axis.lower()}_fine") and slot.get("use_fine_pan_tilt", True))
+            sample = {
+                "index": index, "raw": raw,
+                "coarse": _axis_raw_to_bytes(raw, supports_fine)["coarse"],
+                "fine": _axis_raw_to_bytes(raw, supports_fine)["fine"],
+                "normalized_fraction": raw / _axis_raw_limit(supports_fine),
+                measured_key: measured, "sample_order": index,
+                "profile_signature": signature, "session_revision": mapping["session_revision"],
+                "reference_raw": authority.get("reference_raw"),
+                "saved_at": time.time(),
+            }
+            mapping[f"{axis.lower()}_samples"][str(index)] = sample
+            if axis == "TILT":
+                mapping["legacy_tilt_samples"].pop(str(index), None)
+                # Any changed measured Tilt map invalidates its derived Pan pose
+                # and requires review of prior Pan observations.
+                mapping["pan_sweep_reference_tilt_plane_degrees"] = None
+                mapping["pan_sweep_reference_tilt_raw"] = None
+                mapping["pan_samples_review_required"] = bool(mapping["pan_samples"])
+            elif mapping.get("pan_sweep_reference_tilt_raw") is not None:
+                mapping["pan_samples_review_required"] = any(
+                    item.get("reference_raw") != mapping["pan_sweep_reference_tilt_raw"]
+                    for item in mapping["pan_samples"].values()
+                )
+            mapping["validations"] = {}
+            mapping["active"] = False
+            mapping["model"] = fit_axis_mapping_v2(mapping["pan_samples"], mapping["tilt_samples"])
+            next_axis = None
+            next_index = None
+            transition_error = None
+            if axis == "TILT" and index < len(AXIS_MAPPING_V2_TILT_SAMPLE_FRACTIONS) - 1:
+                next_axis, next_index = "TILT", index + 1
+            elif axis == "TILT":
+                tilt_model = (mapping["model"] or {}).get("tilt") or {}
+                front_raw = axis_mapping_v2_inverse_tilt(0.0, tilt_model, current_raw=raw)
+                if front_raw is None:
+                    transition_error = "HORIZON FRONT 0° is outside the measured directed Tilt map."
+                else:
+                    mapping["pan_sweep_reference_tilt_plane_degrees"] = 0.0
+                    mapping["pan_sweep_reference_tilt_raw"] = int(round(front_raw))
+                    # A fresh Tilt map defines a fresh exact Pan reference pose;
+                    # old Pan evidence cannot silently cross that boundary.
+                    mapping["pan_samples"] = {}
+                    mapping["pan_samples_review_required"] = False
+                    mapping["model"] = fit_axis_mapping_v2(mapping["pan_samples"], mapping["tilt_samples"])
+                    next_axis, next_index = "PAN", 0
+            elif index < len(AXIS_MAPPING_V2_PAN_SAMPLE_FRACTIONS) - 1:
+                next_axis, next_index = "PAN", index + 1
+
+            if transition_error is not None:
+                mapping["workflow_phase"] = "TILT"
+                mapping["workflow_sample_index"] = None
+                mapping["workflow_move_status"] = "MOVE_FAILED"
+                mapping["workflow_move_error"] = transition_error
+            elif next_axis is not None:
+                mapping["workflow_phase"] = next_axis
+                mapping["workflow_sample_index"] = next_index
+                mapping["workflow_move_status"] = "MOVE_REQUIRED"
+                mapping["workflow_move_error"] = None
+            else:
+                mapping["workflow_phase"] = "VALIDATION"
+                mapping["workflow_sample_index"] = None
+                mapping["workflow_move_status"] = "VALIDATION_READY"
+                mapping["workflow_move_error"] = None
+            slot["axis_mapping_v2"] = mapping
+            self.config = self._clean_full_config(config)
+            self._schedule_save_locked()
+            self._release_venue_target_test_locked("axis_mapping_v2_sample_saved")
+            move = None
+            if next_axis is not None:
+                try:
+                    move = self._activate_axis_mapping_v2_sample_locked(slot_id, next_axis, next_index)
+                except Exception as exc:
+                    move = {"accepted": False, "status": "NEXT_MOVE_FAILED", "reason": str(exc)}
+                if not move.get("accepted"):
+                    config = self._clean_full_config(dict(self.config))
+                    persisted = _clean_axis_mapping_v2(config["slots"][slot_id].get("axis_mapping_v2"), config["slots"][slot_id])
+                    persisted["workflow_phase"] = next_axis
+                    persisted["workflow_sample_index"] = next_index
+                    persisted["workflow_move_status"] = "MOVE_FAILED"
+                    persisted["workflow_move_error"] = str(move.get("reason") or "Automatic move failed.")
+                    config["slots"][slot_id]["axis_mapping_v2"] = persisted
+                    self.config = self._clean_full_config(config)
+                    self._schedule_save_locked()
+            state = axis_mapping_v2_state(slot_id, self.config["slots"][slot_id], self.config.get("venue_geometry"))
+            if transition_error is not None:
+                return {"accepted": True, "status": "NEXT_MOVE_FAILED", "reason": transition_error, "axis_mapping_v2": state, "authority": self._venue_target_test_state_locked()}
+            if move is not None and not move.get("accepted"):
+                return {"accepted": True, "status": "NEXT_MOVE_FAILED", "reason": move.get("reason"), "axis_mapping_v2": state, "authority": self._venue_target_test_state_locked()}
+            return {"accepted": True, "status": "ACTIVE" if move is not None else state["status"], "axis_mapping_v2": state, "authority": self._venue_target_test_state_locked()}
+
+    def move_axis_mapping_v2_validation(self, payload):
+        slot_id = str((payload or {}).get("slot_id") or "").strip()
+        target_id = canonical_venue_target_id((payload or {}).get("target"))
+        if target_id not in AXIS_MAPPING_V2_VALIDATION_TARGETS:
+            raise ValueError("target is not a V2 validation target")
+        with self.lock:
+            self._reap_venue_target_test_locked()
+            if self.venue_target_test_authority is not None:
+                return {"accepted": False, "status": "ACTIVE", "reason": "Release the active movement lease first."}
+            gate = self._axis_mapping_v2_gate_locked(slot_id)
+            if gate["status"] != "READY":
+                return {"accepted": False, **gate}
+            state = gate["axis_mapping_v2"]
+            if state.get("status") not in {"CALIBRATED_CANDIDATE", "VALIDATED", "VALIDATION_FAILED"}:
+                return {"accepted": False, "status": state.get("status"), "reason": "A complete non-stale candidate is required."}
+            slot = gate["slot"]
+            base = _venue_calibration_for_slot(slot_id, slot, venue_geometry_from_mapping(self.config.get("venue_geometry")), use_kinematic=False, use_axis_mapping_v2=False, current_pan_raw=self._current_pan_raw_for_slot_locked(slot))
+            candidate = VenueFixtureCalibration(**{**base.__dict__, "axis_mapping_v2": state["model"]})
+            resolution = resolve_venue_target(candidate, VENUE_TARGETS[target_id], venue_geometry_from_mapping(self.config.get("venue_geometry")))
+            if resolution.get("status") != "RESOLVED":
+                return {"accepted": False, "status": resolution.get("status", "ERROR"), "reason": "V2 candidate cannot reach this target.", "resolution": resolution}
+            self.venue_target_test_authority = {
+                "mode": "AXIS_MAPPING_V2_VALIDATION", "target": target_id,
+                "selected_fixture_id": slot_id,
+                "participants": {slot_id: resolution},
+                "result_set": {
+                    "target": target_id, "target_point": VENUE_TARGETS[target_id].as_dict(),
+                    "candidate_count": 1, "targeted_count": 1, "skipped_count": 0,
+                    "renderer_healthy": True, "dmx_connected": True, "physical_ready": True,
+                    "results": [{"slot_id": slot_id, "label": str(slot.get("label") or slot_id), "classification": "TARGETABLE", "resolver_status": "RESOLVED", "resolution": resolution}],
+                },
+                "expires_at": time.monotonic() + VENUE_TARGET_TEST_LEASE_SECONDS,
+                "rendered_outputs": {},
+            }
+            return {"accepted": True, "status": "ACTIVE", "resolution": resolution, "authority": self._venue_target_test_state_locked()}
+
+    def record_axis_mapping_v2_validation(self, payload):
+        result = str((payload or {}).get("result") or "").upper()
+        if result not in {"PASS", "FAIL"}:
+            raise ValueError("result must be PASS or FAIL")
+        with self.lock:
+            authority = self.venue_target_test_authority
+            if not authority or authority.get("mode") != "AXIS_MAPPING_V2_VALIDATION":
+                return {"accepted": False, "status": "READY", "reason": "No V2 validation target is active."}
+            slot_id, target_id = authority["selected_fixture_id"], authority["target"]
+            config = self._clean_full_config(dict(self.config))
+            slot = config["slots"][slot_id]
+            mapping = _clean_axis_mapping_v2(slot.get("axis_mapping_v2"), slot)
+            resolution = authority["participants"][slot_id]
+            mapping["validations"][target_id] = {
+                "target": target_id, "result": result, "recorded_at": time.time(),
+                "desired_world_azimuth_degrees": resolution.get("desired_world_azimuth_degrees"),
+                "desired_world_elevation_degrees": resolution.get("desired_world_elevation_degrees"),
+                "chosen_pan_raw": resolution.get("chosen_pan_raw"), "chosen_tilt_raw": resolution.get("chosen_tilt_raw"),
+                "predicted_physical_azimuth_degrees": resolution.get("predicted_physical_azimuth_degrees"),
+                "predicted_physical_elevation_degrees": resolution.get("predicted_physical_elevation_degrees"),
+                "venue_geometry_signature": axis_mapping_v2_validation_signature(slot, self.config.get("venue_geometry")),
+            }
+            mapping["active"] = False
+            slot["axis_mapping_v2"] = mapping
+            self.config = self._clean_full_config(config)
+            self._schedule_save_locked()
+            self._release_venue_target_test_locked("axis_mapping_v2_validation_recorded")
+            state = axis_mapping_v2_state(slot_id, self.config["slots"][slot_id], self.config.get("venue_geometry"))
+            return {"accepted": True, "status": state["status"], "axis_mapping_v2": state, "authority": self._venue_target_test_state_locked()}
+
+    def activate_axis_mapping_v2(self, payload):
+        slot_id = str((payload or {}).get("slot_id") or "").strip()
+        with self.lock:
+            self._release_venue_target_test_locked("axis_mapping_v2_activate")
+            config = self._clean_full_config(dict(self.config))
+            slot = config.get("slots", {}).get(slot_id)
+            if not slot:
+                raise ValueError("unknown slot_id")
+            state = axis_mapping_v2_state(slot_id, slot, config.get("venue_geometry"))
+            if state.get("status") != "VALIDATED":
+                return {"accepted": False, "status": state.get("status"), "reason": "Three physical validation PASS results are required."}
+            mapping = _clean_axis_mapping_v2(slot.get("axis_mapping_v2"), slot)
+            mapping["active"] = True
+            mapping["activated_at"] = time.time()
+            slot["axis_mapping_v2"] = mapping
+            self.config = self._clean_full_config(config)
+            self._schedule_save_locked()
+            return {"accepted": True, "status": "ACTIVE", "axis_mapping_v2": axis_mapping_v2_state(slot_id, self.config["slots"][slot_id], self.config.get("venue_geometry"))}
+
+    def reset_axis_mapping_v2(self, payload):
+        if (payload or {}).get("confirm") is not True:
+            raise ValueError("confirm=true is required")
+        slot_id = str((payload or {}).get("slot_id") or "").strip()
+        with self.lock:
+            config = self._clean_full_config(dict(self.config))
+            if slot_id not in config.get("slots", {}):
+                raise ValueError("unknown slot_id")
+            self._release_venue_target_test_locked("axis_mapping_v2_reset")
+            config["slots"][slot_id]["axis_mapping_v2"] = None
+            self.config = self._clean_full_config(config)
+            self._schedule_save_locked()
+            return {"accepted": True, "status": "UNCALIBRATED", "axis_mapping_v2": axis_mapping_v2_state(slot_id, self.config["slots"][slot_id], self.config.get("venue_geometry"))}
+
+    def venue_target_test(self, payload):
+        """Resolve an unsaved calibration draft without persisting or sending DMX."""
+        slot_id = str((payload or {}).get("slot_id") or "").strip()
+        target_id = canonical_venue_target_id((payload or {}).get("target"), "AUDIENCE_MID_CENTER")
+        vertical_layer = canonical_venue_target_vertical_layer((payload or {}).get("vertical_layer"))
+        calibration = (payload or {}).get("venue_calibration")
+        if target_id is None:
+            raise ValueError("unknown venue target")
+        if vertical_layer is None:
+            raise ValueError("unknown vertical layer")
+        if not isinstance(calibration, dict):
+            with self.lock:
+                result_set = self._venue_target_result_set_locked(target_id, vertical_layer)
+            return {**result_set, "physical_command_sent": False}
+        if not slot_id:
+            raise ValueError("slot_id is required")
+        with self.lock:
+            config = self._clean_full_config(dict(self.config))
+            if slot_id not in config["slots"]:
+                raise ValueError("unknown slot_id")
+            draft_slot = self._clean_slot_config(
+                slot_id,
+                {**config["slots"][slot_id], "venue_calibration": calibration},
+            )
+            diagnostic = fixture_calibration_state(
+                slot_id,
+                draft_slot,
+                venue_geometry_from_mapping(config.get("venue_geometry")),
+            )
+            target_calibration = VenueFixtureCalibration(
+                supports_pan_tilt=bool(diagnostic["capabilities"].get("pan") and diagnostic["capabilities"].get("tilt")),
+                position_m=_physical_point_from_mapping((draft_slot.get("venue_calibration") or {}).get("position_m")),
+                position=_point_from_mapping((draft_slot.get("venue_calibration") or {}).get("position")),
+                mounting_height_m=_optional_physical_dimension((draft_slot.get("venue_calibration") or {}).get("mounting_height_m"), allow_zero=True),
+                physical_forward=_vector3_from_mapping((draft_slot.get("venue_calibration") or {}).get("physical_forward")),
+                physical_up=_vector3_from_mapping((draft_slot.get("venue_calibration") or {}).get("physical_up")),
+                pan_min_degrees=-(diagnostic["capabilities"].get("pan_range_degrees") or 0) / 2.0,
+                pan_max_degrees=(diagnostic["capabilities"].get("pan_range_degrees") or 0) / 2.0,
+                tilt_min_degrees=-(diagnostic["capabilities"].get("tilt_range_degrees") or 0) / 2.0,
+                tilt_max_degrees=(diagnostic["capabilities"].get("tilt_range_degrees") or 0) / 2.0,
+                **physical_tilt_calibration_fields(draft_slot),
+                pan_invert=bool(draft_slot.get("pan_invert")),
+                tilt_invert=bool(draft_slot.get("tilt_invert")),
+                pan_correction_degrees=float((draft_slot.get("venue_calibration") or {}).get("pan_correction_degrees") or 0),
+                tilt_correction_degrees=float((draft_slot.get("venue_calibration") or {}).get("tilt_correction_degrees") or 0),
+                use_fine_pan_tilt=bool(draft_slot.get("use_fine_pan_tilt", True)),
+                supports_pan_fine=bool(diagnostic["capabilities"].get("pan_fine")),
+                supports_tilt_fine=bool(diagnostic["capabilities"].get("tilt_fine")),
+            )
+            diagnostic = resolve_venue_target(
+                target_calibration,
+                VENUE_TARGETS[target_id],
+                venue_geometry_from_mapping(config.get("venue_geometry")),
+                vertical_layer=vertical_layer,
+            )
+        return {
+            "slot_id": slot_id,
+            "target": target_id,
+            "vertical_layer": vertical_layer.value,
+            "result": diagnostic,
+            "physical_command_sent": False,
+        }
+
     def update_config(self, payload):
         stop_beat_pulse_test = False
         with self.lock:
+            # Persisted venue/calibration edits must never leave a previously
+            # resolved physical target latched against changed geometry.
+            if self.venue_target_test_authority is not None:
+                self._release_venue_target_test_locked("configuration_changed")
             self.config = self._merge_payload(payload)
             now = time.time()
             config = self._clean_full_config(dict(self.config))
+            if config.get("blackout_active") or not self._manual_smoke_slots_locked(config):
+                self.manual_smoke_active = False
             osc = self.osc.snapshot_for_render()
             baseline_auto_show = self._auto_show_state(osc, config["auto_show"])
             auto_show, candidate_auto_show, production_decision = self._select_production_auto_show(
@@ -11571,6 +16246,7 @@ class DmxController:
                 config, osc, now, baseline_auto_show,
                 preview_auto_show=candidate_auto_show,
                 production_decision=production_decision,
+                presentation_auto_show=auto_show,
             )
             self.current_auto_show = auto_show
             self.current_preview_auto_show = preview_auto_show
@@ -11612,6 +16288,10 @@ class DmxController:
         with self.lock:
             now = time.time()
             osc = self.osc.snapshot_for_render()
+            config = self._clean_full_config(dict(self.config))
+            activation_auto_show = self._auto_show_state(osc, config["auto_show"])
+            activation_fx_speed = str(activation_auto_show.get("fx_speed_resolved") or "mid")
+            activation_duration_beats = one_shot_duration_beats(cue_name, activation_fx_speed)
             start_beat = osc.get("beat_value")
             try:
                 start_beat = None if start_beat is None else float(start_beat)
@@ -11626,6 +16306,9 @@ class DmxController:
                 "started_at": now,
                 "start_beat": start_beat,
                 "bpm": bpm,
+                "fx_speed": activation_fx_speed,
+                "duration_beats": activation_duration_beats,
+                "color_steps_per_beat": COLOR_BURST_STEPS_PER_BEAT.get(activation_fx_speed, 4),
             }
             self.config["blackout_active"] = False
             config = self._clean_full_config(dict(self.config))
@@ -11640,21 +16323,29 @@ class DmxController:
                 config, osc, now, baseline_auto_show,
                 preview_auto_show=candidate_auto_show,
                 production_decision=production_decision,
+                presentation_auto_show=auto_show,
             )
             self.current_auto_show = auto_show
             self.current_preview_auto_show = preview_auto_show
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
             self.current_values = values
-            self.current_final_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
+            self.current_final_values = self._apply_manual_smoke_overlay_locked(
+                self._apply_virtualdj_beat_pulse_overlay_locked(values), config
+            )
             self.current_slot_previews = slot_previews
-            self.debug_log.log("ONE_SHOT_TRIGGER", cue=cue_name)
+            self.debug_log.log(
+                "ONE_SHOT_TRIGGER", cue=cue_name, fx_speed=activation_fx_speed,
+                duration_beats=activation_duration_beats,
+            )
             return dict(self.current_values)
 
     def blackout(self):
         with self.lock:
             self.config["blackout_active"] = True
             self.active_one_shot_cue = None
+            self.movement_lab_authority = None
+            self.manual_smoke_active = False
             self.current_values = {}
             self.current_final_values = {}
             self.current_slot_previews = {}
@@ -11676,6 +16367,9 @@ class DmxController:
         start_beat = raw.get("start_beat")
         current_beat = osc.get("beat_value")
         try:
+            if start_beat is None and current_beat is not None:
+                start_beat = float(current_beat)
+                raw["start_beat"] = start_beat
             if start_beat is not None and current_beat is not None:
                 elapsed_beats = float(current_beat) - float(start_beat)
                 if elapsed_beats < -0.25:
@@ -11683,16 +16377,19 @@ class DmxController:
         except (TypeError, ValueError):
             elapsed_beats = None
         if elapsed_beats is None:
-            try:
-                bpm = float(osc.get("bpm") or raw.get("bpm") or 120.0)
-            except (TypeError, ValueError):
-                bpm = 120.0
-            bpm = max(60.0, bpm)
+            # A missing/stale transport must freeze musical lifetime rather
+            # than silently replace it with wall-clock or render-FPS authority.
+            elapsed_beats = max(0.0, float(raw.get("last_elapsed_beats") or 0.0))
+        else:
             elapsed_beats = max(
-                0.0,
-                (now - float(raw.get("started_at") or now)) * bpm / 60.0,
+                max(0.0, float(raw.get("last_elapsed_beats") or 0.0)),
+                max(0.0, elapsed_beats),
             )
-        duration_beats = max(0.25, float(cue.get("duration_beats") or 1.0))
+            raw["last_elapsed_beats"] = elapsed_beats
+        duration_beats = max(
+            0.25,
+            float(raw.get("duration_beats") or cue.get("duration_beats") or 1.0),
+        )
         progress = elapsed_beats / duration_beats
         if progress >= 1.0:
             self.active_one_shot_cue = None
@@ -11703,6 +16400,8 @@ class DmxController:
             "duration_beats": duration_beats,
             "elapsed_beats": elapsed_beats,
             "progress": clamp_unit(progress),
+            "fx_speed": live_fx_speed_mode(raw.get("fx_speed")) if raw.get("fx_speed") else "mid",
+            "color_steps_per_beat": int(raw.get("color_steps_per_beat") or 4),
         }
 
     def state(self):
@@ -11715,6 +16414,7 @@ class DmxController:
             preview_auto_show = dict(self.current_preview_auto_show or {})
             live_values = dict(self.current_values)
             rendered_final_values = dict(self.current_final_values)
+            rendered_motion = rendered_motion_projection(config, rendered_final_values)
             slot_previews = dict(self.current_slot_previews)
             slot_previews = {
                 slot_id: {
@@ -11747,6 +16447,7 @@ class DmxController:
                 "active_slot": config["active_slot"],
                 "blackout_active": config["blackout_active"],
                 "master_dimmer": config["master_dimmer"],
+                "manual_smoke": self._manual_smoke_state_locked(config),
                 "production_show_mode": config["production_show_mode"],
                 "auto_show": auto_show,
                 "preview_auto_show": preview_auto_show,
@@ -11781,6 +16482,10 @@ class DmxController:
                     for slot_id, slot_config in config["slots"].items()
                 },
                 "slot_previews": slot_previews,
+                "rendered_motion": rendered_motion,
+                "venue_space": venue_space_state(config),
+                "venue_target_test": self._venue_target_test_state_locked(),
+                "movement_lab": self._movement_lab_state_locked(),
                 "physical_dmx_trace": list(self.physical_dmx_trace_history),
                 "conflicts": list(self.conflicts),
                 "values": values,
@@ -11838,13 +16543,16 @@ class DmxController:
                 full_config, osc, now, baseline_auto_show,
                 preview_auto_show=candidate_auto_show,
                 production_decision=production_decision,
+                presentation_auto_show=auto_show,
             )
             self.current_auto_show = auto_show
             self.current_preview_auto_show = preview_auto_show
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
             self.current_values = values
-            self.current_final_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
+            self.current_final_values = self._apply_manual_smoke_overlay_locked(
+                self._apply_virtualdj_beat_pulse_overlay_locked(values), config
+            )
             self.current_slot_previews = slot_previews
             self._schedule_save_locked()
             self.debug_log.log(
@@ -11891,13 +16599,16 @@ class DmxController:
                 full_config, osc, now, baseline_auto_show,
                 preview_auto_show=candidate_auto_show,
                 production_decision=production_decision,
+                presentation_auto_show=auto_show,
             )
             self.current_auto_show = auto_show
             self.current_preview_auto_show = preview_auto_show
             self.rme_preview_differential = differential
             self.production_show_decision = production_decision
             self.current_values = values
-            self.current_final_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
+            self.current_final_values = self._apply_manual_smoke_overlay_locked(
+                self._apply_virtualdj_beat_pulse_overlay_locked(values), full_config
+            )
             self.current_slot_previews = slot_previews
             self._schedule_save_locked()
             self.debug_log.log(
@@ -11928,10 +16639,25 @@ class DmxController:
         if "blackout_active" in payload:
             config["blackout_active"] = bool(payload["blackout_active"])
 
+        if "master_dimmer" in payload:
+            try:
+                config["master_dimmer"] = clamp_unit(float(payload["master_dimmer"]))
+            except (TypeError, ValueError):
+                config["master_dimmer"] = config.get("master_dimmer", 1.0)
+
+        if "smoke_output_percent" in payload:
+            try:
+                config["smoke_output_percent"] = max(0, min(100, int(round(float(payload["smoke_output_percent"])))))
+            except (TypeError, ValueError):
+                config["smoke_output_percent"] = config.get("smoke_output_percent", 50)
+
         if "production_show_mode" in payload:
             config["production_show_mode"] = self._operator_production_show_mode(
                 payload["production_show_mode"]
             )
+
+        if "venue_geometry" in payload and isinstance(payload["venue_geometry"], dict):
+            config["venue_geometry"] = clean_venue_geometry_config(payload["venue_geometry"])
 
         if "auto_show" in payload and isinstance(payload["auto_show"], dict):
             merged_auto_show = {**config["auto_show"], **payload["auto_show"]}
@@ -11940,6 +16666,15 @@ class DmxController:
         slot_id = payload.get("slot_id")
         slot_payload = payload.get("slot")
         if slot_id and slot_id in config["slots"] and isinstance(slot_payload, dict):
+            if isinstance(slot_payload.get("venue_calibration"), dict):
+                if "physical_tilt_limits" in slot_payload["venue_calibration"] and _validated_physical_tilt_limits(slot_payload["venue_calibration"].get("physical_tilt_limits")) is None:
+                    raise ValueError("physical_tilt_limits require finite min < center < max")
+                previous_venue = config["slots"][slot_id].get("venue_calibration")
+                previous_venue = previous_venue if isinstance(previous_venue, dict) else {}
+                slot_payload = {
+                    **slot_payload,
+                    "venue_calibration": {**previous_venue, **slot_payload["venue_calibration"]},
+                }
             merged = {**config["slots"][slot_id], **slot_payload}
             config["slots"][slot_id] = self._clean_slot_config(slot_id, merged)
             config["blackout_active"] = False
@@ -11947,6 +16682,15 @@ class DmxController:
         if "slots" in payload and isinstance(payload["slots"], dict):
             for current_slot_id, current_payload in payload["slots"].items():
                 if current_slot_id in config["slots"] and isinstance(current_payload, dict):
+                    if isinstance(current_payload.get("venue_calibration"), dict):
+                        if "physical_tilt_limits" in current_payload["venue_calibration"] and _validated_physical_tilt_limits(current_payload["venue_calibration"].get("physical_tilt_limits")) is None:
+                            raise ValueError("physical_tilt_limits require finite min < center < max")
+                        previous_venue = config["slots"][current_slot_id].get("venue_calibration")
+                        previous_venue = previous_venue if isinstance(previous_venue, dict) else {}
+                        current_payload = {
+                            **current_payload,
+                            "venue_calibration": {**previous_venue, **current_payload["venue_calibration"]},
+                        }
                     merged = {**config["slots"][current_slot_id], **current_payload}
                     config["slots"][current_slot_id] = self._clean_slot_config(
                         current_slot_id, merged
@@ -11965,7 +16709,25 @@ class DmxController:
             print(f"{APP_NAME}: config load failed, using defaults: {exc}")
             return defaults
         try:
-            return self._clean_full_config(payload)
+            cleaned = self._clean_full_config(payload)
+            # A successful legacy freeze is a one-time migration, not a
+            # presentation-time conversion. Persist it immediately so a later
+            # geometry edit or restart cannot reinterpret the old normalized
+            # coordinates.
+            raw_slots = payload.get("slots") if isinstance(payload, dict) else {}
+            froze_legacy_position = any(
+                isinstance(cleaned_slot.get("venue_calibration"), dict)
+                and cleaned_slot["venue_calibration"].get("position_m") is not None
+                and (
+                    not isinstance(raw_slots.get(slot_id), dict)
+                    or not isinstance(raw_slots[slot_id].get("venue_calibration"), dict)
+                    or raw_slots[slot_id]["venue_calibration"].get("position_m") is None
+                )
+                for slot_id, cleaned_slot in cleaned.get("slots", {}).items()
+            )
+            if froze_legacy_position:
+                self._write_config(cleaned)
+            return cleaned
         except Exception as exc:
             print(f"{APP_NAME}: config invalid, using defaults: {exc}")
             return defaults
@@ -12008,6 +16770,74 @@ class DmxController:
             "blue": clamp_dmx(color.get("blue", 0)),
             "white": clamp_dmx(color.get("white", 0)),
         }
+        raw_calibration = cleaned.get("venue_calibration")
+        if not isinstance(raw_calibration, dict):
+            cleaned["venue_calibration"] = None
+        else:
+            def finite_component(mapping, key, lower=None, upper=None):
+                try:
+                    value = float(mapping[key])
+                except (KeyError, TypeError, ValueError):
+                    return None
+                if not math.isfinite(value):
+                    return None
+                if lower is not None:
+                    value = max(lower, value)
+                if upper is not None:
+                    value = min(upper, value)
+                return value
+
+            raw_position = raw_calibration.get("position")
+            position = None
+            if isinstance(raw_position, dict):
+                x = finite_component(raw_position, "x", -1.0, 1.0)
+                y = finite_component(raw_position, "y", -1.0, 1.0)
+                if x is not None and y is not None:
+                    position = {"x": x, "y": y}
+
+            raw_position_m = raw_calibration.get("position_m")
+            position_m = None
+            if isinstance(raw_position_m, dict):
+                values = [finite_component(raw_position_m, component) for component in ("x", "y", "z")]
+                if all(value is not None for value in values):
+                    position_m = dict(zip(("x", "y", "z"), values))
+
+            def clean_vector(key):
+                raw_vector = raw_calibration.get(key)
+                if not isinstance(raw_vector, dict):
+                    return None
+                values = [finite_component(raw_vector, component) for component in ("x", "y", "z")]
+                if any(value is None for value in values):
+                    return None
+                return dict(zip(("x", "y", "z"), values))
+
+            def bounded_correction(key):
+                value = finite_component(raw_calibration, key)
+                return 0.0 if value is None else max(-15.0, min(15.0, value))
+
+            physical_tilt_limits = _validated_physical_tilt_limits(raw_calibration.get("physical_tilt_limits"))
+
+            cleaned["venue_calibration"] = {
+                "version": 3,
+                "position_m": position_m,
+                # Retain the original normalized evidence. It is used only
+                # when position_m is absent and Venue Geometry supplies scale.
+                "position": position,
+                "mounting_height_m": _optional_physical_dimension(
+                    raw_calibration.get("mounting_height_m"), allow_zero=True
+                ),
+                "physical_forward": clean_vector("physical_forward"),
+                "physical_up": clean_vector("physical_up"),
+                "pan_correction_degrees": bounded_correction("pan_correction_degrees"),
+                "tilt_correction_degrees": bounded_correction("tilt_correction_degrees"),
+                "physical_tilt_limits": physical_tilt_limits,
+            }
+        raw_kinematic = cleaned.get("kinematic_calibration")
+        cleaned["kinematic_calibration"] = (
+            _clean_kinematic_calibration(raw_kinematic)
+            if isinstance(raw_kinematic, dict)
+            else None
+        )
         for key in (
             "dimmer",
             "strobe",
@@ -12086,6 +16916,16 @@ class DmxController:
             requested_mode = fixture["modes"][0]["name"]
         cleaned["mode"] = requested_mode
         selected_mode = find_mode(fixture, cleaned["mode"])
+        raw_axis_mapping_v2 = cleaned.get("axis_mapping_v2")
+        cleaned["axis_mapping_v2"] = (
+            _clean_axis_mapping_v2(raw_axis_mapping_v2, cleaned)
+            if isinstance(raw_axis_mapping_v2, dict)
+            else None
+        )
+        try:
+            cleaned["axis_mapping_v2_remount_revision"] = max(0, int(cleaned.get("axis_mapping_v2_remount_revision") or 0))
+        except (TypeError, ValueError):
+            cleaned["axis_mapping_v2_remount_revision"] = 0
         raw_extra_values = cleaned.get("extra_values")
         if not isinstance(raw_extra_values, dict):
             raw_extra_values = {}
@@ -12178,6 +17018,9 @@ class DmxController:
         cleaned["override_energy"] = live_override_energy_name(
             cleaned.get("override_energy", defaults["override_energy"])
         )
+        cleaned["override_fx_speed"] = live_fx_speed_mode(
+            cleaned.get("override_fx_speed", defaults["override_fx_speed"])
+        )
         for key in (
             "override_manual_strobe",
             "override_audience_sweep",
@@ -12202,9 +17045,11 @@ class DmxController:
             "active_slot": str(config.get("active_slot", defaults["active_slot"])),
             "blackout_active": bool(config.get("blackout_active", False)),
             "master_dimmer": 1.0,
+            "smoke_output_percent": defaults["smoke_output_percent"],
             "production_show_mode": self._operator_production_show_mode(
                 config.get("production_show_mode", defaults["production_show_mode"])
             ),
+            "venue_geometry": clean_venue_geometry_config(config.get("venue_geometry")),
             "auto_show": self._clean_auto_show_config(config.get("auto_show")),
             "slot_order": [],
             "slots": {},
@@ -12215,6 +17060,12 @@ class DmxController:
             )
         except (TypeError, ValueError):
             cleaned["master_dimmer"] = defaults["master_dimmer"]
+        try:
+            cleaned["smoke_output_percent"] = max(
+                0, min(100, int(round(float(config.get("smoke_output_percent", defaults["smoke_output_percent"])))))
+            )
+        except (TypeError, ValueError):
+            cleaned["smoke_output_percent"] = defaults["smoke_output_percent"]
         seen = set()
         for slot_id in raw_order:
             slot_id = str(slot_id)
@@ -12235,6 +17086,30 @@ class DmxController:
                 cleaned["slot_order"].append(slot_id)
         if cleaned["active_slot"] not in cleaned["slots"]:
             cleaned["active_slot"] = cleaned["slot_order"][0]
+        # Freeze every valid pre-metric normalized fixture position exactly
+        # once.  The original normalized evidence remains for auditability,
+        # but subsequent venue geometry edits can only move targets, never a
+        # fixture's physical origin.
+        geometry = venue_geometry_from_mapping(cleaned["venue_geometry"])
+        for slot in cleaned["slots"].values():
+            calibration = slot.get("venue_calibration")
+            if not isinstance(calibration, dict) or calibration.get("position_m") is not None:
+                continue
+            position = _point_from_mapping(calibration.get("position"))
+            height_m = _optional_physical_dimension(
+                calibration.get("mounting_height_m"), allow_zero=True
+            )
+            if position is None or height_m is None:
+                continue
+            try:
+                calibration["position_m"] = venue_normalized_to_meters(
+                    position, geometry, height_m=height_m
+                ).as_dict()
+                calibration["version"] = 4
+            except ValueError:
+                # Keep the legacy evidence untouched.  fixture_calibration_state
+                # exposes POSITION_MIGRATION_REQUIRES_VENUE_SCALE explicitly.
+                pass
         return cleaned
 
     @staticmethod
@@ -12247,6 +17122,64 @@ class DmxController:
         fixture = find_fixture(FIXTURE_LIBRARY, config["fixture"])
         mode = find_mode(fixture, config["mode"])
         return mode_capabilities(mode)
+
+    def _manual_smoke_slots_locked(self, config):
+        return [
+            (slot_id, slot)
+            for slot_id, slot in (config.get("slots") or {}).items()
+            if bool(slot.get("enabled")) and self._capabilities_for_slot(slot).get("fog")
+        ]
+
+    def _manual_smoke_state_locked(self, config=None):
+        config = config or self._clean_full_config(dict(self.config))
+        slots = self._manual_smoke_slots_locked(config)
+        blackout = bool(config.get("blackout_active"))
+        active = bool(self.manual_smoke_active and slots and not blackout)
+        output_percent = int(config.get("smoke_output_percent", 50))
+        return {
+            "supported": bool(slots),
+            "reason_if_unavailable": None if slots else "No enabled fixture exposes a Fog control.",
+            "active": active,
+            "output_percent": output_percent,
+            "resolved_dmx_value": clamp_dmx(round(255 * output_percent / 100.0)) if active else 0,
+            "fixture_slot_ids": [slot_id for slot_id, _slot in slots],
+        }
+
+    def _apply_manual_smoke_overlay_locked(self, values, config):
+        """Apply only profile-declared fog bytes after all show authorities.
+
+        This is intentionally late in the pipeline: no Auto Show, colour,
+        movement, macro, strobe or master-dimmer transformation can acquire
+        smoke ownership by accident.
+        """
+        result = dict(values)
+        state = self._manual_smoke_state_locked(config)
+        for _slot_id, slot in self._manual_smoke_slots_locked(config):
+            fixture = find_fixture(FIXTURE_LIBRARY, slot["fixture"])
+            mode = find_mode(fixture, slot["mode"])
+            address = int(slot["address"])
+            for channel in mode.get("channels", []):
+                if str(channel.get("control") or "") == "fog":
+                    result[address + int(channel["offset"]) - 1] = state["resolved_dmx_value"]
+        return result
+
+    def start_manual_smoke_hold(self):
+        with self.lock:
+            config = self._clean_full_config(dict(self.config))
+            state = self._manual_smoke_state_locked(config)
+            if config.get("blackout_active"):
+                raise ValueError("blackout is active")
+            if not state["supported"]:
+                raise ValueError(state["reason_if_unavailable"])
+            self.manual_smoke_active = True
+            self.debug_log.log("MANUAL_SMOKE_START", fixtures=state["fixture_slot_ids"], output_percent=state["output_percent"])
+
+    def release_manual_smoke(self, reason="released"):
+        with self.lock:
+            was_active = self.manual_smoke_active
+            self.manual_smoke_active = False
+            if was_active:
+                self.debug_log.log("MANUAL_SMOKE_RELEASE", reason=reason)
 
     def _role_for_slot(self, config, capabilities=None):
         capabilities = capabilities or self._capabilities_for_slot(config)
@@ -12350,6 +17283,81 @@ class DmxController:
         group_seed = stable_hash(f"{role}:{group_name}")
         group_seed_unit = ((group_seed % 1000) / 999.0) * 2.0 - 1.0
 
+        # Group membership remains useful for Composer motifs, but it is not a
+        # sufficient artistic topology for world-space movement: two groups of
+        # two otherwise produce A/B/A/B member lanes.  Build a stable ordinal
+        # across every enabled participant of this fixture role.  Physical
+        # metre positions take precedence so the artistic order follows DJ
+        # left-to-right venue space; partially/un-calibrated layouts fall back
+        # deterministically to configured slot order and then slot id.
+        artistic_slot_ids = []
+        for current_slot_id in role_slot_ids:
+            current_config = slots.get(current_slot_id)
+            if current_config is None:
+                if current_slot_id != slot_id:
+                    continue
+                current_config = config
+            if current_config.get("enabled", True):
+                artistic_slot_ids.append(current_slot_id)
+        if slot_id not in artistic_slot_ids:
+            artistic_slot_ids.append(slot_id)
+
+        def artistic_position_key(current_slot_id):
+            current_config = slots.get(current_slot_id)
+            if current_config is None and current_slot_id == slot_id:
+                current_config = config
+            calibration = (current_config or {}).get("venue_calibration")
+            position_m = calibration.get("position_m") if isinstance(calibration, dict) else None
+            try:
+                x = float(position_m.get("x"))
+                y = float(position_m.get("y"))
+                if math.isfinite(x) and math.isfinite(y):
+                    return (0, x, y, str(current_slot_id))
+            except (AttributeError, TypeError, ValueError):
+                pass
+            try:
+                fallback_index = slot_order.index(current_slot_id)
+            except ValueError:
+                fallback_index = len(slot_order)
+            return (1, fallback_index, 0.0, str(current_slot_id))
+
+        artistic_slot_ids = sorted(set(artistic_slot_ids), key=artistic_position_key)
+        artistic_index = artistic_slot_ids.index(slot_id)
+        artistic_count = len(artistic_slot_ids)
+        if artistic_count <= 1:
+            artistic_normalized = 0.5
+            artistic_centered = 0.0
+            artistic_closed_phase_offset = 0.0
+        else:
+            artistic_normalized = artistic_index / max(1, artistic_count - 1)
+            artistic_centered = artistic_normalized * 2.0 - 1.0
+            # Closed paths distribute samples evenly around one shared shape.
+            artistic_closed_phase_offset = artistic_index / artistic_count
+
+        # Wall-wash coordination has a deliberately narrower fallback than
+        # generic artistic motion: calibrated X comes first; without it the
+        # stable slot id is the documented logical orientation.
+        if role == "wash":
+            def wash_position_key(current_slot_id):
+                current_config = slots.get(current_slot_id)
+                if current_config is None and current_slot_id == slot_id:
+                    current_config = config
+                calibration = (current_config or {}).get("venue_calibration")
+                position_m = calibration.get("position_m") if isinstance(calibration, dict) else None
+                try:
+                    x = float(position_m.get("x"))
+                    if math.isfinite(x):
+                        return (0, x, str(current_slot_id))
+                except (AttributeError, TypeError, ValueError):
+                    pass
+                return (1, str(current_slot_id))
+            wash_slot_ids = sorted(set(artistic_slot_ids), key=wash_position_key)
+            wash_coordination_index = wash_slot_ids.index(slot_id)
+            wash_coordination_count = len(wash_slot_ids)
+        else:
+            wash_coordination_index = artistic_index
+            wash_coordination_count = artistic_count
+
         return {
             "role": role,
             "group": group_name,
@@ -12382,6 +17390,13 @@ class DmxController:
             "seed_unit": seed_unit,
             "member_seed_unit": seed_unit,
             "group_seed_unit": group_seed_unit,
+            "artistic_participant_index": artistic_index,
+            "artistic_participant_count": artistic_count,
+            "artistic_participant_normalized": artistic_normalized,
+            "artistic_participant_centered": artistic_centered,
+            "artistic_closed_phase_offset": artistic_closed_phase_offset,
+            "wash_coordination_index": wash_coordination_index,
+            "wash_coordination_count": wash_coordination_count,
         }
 
     def _accent_dimmer_offset(self, role, slot_context, accent_name, movement):
@@ -13162,10 +18177,37 @@ class DmxController:
             index = (group_index + role_bias) % len(palette)
         return manual_color_preset_rgbw(palette[index])
 
-    def _wall_wash_zone_rgb_for_slot(self, slot_context, auto_show, osc):
+    def _wall_wash_zone_rgb_for_slot(self, slot_context, auto_show, osc, config):
         dynamic_wash = (auto_show.get("selected_primitives") or {}).get("wash") or {}
         selected_wash_cue = dynamic_wash.get("wash_cue") if auto_show.get("dynamic_composition_applied") else None
         cue_name = str(selected_wash_cue or auto_show.get("wash_cue_name", "soft_blue_wash"))
+        fixture = find_fixture(FIXTURE_LIBRARY, config["fixture"])
+        mode = find_mode(fixture, config["mode"])
+        zone_count = wall_wash_zone_count(mode)
+        if cue_name in WALL_WASH_V2_RECIPES:
+            palette_name = dynamic_wash.get("palette") or auto_show.get("color_profile_name")
+            palette_names = manual_color_preset_names_for_palette(palette_name)
+            palette = [manual_color_preset_rgbw(name) or MANUAL_COLOR_PRESETS["white"] for name in palette_names]
+            parameters = dynamic_wash.get("wash_parameters") if isinstance(dynamic_wash, dict) else {}
+            try:
+                phase_offset = max(0, min(3, int(parameters.get("phase_offset", 0))))
+            except (AttributeError, TypeError, ValueError):
+                phase_offset = 0
+            continuous = ((auto_show.get("dynamic_composer") or {}).get("continuous_musical_state") or {})
+            try:
+                section_progress = clamp_unit(float(continuous.get("section_progress", 0.0)))
+            except (TypeError, ValueError):
+                section_progress = 0.0
+            return wall_wash_v2_zone_rgb(
+                cue_name,
+                zone_count,
+                float(osc.get("beat_value") or 0.0),
+                palette,
+                fixture_index=slot_context.get("wash_coordination_index", 0),
+                fixture_count=slot_context.get("wash_coordination_count", 1),
+                section_progress=section_progress,
+                phase_offset=phase_offset,
+            )
         cue = auto_show_wall_wash_cue(cue_name)
         frames = cue.get("frames") or [[[0, 0, 0]] * 8]
         beats_per_frame = max(0.125, float(cue.get("beats_per_frame", 1.0) or 1.0))
@@ -13189,12 +18231,12 @@ class DmxController:
                 segments = [WW_BLACK] * 8
 
         zone_rgb = []
-        for segment in segments[:8]:
+        for segment in segments[:zone_count]:
             red = clamp_dmx(segment[0] if len(segment) > 0 else 0)
             green = clamp_dmx(segment[1] if len(segment) > 1 else 0)
             blue = clamp_dmx(segment[2] if len(segment) > 2 else 0)
             zone_rgb.append((red, green, blue, 0))
-        while len(zone_rgb) < 8:
+        while len(zone_rgb) < zone_count:
             zone_rgb.append((0, 0, 0, 0))
         return zone_rgb
 
@@ -13242,62 +18284,32 @@ class DmxController:
             return 1.0
         return 0.0
 
-    def _one_shot_rgbw(self, cue_id, slot_context, progress):
-        alternate = float(slot_context.get("group_alternate", slot_context.get("alternate", 1.0)))
-        role = str(slot_context.get("role", "static"))
+    def _color_burst_preset_name(self, auto_show):
+        """Return the discrete, authoritative sub-beat colour for Color Burst."""
+        try:
+            elapsed_beats = max(0.0, float(auto_show.get("one_shot_elapsed_beats") or 0.0))
+        except (TypeError, ValueError):
+            elapsed_beats = 0.0
+        try:
+            subdivisions = int(auto_show.get("one_shot_color_steps_per_beat") or 4)
+        except (TypeError, ValueError):
+            subdivisions = 4
+        subdivisions = min(8, max(2, subdivisions))
+        step = int(math.floor(elapsed_beats * subdivisions))
+        return COLOR_BURST_PRESET_SEQUENCE[step % len(COLOR_BURST_PRESET_SEQUENCE)]
+
+    def _one_shot_rgbw(self, cue_id, auto_show):
         if cue_id == "white_hit":
-            return (255, 255, 255, 255)
-        if cue_id == "audience_riser":
-            white = clamp_dmx(round(80 + min(1.0, progress / 0.88) * 140))
-            return (255, 180, 70, white)
+            return manual_color_preset_rgbw("white")
         if cue_id == "color_burst":
-            return (255, 40, 150, 0) if alternate >= 0 else (0, 180, 255, 0)
-        if cue_id == "snap_fan":
-            return (255, 255, 255, 180)
-        if cue_id == "mirror_bounce":
-            return (255, 0, 190, 0) if alternate >= 0 else (0, 190, 255, 0)
-        if cue_id == "par_chase_burst":
-            if role == "moving":
-                return (255, 170, 50, 0)
-            return (0, 120, 255, 0) if alternate >= 0 else (255, 0, 160, 0)
+            return manual_color_preset_rgbw(self._color_burst_preset_name(auto_show))
         return None
 
-    def _one_shot_zone_rgb(self, cue_id, slot_context, progress):
+    def _one_shot_zone_rgb(self, cue_id, auto_show):
         if cue_id == "white_hit":
-            return [(255, 255, 255, 255)] * 8
-        if cue_id == "audience_riser":
-            build = clamp_unit(min(progress, 0.90) / 0.90)
-            inner = (
-                clamp_dmx(round(90 + build * 165)),
-                clamp_dmx(round(50 + build * 150)),
-                clamp_dmx(round(20 + build * 120)),
-                0,
-            )
-            outer = (
-                clamp_dmx(round(10 + build * 80)),
-                clamp_dmx(round(4 + build * 36)),
-                clamp_dmx(round(build * 24)),
-                0,
-            )
-            return [outer, outer, inner, inner, inner, inner, outer, outer]
+            return [manual_color_preset_rgbw("white")] * 8
         if cue_id == "color_burst":
-            color_a = (255, 40, 150, 0)
-            color_b = (0, 180, 255, 0)
-            return [color_a if index % 2 == 0 else color_b for index in range(8)]
-        if cue_id == "par_chase_burst":
-            step = int(math.floor(progress * 8.0)) % 8
-            trailing = (step - 1) % 8
-            segments = []
-            for index in range(8):
-                if index == step:
-                    segments.append((0, 140, 255, 0))
-                elif index == trailing:
-                    segments.append((0, 50, 140, 0))
-                else:
-                    segments.append((0, 0, 0, 0))
-            if int(slot_context.get("member_index", 0)) % 2 == 1:
-                segments.reverse()
-            return segments
+            return [manual_color_preset_rgbw(self._color_burst_preset_name(auto_show))] * 8
         return None
 
     def _one_shot_motion_for_config(self, cue_id, progress, slot_context, config, beat_value):
@@ -13360,7 +18372,7 @@ class DmxController:
         effective["osc_strobe_enabled"] = False
         effective["strobe"] = 0
 
-        rgbw = self._one_shot_rgbw(cue_id, slot_context, progress)
+        rgbw = self._one_shot_rgbw(cue_id, auto_show) if effect_owns_color(cue_id) else None
         if rgbw is not None:
             effective["_auto_show_rgbw"] = rgbw
             effective["_force_rgbw_override"] = True
@@ -13371,7 +18383,7 @@ class DmxController:
                 "white": int(rgbw[3]),
             }
 
-        zone_rgb = self._one_shot_zone_rgb(cue_id, slot_context, progress)
+        zone_rgb = self._one_shot_zone_rgb(cue_id, auto_show) if effect_owns_color(cue_id) else None
         if role == "wash" and zone_rgb is not None:
             effective["_auto_show_zone_rgb"] = zone_rgb
             effective["_auto_show_rgbw"] = self._wall_wash_average_rgbw(zone_rgb)
@@ -13467,6 +18479,31 @@ class DmxController:
                 pass
         partition = int(slot_context.get("color_index", 0)) % 2
         return manual_color_preset_rgbw(combo[(partition + self.manual_combo_last_valid_beat_parity) % 2])
+
+    def _resolved_fx_speed(self, configured_mode, effective_energy):
+        """Resolve AUTO with hysteresis against the actual show Energy."""
+        mode = live_fx_speed_mode(configured_mode)
+        try:
+            energy = clamp_unit(float(effective_energy))
+        except (TypeError, ValueError):
+            energy = 0.58
+
+        current = self.resolved_auto_fx_speed
+        if current == "slow":
+            if energy >= 0.50:
+                current = "mid"
+        elif current == "fast":
+            if energy <= 0.68:
+                current = "mid"
+        else:
+            if energy <= 0.42:
+                current = "slow"
+            elif energy >= 0.76:
+                current = "fast"
+            else:
+                current = "mid"
+        self.resolved_auto_fx_speed = current
+        return current if mode == "auto" else mode
 
     def _slot_key_base_for_fixture(self, fixture_id):
         label_base = fixture_preset(fixture_id)["label_base"].lower()
@@ -13823,6 +18860,11 @@ class DmxController:
                 slot_values,
                 master_dimmer,
             )
+            slot_values = self._apply_venue_target_test_authority_to_slot_values(
+                slot_id,
+                slot_config,
+                slot_values,
+            )
             for channel, value in slot_values.items():
                 previous_owner = owners.get(channel)
                 if previous_owner and previous_owner != slot_id:
@@ -13838,6 +18880,39 @@ class DmxController:
         self.conflicts = conflicts
         self.current_rendered_slot_intensities = rendered_slot_intensities
         return merged_values
+
+    def _apply_venue_target_test_authority_to_slot_values(self, slot_id, slot_config, values):
+        """Replace only final pan/tilt bytes for an acknowledged test lease.
+
+        The existing renderer continues to own every non-movement dimension,
+        including master dimmer, colour, effects, fog and all fixture extras.
+        Applying after normal rendering also deliberately preserves profile
+        channel addressing and fine-pan/fine-tilt semantics.
+        """
+        self._reap_venue_target_test_locked()
+        authority = self.venue_target_test_authority
+        if authority is None or slot_id not in (authority.get("participants") or {}):
+            return values
+        output = authority["participants"][slot_id].get("predicted_output") or {}
+        if not output:
+            return values
+        fixture = find_fixture(FIXTURE_LIBRARY, slot_config["fixture"])
+        mode = find_mode(fixture, slot_config["mode"])
+        address = int(slot_config["address"])
+        result = dict(values)
+        rendered = {}
+        for channel in mode.get("channels", []):
+            channel_type = channel.get("type")
+            if channel_type not in {"pan", "pan_fine", "tilt", "tilt_fine"}:
+                continue
+            value = output.get(channel_type)
+            if value is None:
+                continue
+            absolute = address + int(channel["offset"]) - 1
+            result[absolute] = clamp_dmx(value)
+            rendered[channel_type] = result[absolute]
+        authority.setdefault("rendered_outputs", {})[slot_id] = rendered
+        return result
 
     def _apply_master_dimmer_to_slot_values(self, slot_config, values, master_dimmer):
         """Cap only luminous channels using fixture-profile semantics.
@@ -14083,7 +19158,7 @@ class DmxController:
         zone_rgb = config.get("_auto_show_zone_rgb")
         output_zone_rgb = None
         if zone_rgb is not None:
-            if config.get("_manual_color_override"):
+            if config.get("_manual_color_override") and capabilities.get("dimmer"):
                 # Manual colour authority keeps RGBW at an exact preset while
                 # the separate dimmer channel still carries intensity.
                 output_zone_rgb = [tuple(clamp_dmx(component) for component in segment[:4]) for segment in zone_rgb]
@@ -14097,18 +19172,57 @@ class DmxController:
                     )
                     for segment in zone_rgb
                 ]
-        desired_pan = motion["pan"] if motion else config["pan"]
-        desired_tilt = motion["tilt"] if motion else config["tilt"]
-        realized_motion = self._realized_motion(
-            slot_id,
-            fixture,
-            config,
-            desired_pan,
-            desired_tilt,
-            bool(motion),
-            now,
-            advance=advance_motion,
-        )
+        spatial_resolution = None
+        if motion and isinstance(motion.get("spatial_intent"), dict):
+            spatial_resolution = resolve_spatial_movement_intent(
+                slot_id,
+                config,
+                config.get("_venue_geometry"),
+                motion["spatial_intent"],
+            )
+        if spatial_resolution and spatial_resolution.get("status") == "RESOLVED":
+            output = spatial_resolution["predicted_output"]
+            # The semantic world path is already continuous. Preserve the exact
+            # fixture-specific calibrated inverse bytes instead of feeding them
+            # back through the legacy theoretical motor interpolator.
+            realized_motion = {
+                "pan": output["pan"],
+                "pan_fine": output.get("pan_fine") or 0,
+                "tilt": output["tilt"],
+                "tilt_fine": output.get("tilt_fine") or 0,
+                "target_pan": output["pan"],
+                "target_tilt": output["tilt"],
+                "pan_range": float(fixture.get("pan_range") or 180.0),
+                "tilt_range": float(fixture.get("tilt_range") or 90.0),
+                "pan_degrees": spatial_resolution.get("predicted_physical_azimuth_degrees", spatial_resolution.get("pan_degrees")),
+                "tilt_degrees": spatial_resolution.get("predicted_physical_tilt_plane_degrees", spatial_resolution.get("tilt_degrees")),
+                "target_pan_degrees": spatial_resolution.get("desired_world_azimuth_degrees"),
+                "target_tilt_degrees": spatial_resolution.get("desired_world_elevation_degrees"),
+                "logical_pan_degrees": spatial_resolution.get("desired_world_azimuth_degrees"),
+                "logical_tilt_degrees": spatial_resolution.get("desired_world_elevation_degrees"),
+                "logical_target_pan_degrees": spatial_resolution.get("desired_world_azimuth_degrees"),
+                "logical_target_tilt_degrees": spatial_resolution.get("desired_world_elevation_degrees"),
+                "pan_speed_dps": 0.0,
+                "tilt_speed_dps": 0.0,
+                "motion_active": True,
+                "spatial_resolution": spatial_resolution,
+            }
+        else:
+            desired_pan = motion.get("pan", config["pan"]) if motion else config["pan"]
+            desired_tilt = motion.get("tilt", config["tilt"]) if motion else config["tilt"]
+            movement_active = bool(
+                motion and ("pan" in motion or "tilt" in motion)
+            )
+            realized_motion = self._realized_motion(
+                slot_id,
+                fixture,
+                config,
+                desired_pan,
+                desired_tilt,
+                movement_active,
+                now,
+                advance=advance_motion,
+            )
 
         strobe_input = int(config.get("strobe", 0) or 0)
         if motion and motion.get("strobe") is not None:
@@ -14182,15 +19296,18 @@ class DmxController:
         )
         fixture = find_fixture(FIXTURE_LIBRARY, effective_config["fixture"])
         motion = self._motion_for_config(slot_id, effective_config, osc)
-        desired_pan = motion["pan"] if motion else effective_config["pan"]
-        desired_tilt = motion["tilt"] if motion else effective_config["tilt"]
+        desired_pan = motion.get("pan", effective_config["pan"]) if motion else effective_config["pan"]
+        desired_tilt = motion.get("tilt", effective_config["tilt"]) if motion else effective_config["tilt"]
+        movement_active = bool(
+            motion and ("pan" in motion or "tilt" in motion or isinstance(motion.get("spatial_intent"), dict))
+        )
         realized_motion = self._realized_motion(
             slot_id,
             fixture,
             effective_config,
             desired_pan,
             desired_tilt,
-            bool(motion),
+            movement_active,
             now,
             advance=False,
         )
@@ -14266,6 +19383,8 @@ class DmxController:
             "tilt_speed_dps": realized_motion["tilt_speed_dps"],
             "pan_tilt_speed": effective_config["pan_tilt_speed"],
             "motion_active": realized_motion["motion_active"],
+            "movement_space": str((motion or {}).get("movement_space") or "FIXTURE_RELATIVE"),
+            "semantic_path": (motion or {}).get("semantic_path"),
         }
 
     def _auto_show_evaluation(self, osc, auto_show_config):
@@ -14275,6 +19394,7 @@ class DmxController:
         override_color = live_override_color_name(config.get("override_color"))
         override_color_combo = live_override_color_combo_name(config.get("override_color_combo"))
         override_energy = live_override_energy_name(config.get("override_energy"))
+        override_fx_speed = live_fx_speed_mode(config.get("override_fx_speed"))
         override_manual_strobe = bool(config.get("override_manual_strobe"))
         override_audience_sweep = bool(config.get("override_audience_sweep"))
         override_all_on = bool(config.get("override_all_on"))
@@ -14611,6 +19731,7 @@ class DmxController:
             override_parts.append(f"Cue {one_shot['label']}")
         if override_parts:
             cue_label += " • Override: " + " / ".join(override_parts)
+        resolved_fx_speed = self._resolved_fx_speed(override_fx_speed, energy)
         production_auto_show = {
             "enabled": bool(config["enabled"]),
             "available": override_active or not bool(osc.get("stale")),
@@ -14712,6 +19833,10 @@ class DmxController:
             "override_color_combo_label": live_override_color_combo_label(override_color_combo),
             "override_energy": override_energy,
             "override_energy_label": live_override_energy_label(override_energy),
+            "fx_speed_mode": override_fx_speed,
+            "fx_speed_mode_label": live_fx_speed_label(override_fx_speed),
+            "fx_speed_resolved": resolved_fx_speed,
+            "fx_speed_resolved_label": live_fx_speed_label(resolved_fx_speed),
             "override_manual_strobe": override_manual_strobe,
             "override_audience_sweep": override_audience_sweep,
             "override_all_on": override_all_on,
@@ -14720,6 +19845,12 @@ class DmxController:
             "one_shot_active": bool(one_shot),
             "one_shot_cue": one_shot["id"] if one_shot else "none",
             "one_shot_label": one_shot["label"] if one_shot else "None",
+            "one_shot_duration_beats": one_shot["duration_beats"] if one_shot else 0.0,
+            "one_shot_fx_speed": one_shot["fx_speed"] if one_shot else None,
+            "one_shot_color_steps_per_beat": one_shot["color_steps_per_beat"] if one_shot else 0,
+            # This is the existing one-shot beat envelope, not a new effect
+            # clock. Color Burst consumes it for deterministic sub-beat phase.
+            "one_shot_elapsed_beats": one_shot["elapsed_beats"] if one_shot else 0.0,
             "one_shot_progress": one_shot["progress"] if one_shot else 0.0,
         }
         return production_auto_show, shadow_context
@@ -14889,9 +20020,34 @@ class DmxController:
             if isinstance(preview, dict)
         }
 
+    @staticmethod
+    def _apply_authoritative_preview_color(candidate_previews, authoritative_previews):
+        """Keep preview motion while projecting the selected show's color."""
+        color_fields = (
+            "resolved_red", "resolved_green", "resolved_blue", "resolved_white",
+            "red", "green", "blue", "white",
+        )
+        merged = {}
+        for slot_id, candidate in (candidate_previews or {}).items():
+            preview = dict(candidate)
+            authoritative = (authoritative_previews or {}).get(slot_id) or {}
+            for field in color_fields:
+                if field in authoritative:
+                    preview[field] = authoritative[field]
+            merged[slot_id] = preview
+        return merged
+
     def _preview_auto_show_frame(self, config, osc, now, production_auto_show,
-                                 preview_auto_show=None, production_decision=None):
-        """Bouw baseline/enhanced Map-frames en expliciete RME-differential."""
+                                 preview_auto_show=None, production_decision=None,
+                                 presentation_auto_show=None):
+        """Build diagnostics plus an authoritative presentation frame.
+
+        ``preview_auto_show`` remains the candidate used for differential
+        diagnostics.  Preview Map and LIVE must consume the actually selected
+        production show, supplied as ``presentation_auto_show``.  Without that
+        separation AUTO (no manual color owner) could expose a candidate color
+        that was never selected for the physical frame.
+        """
         if preview_auto_show is None:
             preview_auto_show = self._preview_auto_show_state(
                 osc, config.get("auto_show", {}), production_auto_show
@@ -14905,6 +20061,16 @@ class DmxController:
         enhanced_previews = self._build_slot_previews(
             config, osc, now, auto_show=preview_auto_show
         )
+        presentation_auto_show = presentation_auto_show or preview_auto_show
+        if presentation_auto_show is preview_auto_show:
+            presentation_previews = enhanced_previews
+        else:
+            authoritative_previews = self._build_slot_previews(
+                config, osc, now, auto_show=presentation_auto_show
+            )
+            presentation_previews = self._apply_authoritative_preview_color(
+                enhanced_previews, authoritative_previews
+            )
         changed_slots = {
             slot_id: changed
             for slot_id in sorted(set(baseline_previews) | set(enhanced_previews))
@@ -14956,14 +20122,16 @@ class DmxController:
             "variation": dict(preview_auto_show.get("variation") or {}),
             "changed_dimensions": list(preview_auto_show.get("changed_dimensions") or ()),
             "preview_cue": preview_auto_show.get("preview_cue"),
-            "rendered_preview_slots": self._preview_slot_trace(enhanced_previews),
+            "rendered_preview_slots": self._preview_slot_trace(presentation_previews),
             "preview_intensity_multiplier": preview_auto_show.get(
                 "preview_intensity_multiplier", 1.0
             ),
             "show_state_changed": baseline_intent != enhanced_intent,
             "fixture_values_changed": bool(changed_slots),
             "changed_slots": changed_slots,
-            "selected_preview_source": "preview_auto_show -> slot_previews",
+            "selected_preview_source": (
+                "preview_auto_show motion + selected_production_auto_show color -> slot_previews"
+            ),
             "physical_output_source": (
                 "auto_show -> current_values"
                 if (production_decision or {}).get("production_show_source", "existing_autoshow")
@@ -14972,7 +20140,7 @@ class DmxController:
             ),
             "preview_pulse_test": pulse_test,
         }
-        return preview_auto_show, enhanced_previews, differential
+        return preview_auto_show, presentation_previews, differential
 
     def _show_intent_lifecycle_decision(self, osc):
         """Bepaal een shadow-boundary uit bestaande transportprovenance."""
@@ -15582,7 +20750,19 @@ class DmxController:
         effective["speed"] = 0
         effective["program"] = 0
         effective["_slot_context"] = slot_context
+        # Runtime-only physical context for the centralized spatial resolver.
+        effective["_venue_geometry"] = dict(full_config.get("venue_geometry") or {})
         effective["_auto_show_movement"] = movement
+        dynamic_show = auto_show.get("dynamic_composer") if isinstance(auto_show.get("dynamic_composer"), dict) else {}
+        continuous_state = dynamic_show.get("continuous_musical_state") if isinstance(dynamic_show.get("continuous_musical_state"), dict) else {}
+        effective["_movement_character_context"] = {
+            "section": section,
+            "energy": energy,
+            "event_type": dynamic_show.get("event_type"),
+            "section_progress": continuous_state.get("section_progress"),
+            "variation_seed": dynamic_show.get("variation"),
+            "track_identity": osc.get("track_path") or osc.get("track_title"),
+        }
         if dynamic_preview_active and isinstance(dynamic_primitives, dict):
             # De parameters zijn composer-intent, geen directe kanaalwaarden.
             # Ze worden verderop uitsluitend binnen de bestaande profielen en
@@ -15726,6 +20906,12 @@ class DmxController:
         # between operator-visible presets.
         if role == "wash":
             effective.pop("_auto_show_zone_rgb", None)
+            zone_rgb = self._wall_wash_zone_rgb_for_slot(
+                slot_context, auto_show, osc, effective
+            )
+            if zone_rgb:
+                effective["_auto_show_zone_rgb"] = zone_rgb
+                effective["_auto_show_rgbw"] = self._wall_wash_average_rgbw(zone_rgb)
 
         slot_energy = energy + role_profile["energy_bias"]
         slot_energy += float(track_theme.get("energy_bias", 0.0)) * (0.45 if role == "moving" else 0.28)
@@ -16529,6 +21715,53 @@ class DmxController:
         multiplier = max(low, min(high, multiplier))
         return clamp_dmx(round(dimmer * base_multiplier * multiplier))
 
+    def _attach_spatial_intent(self, motion, effect_id, beat_value, config, slot_context, progress=None):
+        if not motion:
+            return motion
+        classification = movement_space_classification(effect_id)
+        if classification == MOVEMENT_SPACE_NON_MOVEMENT:
+            retained = {
+                key: value for key, value in motion.items()
+                if key not in {"pan", "tilt", "pan_fine", "tilt_fine", "pan_tilt_speed"}
+            }
+            retained["movement_space"] = "NON_MOVEMENT"
+            retained["semantic_path"] = "RETAIN_CURRENT_FINAL_MOVEMENT"
+            return retained
+        if classification == MOVEMENT_SPACE_FIXTURE_RELATIVE:
+            return {
+                **motion,
+                "movement_space": "FIXTURE_RELATIVE",
+                "fixture_relative_justification": FIXTURE_RELATIVE_MOVEMENT_JUSTIFICATIONS.get(effect_id),
+            }
+        context = dict(slot_context or {})
+        context["member_mirror_enabled"] = bool(config.get("_auto_show_member_mirror"))
+        context["motion_parameters"] = config.get("_dynamic_motion_parameters")
+        context["phrase"] = config.get("_auto_show_phrase") or context.get("phrase")
+        if isinstance(config.get("_movement_character_context"), dict):
+            context.update(config["_movement_character_context"])
+        intent = venue_native_effect_intent(
+            effect_id,
+            beat_value,
+            config.get("_venue_geometry"),
+            context,
+            progress=progress,
+        )
+        if intent is None:
+            return motion
+        # Keep colour, intensity and timing metadata, but remove the legacy
+        # fixture-local target. With a finite world intent only the shared
+        # spatial resolver may create final Pan/Tilt bytes.
+        spatial_motion = {
+            key: value for key, value in motion.items()
+            if key not in {"pan", "tilt", "pan_fine", "tilt_fine"}
+        }
+        return {
+            **spatial_motion,
+            "movement_space": "VENUE_NATIVE",
+            "semantic_path": intent.get("semantic_path"),
+            "spatial_intent": intent,
+        }
+
     def _motion_for_config(self, slot_id, config, osc):
         if not config["sync_enabled"]:
             return None
@@ -16537,6 +21770,30 @@ class DmxController:
         capabilities = mode_capabilities(mode)
         if not capabilities["pan"] or not capabilities["tilt"]:
             return None
+        # The Lab only supplies the same named effect/context that production
+        # Auto Show would supply.  It deliberately reuses styled_phrase_motion
+        # and _attach_spatial_intent below, so its final output still flows
+        # through the shared calibrated world resolver.
+        lab = self.movement_lab_authority
+        if lab is not None:
+            config = dict(config)
+            lab_context = dict(config.get("_movement_character_context") or {})
+            lab_context.update({
+                "section": lab.get("section"),
+                "phrase": lab.get("section"),
+                "event_type": str(lab.get("section") or "").upper(),
+                "movement_lab_variation": lab.get("variation", 0),
+                "movement_character_seed": f"movement-lab-{lab.get('variation', 0)}",
+            })
+            config["_movement_character_context"] = lab_context
+            config["_auto_show_motion_name"] = lab.get("effect_id")
+            config["_auto_show_phrase"] = lab.get("section")
+            config["_auto_show_movement"] = 1.0
+            config["_auto_show_energy"] = .88 if lab.get("section") in {"chorus", "drop"} else .58
+            osc = dict(osc or {})
+            elapsed = max(0.0, time.monotonic() - float(lab.get("started_at_monotonic") or time.monotonic()))
+            osc["phrase_current"] = lab.get("section")
+            osc["beat_value"] = elapsed * float(lab.get("bpm") or 124.0) / 60.0
         one_shot_cue_id = one_shot_cue_name(config.get("_one_shot_cue_id"))
         phrase = osc.get("phrase_current")
         if not phrase and (config.get("_live_override_audience_sweep") or one_shot_cue_id != "none"):
@@ -16557,21 +21814,41 @@ class DmxController:
                 beat_value,
             )
             if motion:
+                spatial_effect_id = {
+                    "snap_fan": "drop_snap_fan",
+                    "mirror_bounce": "mirror_bounce_show",
+                }.get(one_shot_cue_id, one_shot_cue_id)
+                spatial = self._attach_spatial_intent(
+                    motion,
+                    spatial_effect_id,
+                    beat_value,
+                    config,
+                    slot_context or {},
+                    progress=float(config.get("_one_shot_cue_progress", 0.0) or 0.0),
+                )
+                if spatial is not motion:
+                    return spatial
                 return _apply_audience_pan_focus_to_motion(motion, slot_context, config=config)
         motion_name = config.get("_auto_show_motion_name")
         if motion_name:
             dynamic_parameters = config.get("_dynamic_motion_parameters")
             phase_offset = 0.0
+            legacy_phase_offset = 0.0
             if isinstance(dynamic_parameters, dict):
                 try:
                     phase_offset = max(-.34, min(.34, float(dynamic_parameters.get("phase_offset", 0.0))))
                     phase_spread = max(.12, min(.54, float(dynamic_parameters.get("phase_spread", .12))))
-                    phase_offset += float((slot_context or {}).get("group_centered", 0.0)) * phase_spread
+                    # The legacy raw fallback can retain its local group feel,
+                    # but a venue-native intent must start from one global
+                    # clock. Its coordinated offsets are supplied by the
+                    # character layer in Venue X/Y participant order.
+                    legacy_phase_offset = phase_offset + float((slot_context or {}).get("group_centered", 0.0)) * phase_spread
                 except (TypeError, ValueError):
                     phase_offset = 0.0
+                    legacy_phase_offset = 0.0
             motion = styled_phrase_motion(
                 phrase,
-                (beat_value or 0.0) + phase_offset,
+                (beat_value or 0.0) + legacy_phase_offset,
                 motion_name,
                 slot_context,
                 movement_scale,
@@ -16584,6 +21861,15 @@ class DmxController:
                 bool(config.get("_auto_show_member_mirror")),
                 config=config,
             )
+            spatial = self._attach_spatial_intent(
+                motion,
+                motion_name,
+                (beat_value or 0.0) + phase_offset,
+                config,
+                slot_context or {},
+            )
+            if spatial is not motion:
+                return spatial
             return _apply_audience_pan_focus_to_motion(motion, slot_context, config=config)
         phase_offset = 0.0
         if slot_context and slot_context.get("group_count", slot_context.get("role_count", 1)) > 1:
@@ -16593,7 +21879,13 @@ class DmxController:
             )
         motion = phrase_motion(phrase, (beat_value or 0.0) + phase_offset)
         if not motion or not slot_context or slot_context.get("group_count", slot_context.get("role_count", 1)) <= 1:
-            return motion
+            return self._attach_spatial_intent(
+                motion,
+                "baseline_phrase_motion",
+                (beat_value or 0.0) + phase_offset,
+                config,
+                {**(slot_context or {}), "phrase": phrase},
+            )
 
         pan = motion["pan"]
         tilt = motion["tilt"]
@@ -16624,7 +21916,13 @@ class DmxController:
             bool(config.get("_auto_show_member_mirror")),
             config=config,
         )
-        return _apply_audience_pan_focus_to_motion(motion, slot_context, config=config)
+        return self._attach_spatial_intent(
+            motion,
+            "baseline_phrase_motion",
+            (beat_value or 0.0) + phase_offset,
+            config,
+            {**(slot_context or {}), "phrase": phrase},
+        )
 
     def _render_tick(self):
         """Evaluate one authoritative show frame; DMX output is an optional sink."""
@@ -16661,12 +21959,15 @@ class DmxController:
                     config, osc, render_now, baseline_auto_show,
                     preview_auto_show=candidate_auto_show,
                     production_decision=production_decision,
+                    presentation_auto_show=auto_show,
                 )
                 self.current_auto_show = auto_show
                 self.current_preview_auto_show = preview_auto_show
                 self.rme_preview_differential = differential
                 self.production_show_decision = production_decision
-                final_values = self._apply_virtualdj_beat_pulse_overlay_locked(values)
+                final_values = self._apply_manual_smoke_overlay_locked(
+                    self._apply_virtualdj_beat_pulse_overlay_locked(values), config
+                )
                 self.current_values = values
                 self.current_final_values = final_values
                 self.current_slot_previews = slot_previews
@@ -16686,6 +21987,8 @@ class DmxController:
             except Exception as exc:
                 self.renderer_error = str(exc)
                 self.error = self.renderer_error
+                self.manual_smoke_active = False
+                self._release_venue_target_test_locked("renderer_failure")
                 return False
 
         self._observe_virtualdj_beat_pulse_test(developer_playback_state)
@@ -18597,6 +23900,72 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/dmx/disconnect":
                 DMX.disconnect()
                 self.send_json(full_state())
+                return
+            if path == "/api/dmx/venue-target-test":
+                self.send_json(DMX.venue_target_test(payload))
+                return
+            if path == "/api/dmx/venue-target-preview":
+                self.send_json(DMX.activate_venue_target_preview_test(payload))
+                return
+            if path == "/api/dmx/venue-target-move":
+                self.send_json(DMX.activate_venue_target_test(payload))
+                return
+            if path == "/api/dmx/venue-target-renew":
+                self.send_json(DMX.renew_venue_target_test(payload))
+                return
+            if path == "/api/dmx/venue-target-release":
+                self.send_json(DMX.release_venue_target_test(payload))
+                return
+            if path == "/api/dmx/movement-lab/play":
+                self.send_json(DMX.start_movement_lab(payload))
+                return
+            if path == "/api/dmx/movement-lab/stop":
+                self.send_json(DMX.stop_movement_lab())
+                return
+            if path == "/api/dmx/aim-calibration/move":
+                self.send_json(DMX.activate_aim_calibration(payload))
+                return
+            if path == "/api/dmx/aim-calibration/nudge":
+                self.send_json(DMX.nudge_aim_calibration(payload))
+                return
+            if path == "/api/dmx/aim-calibration/save-anchor":
+                self.send_json(DMX.save_aim_calibration_anchor(payload))
+                return
+            if path == "/api/dmx/aim-calibration/validation":
+                self.send_json(DMX.record_aim_calibration_validation(payload))
+                return
+            if path == "/api/dmx/aim-calibration/reset":
+                self.send_json(DMX.reset_aim_calibration(payload))
+                return
+            if path == "/api/dmx/axis-mapping-v2/begin":
+                self.send_json(DMX.begin_axis_mapping_v2(payload))
+                return
+            if path == "/api/dmx/axis-mapping-v2/tilt-reference/nudge":
+                self.send_json(DMX.nudge_axis_mapping_v2_tilt_reference(payload))
+                return
+            if path == "/api/dmx/axis-mapping-v2/tilt-reference/lock":
+                self.send_json(DMX.lock_axis_mapping_v2_tilt_reference(payload))
+                return
+            if path == "/api/dmx/axis-mapping-v2/pan-reference":
+                self.send_json(DMX.set_axis_mapping_v2_pan_reference(payload))
+                return
+            if path == "/api/dmx/axis-mapping-v2/move-sample":
+                self.send_json(DMX.move_axis_mapping_v2_sample(payload))
+                return
+            if path == "/api/dmx/axis-mapping-v2/save-sample":
+                self.send_json(DMX.save_axis_mapping_v2_sample(payload))
+                return
+            if path == "/api/dmx/axis-mapping-v2/validation-move":
+                self.send_json(DMX.move_axis_mapping_v2_validation(payload))
+                return
+            if path == "/api/dmx/axis-mapping-v2/validation-result":
+                self.send_json(DMX.record_axis_mapping_v2_validation(payload))
+                return
+            if path == "/api/dmx/axis-mapping-v2/activate":
+                self.send_json(DMX.activate_axis_mapping_v2(payload))
+                return
+            if path == "/api/dmx/axis-mapping-v2/reset":
+                self.send_json(DMX.reset_axis_mapping_v2(payload))
                 return
             if path == "/api/dmx/update":
                 DMX.update_config(payload)

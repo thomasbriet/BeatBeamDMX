@@ -1,12 +1,24 @@
 import copy
 import json
+import math
 import threading
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from beatbeam_app import DmxController, MANUAL_COLOR_COMBOS, MANUAL_COLOR_PRESETS, _remote_live_output_preview
+import beatbeam_app
+from beatbeam_app import (
+    COLOR_BURST_PRESET_SEQUENCE,
+    COLOR_BURST_STEPS_PER_BEAT,
+    COLOR_BURST_SUBDIVISIONS_PER_BEAT,
+    EFFECT_COLOR_OWNERSHIP,
+    DmxController,
+    MANUAL_COLOR_COMBOS,
+    MANUAL_COLOR_PRESETS,
+    ONE_SHOT_FX_SPEED_POLICY,
+    _remote_live_output_preview,
+)
 from show_interpreter_input_adapter import ShowInterpreterEffectiveContext
 
 
@@ -167,6 +179,105 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
     def tick(self, controller):
         self.assertFalse(controller._render_tick())
 
+    @staticmethod
+    def composer_color(auto_show, palette_name):
+        result = copy.deepcopy(auto_show)
+        result.update({
+            "override_color": "none",
+            "override_color_combo": "none",
+            "dynamic_composition_applied": True,
+            "dynamic_composer_active": True,
+            "fixture_group_intents": {
+                role: {"color_change_rate": 0.0}
+                for role in ("moving", "par", "wash", "static")
+            },
+            "selected_primitives": {
+                role: {"palette": palette_name, "color_animation": "all_same"}
+                for role in ("moving", "par", "wash", "static")
+            },
+        })
+        return result
+
+    def test_auto_color_is_transparent_and_presentation_uses_selected_production_source(self):
+        controller, transport = self.controller()
+        osc = transport.snapshot_for_render()
+        baseline = controller._auto_show_state(osc, controller.config["auto_show"])
+        selected_red = self.composer_color(baseline, "ruby_lime")
+        unselected_blue_candidate = self.composer_color(baseline, "cobalt_amber")
+
+        effective = controller._effective_slot_config(
+            "head", controller.config["slots"]["head"], osc, selected_red,
+            full_config=controller.config,
+        )
+        self.assertEqual(MANUAL_COLOR_PRESETS["red"], effective["_auto_show_rgbw"])
+        self.assertNotIn("_manual_color_override", effective)
+
+        _, previews, differential = controller._preview_auto_show_frame(
+            controller.config,
+            osc,
+            100.0,
+            baseline,
+            preview_auto_show=unselected_blue_candidate,
+            production_decision={"production_show_source": "existing_autoshow"},
+            presentation_auto_show=selected_red,
+        )
+        self.assertEqual(255, previews["head"]["resolved_red"])
+        self.assertEqual(0, previews["head"]["resolved_blue"])
+        self.assertEqual(
+            "preview_auto_show motion + selected_production_auto_show color -> slot_previews",
+            differential["selected_preview_source"],
+        )
+
+    def test_auto_color_matrix_tracks_current_show_across_intensity_and_temporary_owners(self):
+        controller, transport = self.controller()
+        osc = transport.snapshot_for_render()
+        baseline = controller._auto_show_state(osc, controller.config["auto_show"])
+        red = self.composer_color(baseline, "ruby_lime")
+        blue = self.composer_color(baseline, "cobalt_amber")
+
+        def resolved(auto_show, **updates):
+            frame = {**copy.deepcopy(auto_show), **updates}
+            return controller._effective_slot_config(
+                "head", controller.config["slots"]["head"], osc, frame,
+                full_config=controller.config,
+            )["_auto_show_rgbw"]
+
+        self.assertEqual(MANUAL_COLOR_PRESETS["red"], resolved(red))
+        self.assertEqual(MANUAL_COLOR_PRESETS["blue"], resolved(blue))
+
+        controller.config["master_dimmer"] = .5
+        preview = controller._preview_for_slot(
+            "head", controller.config["slots"]["head"], osc, 100.0,
+            full_config=controller.config, auto_show=blue,
+        )
+        self.assertEqual(MANUAL_COLOR_PRESETS["blue"][:3], (
+            preview["resolved_red"], preview["resolved_green"], preview["resolved_blue"],
+        ))
+        self.assertEqual(MANUAL_COLOR_PRESETS["blue"], resolved(
+            blue, rhythm_mode="chase", beat_pulse=True,
+        ))
+
+        white_hit = resolved(
+            red,
+            one_shot_active=True,
+            one_shot_cue="white_hit",
+            one_shot_progress=.5,
+            one_shot_elapsed_beats=2.0,
+        )
+        self.assertEqual(MANUAL_COLOR_PRESETS["white"], white_hit)
+        self.assertEqual(MANUAL_COLOR_PRESETS["blue"], resolved(blue))
+
+        burst = resolved(
+            red,
+            one_shot_active=True,
+            one_shot_cue="color_burst",
+            one_shot_progress=.5,
+            one_shot_elapsed_beats=.5,
+            one_shot_color_steps_per_beat=4,
+        )
+        self.assertIn(burst, set(MANUAL_COLOR_PRESETS.values()))
+        self.assertEqual(MANUAL_COLOR_PRESETS["blue"], resolved(blue))
+
     def test_disconnected_engine_tick_updates_render_diagnostics_without_last_sent(self):
         controller, _ = self.controller()
         self.tick(controller)
@@ -290,6 +401,343 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
                     slot_id, controller.config["slots"][slot_id], osc, auto_show, full_config=controller.config
                 )
                 self.assertEqual(cue_id, rendered["_one_shot_cue_id"])
+
+    def test_effect_color_ownership_matrix_preserves_underlying_manual_color(self):
+        controller, transport = self.controller()
+        osc = transport.snapshot_for_render()
+        baseline = controller._auto_show_state(osc, controller.config["auto_show"])
+        expected = MANUAL_COLOR_PRESETS["red"]
+
+        hold_fields = {
+            "manual_strobe": "override_manual_strobe",
+            "audience_sweep": "override_audience_sweep",
+            "all_on": "override_all_on",
+            "par_chase": "override_par_chase",
+            "par_snake": "override_par_snake",
+        }
+        for effect_id, field in hold_fields.items():
+            with self.subTest(effect=effect_id):
+                auto_show = dict(baseline)
+                auto_show.update({"override_color": "red", field: True})
+                rendered = controller._effective_slot_config(
+                    "head", controller.config["slots"]["head"], osc, auto_show, full_config=controller.config
+                )
+                self.assertFalse(EFFECT_COLOR_OWNERSHIP[effect_id])
+                self.assertEqual(expected, rendered["_auto_show_rgbw"])
+
+        for effect_id in ("audience_riser", "snap_fan", "mirror_bounce", "par_chase_burst"):
+            with self.subTest(effect=effect_id):
+                auto_show = dict(baseline)
+                auto_show.update({
+                    "override_color": "red", "one_shot_active": True,
+                    "one_shot_cue": effect_id, "one_shot_progress": .5,
+                    "one_shot_elapsed_beats": 2.0,
+                })
+                rendered = controller._effective_slot_config(
+                    "head", controller.config["slots"]["head"], osc, auto_show, full_config=controller.config
+                )
+                self.assertFalse(EFFECT_COLOR_OWNERSHIP[effect_id])
+                self.assertEqual(expected, rendered["_auto_show_rgbw"])
+
+    def test_strobe_preserves_combo_partitions_and_current_beat_parity(self):
+        controller, transport = self.controller()
+        controller.config["slots"]["par_2"] = copy.deepcopy(controller.config["slots"]["par"])
+        controller.config["slots"]["par_2"]["address"] = 17
+        controller.config["slot_order"].append("par_2")
+        expected = {MANUAL_COLOR_PRESETS["purple"], MANUAL_COLOR_PRESETS["white"]}
+        observed = []
+        for beat in (24.0, 25.0):
+            transport.state["beat_value"] = beat
+            osc = transport.snapshot_for_render()
+            auto_show = controller._auto_show_state(osc, controller.config["auto_show"])
+            auto_show.update({"override_color": "none", "override_color_combo": "purple_white", "override_manual_strobe": True})
+            frame = tuple(
+                controller._effective_slot_config(slot_id, controller.config["slots"][slot_id], osc, auto_show, full_config=controller.config)["_auto_show_rgbw"]
+                for slot_id in ("par", "par_2")
+            )
+            self.assertEqual(expected, set(frame))
+            observed.append(frame)
+        self.assertEqual(observed[0], tuple(reversed(observed[1])))
+
+    def test_white_hit_and_color_burst_own_only_their_explicit_manual_presets(self):
+        controller, transport = self.controller()
+        osc = transport.snapshot_for_render()
+        baseline = controller._auto_show_state(osc, controller.config["auto_show"])
+        white_hit = dict(baseline)
+        white_hit.update({"override_color": "red", "one_shot_active": True, "one_shot_cue": "white_hit", "one_shot_progress": .5, "one_shot_elapsed_beats": 2.0})
+        white = controller._effective_slot_config("head", controller.config["slots"]["head"], osc, white_hit, full_config=controller.config)
+        self.assertTrue(EFFECT_COLOR_OWNERSHIP["white_hit"])
+        self.assertEqual(MANUAL_COLOR_PRESETS["white"], white["_auto_show_rgbw"])
+
+        observed = []
+        for step in range(len(COLOR_BURST_PRESET_SEQUENCE) * 2):
+            auto_show = dict(baseline)
+            auto_show.update({
+                "override_color": "red", "one_shot_active": True, "one_shot_cue": "color_burst",
+                "one_shot_progress": .5, "one_shot_elapsed_beats": step / COLOR_BURST_SUBDIVISIONS_PER_BEAT,
+                "one_shot_color_steps_per_beat": COLOR_BURST_SUBDIVISIONS_PER_BEAT,
+            })
+            rendered = controller._effective_slot_config(
+                "head", controller.config["slots"]["head"], osc, auto_show, full_config=controller.config
+            )
+            observed.append(rendered["_auto_show_rgbw"])
+        self.assertTrue(EFFECT_COLOR_OWNERSHIP["color_burst"])
+        self.assertTrue(set(observed).issubset(set(MANUAL_COLOR_PRESETS.values())))
+        self.assertGreater(len(set(observed)), 6)
+        self.assertTrue(all(left != right for left, right in zip(observed, observed[1:])))
+
+        restored = controller._effective_slot_config(
+            "head", controller.config["slots"]["head"], osc,
+            {**baseline, "override_color": "red"}, full_config=controller.config,
+        )
+        self.assertEqual(MANUAL_COLOR_PRESETS["red"], restored["_auto_show_rgbw"])
+
+    def test_fx_speed_auto_uses_effective_energy_with_hysteresis_and_manual_wins(self):
+        controller, _ = self.controller()
+        self.assertEqual("slow", controller._resolved_fx_speed("auto", .30))
+        self.assertEqual("slow", controller._resolved_fx_speed("auto", .47))
+        self.assertEqual("mid", controller._resolved_fx_speed("auto", .52))
+        self.assertEqual("mid", controller._resolved_fx_speed("auto", .73))
+        self.assertEqual("fast", controller._resolved_fx_speed("auto", .80))
+        self.assertEqual("slow", controller._resolved_fx_speed("slow", .95))
+
+    def test_one_shot_fx_speed_is_captured_at_activation_and_progress_uses_stored_duration(self):
+        controller, transport = self.controller()
+        for speed in ("slow", "mid", "fast"):
+            with self.subTest(speed=speed):
+                controller.config["auto_show"]["override_fx_speed"] = speed
+                controller.trigger_one_shot_cue("audience_riser")
+                self.assertEqual(speed, controller.active_one_shot_cue["fx_speed"])
+                self.assertEqual(
+                    ONE_SHOT_FX_SPEED_POLICY["audience_riser"][speed],
+                    controller.active_one_shot_cue["duration_beats"],
+                )
+
+        controller.config["auto_show"]["override_fx_speed"] = "slow"
+        transport.state["beat_value"] = 100.0
+        controller.trigger_one_shot_cue("snap_fan")
+        controller.config["auto_show"]["override_fx_speed"] = "fast"
+        transport.state["beat_value"] = 102.0
+        state = controller._resolved_one_shot_cue_state(transport.snapshot_for_render())
+        self.assertEqual(8.0, state["duration_beats"])
+        self.assertAlmostEqual(.25, state["progress"])
+
+        transport.state["beat_value"] = None
+        frozen = controller._resolved_one_shot_cue_state(
+            transport.snapshot_for_render(), now=controller.active_one_shot_cue["started_at"] + 120
+        )
+        self.assertAlmostEqual(state["progress"], frozen["progress"])
+
+    def test_white_hit_duration_is_fixed_and_color_burst_rate_is_beat_based(self):
+        controller, transport = self.controller()
+        for speed in ("slow", "mid", "fast"):
+            controller.config["auto_show"]["override_fx_speed"] = speed
+            controller.trigger_one_shot_cue("white_hit")
+            self.assertEqual(4.0, controller.active_one_shot_cue["duration_beats"])
+
+        for bpm in (100.0, 128.0, 160.0):
+            transport.state["bpm"] = bpm
+            for speed, subdivisions in COLOR_BURST_STEPS_PER_BEAT.items():
+                auto_show = {
+                    "one_shot_elapsed_beats": .5,
+                    "one_shot_color_steps_per_beat": subdivisions,
+                }
+                expected = COLOR_BURST_PRESET_SEQUENCE[int(.5 * subdivisions)]
+                self.assertEqual(expected, controller._color_burst_preset_name(auto_show))
+
+    def test_master_dimmer_scales_only_profile_declared_luminous_channels(self):
+        controller, _ = self.controller()
+
+        native = controller.config["slots"]["par"]
+        native_values = {native["address"] + offset: 200 for offset in range(8)}
+        native_dimmed = controller._apply_master_dimmer_to_slot_values(native, native_values, .5)
+        self.assertEqual(100, native_dimmed[native["address"]])
+        self.assertEqual(200, native_dimmed[native["address"] + 1])  # exact red
+        self.assertEqual(200, native_dimmed[native["address"] + 5])  # strobe rate
+
+        rgb = controller.default_slot_config("rgb", fixture_id="uking_zq06016", mode="C001", address=100)
+        rgb_values = {100: 200, 101: 100, 102: 50}
+        self.assertEqual(
+            {100: 50, 101: 25, 102: 12},
+            controller._apply_master_dimmer_to_slot_values(rgb, rgb_values, .25),
+        )
+
+        blaze = controller.default_slot_config(
+            "blaze", fixture_id="beamz_blaze_series_rgba_fogger", mode="8ch", address=200
+        )
+        blaze_values = {channel: 80 for channel in range(200, 208)}
+        blaze_dimmed = controller._apply_master_dimmer_to_slot_values(blaze, blaze_values, .5)
+        self.assertEqual(80, blaze_dimmed[200])  # fog excluded
+        self.assertEqual(40, blaze_dimmed[201])  # native master intensity
+        self.assertEqual(80, blaze_dimmed[202])  # color identity stays exact
+        self.assertEqual(80, blaze_dimmed[206])  # strobe rate excluded
+        self.assertEqual(80, blaze_dimmed[207])  # macro excluded
+
+    def test_master_dimmer_updates_authoritative_output_offline_and_blackout_retains_it(self):
+        controller, _ = self.controller()
+        controller.update_config({"master_dimmer": 1.0})
+        full = dict(controller.current_values)
+        controller.update_config({"master_dimmer": .35})
+        dimmed = dict(controller.current_values)
+        self.assertFalse(controller.connected)
+        self.assertEqual(.35, controller.state()["master_dimmer"])
+        self.assertNotEqual(full, dimmed)
+        controller.blackout()
+        self.assertEqual({}, controller.current_values)
+        controller.update_config({"blackout_active": False})
+        self.assertEqual(.35, controller.state()["master_dimmer"])
+        self.assertTrue(controller.current_values)
+
+    def test_remote_master_dimmer_command_scales_the_live_final_frame_at_every_quarter(self):
+        """Exercise the real Remote V2 command route, not only the helper."""
+        controller, _ = self.controller()
+        previous_dmx = beatbeam_app.DMX
+        previous_access = beatbeam_app.REMOTE_ACCESS_CONFIG
+        previous_results = dict(beatbeam_app.REMOTE_CONTROL_RESULTS)
+        try:
+            beatbeam_app.DMX = controller
+            beatbeam_app.REMOTE_ACCESS_CONFIG = {"remote_credentials": {
+                "live-control": {"scope": "REMOTE_READ", "scopes": ["REMOTE_READ", "LIVE_CONTROL"], "client_id": "test-ipad"},
+            }}
+            beatbeam_app.REMOTE_CONTROL_RESULTS.clear()
+            with patch("beatbeam_app.remote_live_state_v2", return_value={"state_revision": 9, "event_sequence": 9}):
+                controller.update_config({"master_dimmer": 1.0})
+                self.tick(controller)
+                dimmer_channel = controller.config["slots"]["par"]["address"]
+                full_dimmer = controller.current_final_values[dimmer_channel]
+                for index, factor in enumerate((1.0, .75, .50, .25, 0.0)):
+                    result = beatbeam_app.remote_live_control_command(
+                        "live-control",
+                        {"command_id": f"master-quarter-{index}", "action": "set_master_dimmer", "value": f"{factor:.2f}"},
+                    )
+                    self.assertTrue(result["accepted"])
+                    self.tick(controller)
+                    self.assertEqual(factor, controller.state()["master_dimmer"])
+                    self.assertEqual(round(full_dimmer * factor), controller.current_final_values[dimmer_channel])
+                    output = _remote_live_output_preview(controller.state())
+                    par = next(fixture for fixture in output["fixtures"] if fixture["id"] == "par")
+                    self.assertEqual(round(full_dimmer * factor), par["dimmer"])
+                    self.assertFalse(output["blackout"])
+        finally:
+            beatbeam_app.DMX = previous_dmx
+            beatbeam_app.REMOTE_ACCESS_CONFIG = previous_access
+            beatbeam_app.REMOTE_CONTROL_RESULTS.clear()
+            beatbeam_app.REMOTE_CONTROL_RESULTS.update(previous_results)
+
+    def test_rendered_fixture_intensity_projection_tracks_master_without_rgb_luminance(self):
+        controller, transport = self.controller()
+        controller.config["slots"]["wall_wash"] = controller._clean_slot_config(
+            "wall_wash",
+            controller.default_slot_config("wall_wash", fixture_id="uking_zq06016", address=50),
+        )
+        controller.config["slot_order"].append("wall_wash")
+        controller.config["auto_show"]["override_color"] = "red"
+
+        def render(master, color):
+            controller.config["master_dimmer"] = master
+            controller.config["auto_show"]["override_color"] = color
+            with patch("beatbeam_app.time.time", return_value=300.0):
+                self.tick(controller)
+            state = controller.state()
+            previews = state["slot_previews"]
+            output = _remote_live_output_preview(state)
+            remote = {fixture["id"]: fixture for fixture in output["fixtures"]}
+            return previews, remote
+
+        full, remote_full = render(1.0, "red")
+        half, remote_half = render(.5, "red")
+        quarter, remote_quarter = render(.25, "red")
+        dark, remote_dark = render(0.0, "red")
+        for slot_id in ("par", "head", "wall_wash"):
+            with self.subTest(slot=slot_id):
+                self.assertAlmostEqual(full[slot_id]["effective_intensity"] * .5, half[slot_id]["effective_intensity"], places=6)
+                self.assertAlmostEqual(full[slot_id]["effective_intensity"] * .25, quarter[slot_id]["effective_intensity"], places=6)
+                self.assertEqual(0.0, dark[slot_id]["effective_intensity"])
+                self.assertEqual(half[slot_id]["effective_intensity"], remote_half[slot_id]["effective_intensity"])
+                self.assertEqual(0.0, remote_dark[slot_id]["effective_intensity"])
+
+        red, _ = render(.5, "red")
+        blue, _ = render(.5, "blue")
+        white, _ = render(.5, "white")
+        for slot_id in ("par", "head", "wall_wash"):
+            with self.subTest(color_independent_slot=slot_id):
+                self.assertEqual(red[slot_id]["effective_intensity"], blue[slot_id]["effective_intensity"])
+                self.assertEqual(red[slot_id]["effective_intensity"], white[slot_id]["effective_intensity"])
+        self.assertEqual(255, remote_full["par"]["resolved_red"])
+
+    def test_manual_zone_color_preserves_brightness_without_a_native_dimmer(self):
+        controller, transport = self.controller()
+        slot = controller.default_slot_config(
+            "wash", fixture_id="uking_zq06016", mode="P001", address=100
+        )
+        effective = {
+            **slot,
+            "_auto_show_zone_rgb": [MANUAL_COLOR_PRESETS["red"]] * 8,
+            "_auto_show_rgbw": MANUAL_COLOR_PRESETS["red"],
+            "_manual_color_override": True,
+            "_force_rgbw_override": True,
+            "_slot_context": {"role": "wash", "member_count": 1, "member_index": 0},
+        }
+        osc = transport.snapshot_for_render()
+        with patch.object(controller, "_effective_brightness_with_motion", side_effect=(64, 192)):
+            low = controller._render_slot_values("wash", effective, osc, 1.0, advance_motion=False)
+            high = controller._render_slot_values("wash", effective, osc, 1.0, advance_motion=False)
+        self.assertLess(low[100], high[100])
+        self.assertEqual(0, low[101])
+        self.assertEqual(0, high[101])
+
+    def test_manual_single_and_combo_preserve_par_chase_dimmer_and_participation(self):
+        controller, transport = self.controller()
+        for index in range(2, 5):
+            slot_id = f"par_{index}"
+            controller.config["slots"][slot_id] = copy.deepcopy(controller.config["slots"]["par"])
+            controller.config["slots"][slot_id]["address"] = 20 + index * 10
+            controller.config["slot_order"].append(slot_id)
+        slots = ("par", "par_2", "par_3", "par_4")
+
+        for color, combo in (("red", "none"), ("cyan", "none"), ("none", "purple_white"), ("none", "blue_orange")):
+            with self.subTest(color=color, combo=combo):
+                frames = []
+                for beat in (24.0, 25.0):
+                    transport.state["beat_value"] = beat
+                    osc = transport.snapshot_for_render()
+                    osc["beat_phase_age_seconds"] = .1
+                    auto_show = controller._auto_show_state(osc, controller.config["auto_show"])
+                    auto_show.update({
+                        "override_color": color,
+                        "override_color_combo": combo,
+                        "override_par_chase": True,
+                    })
+                    brightness = []
+                    for slot_id in slots:
+                        effective = controller._effective_slot_config(
+                            slot_id, controller.config["slots"][slot_id], osc, auto_show,
+                            full_config=controller.config,
+                        )
+                        brightness.append(controller._brightness_for_config(effective, osc, 300.0))
+                    frames.append(brightness)
+                self.assertEqual(2, sum(value > 0 for value in frames[0]))
+                self.assertEqual(2, sum(value > 0 for value in frames[1]))
+                self.assertEqual([value == 0 for value in frames[0]], [value > 0 for value in frames[1]])
+
+    def test_manual_color_changes_only_rgbw_while_existing_movement_continues(self):
+        controller, transport = self.controller()
+        osc = transport.snapshot_for_render()
+        baseline = controller._auto_show_state(osc, controller.config["auto_show"])
+        base_config = controller._effective_slot_config(
+            "head", controller.config["slots"]["head"], osc, baseline,
+            full_config=controller.config,
+        )
+        base_motion = controller._motion_for_config("head", base_config, osc)
+        self.assertIsNotNone(base_motion)
+        for color, combo in (("cyan", "none"), ("none", "purple_white")):
+            manual = dict(baseline)
+            manual.update({"override_color": color, "override_color_combo": combo})
+            effective = controller._effective_slot_config(
+                "head", controller.config["slots"]["head"], osc, manual,
+                full_config=controller.config,
+            )
+            self.assertEqual(base_motion, controller._motion_for_config("head", effective, osc))
 
     def test_manual_colors_render_authoritative_offline_output_without_dmx(self):
         controller, _ = self.controller()
@@ -738,7 +1186,10 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertNotEqual(baseline_previews, state["slot_previews"])
         self.assertTrue(differential["show_state_changed"])
         self.assertTrue(differential["fixture_values_changed"])
-        self.assertEqual("preview_auto_show -> slot_previews", differential["selected_preview_source"])
+        self.assertEqual(
+            "preview_auto_show motion + selected_production_auto_show color -> slot_previews",
+            differential["selected_preview_source"],
+        )
 
     def test_dynamic_composer_replaces_scene_primitives_only_in_preview(self):
         transport = PreviewTransport()
@@ -781,16 +1232,16 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertFalse(differential["baseline_scene_reused"])
         self.assertIn("movement", differential["changed_dimensions"])
         self.assertIn("intensity", differential["changed_dimensions"])
-        self.assertEqual("build_fastening_circle", differential["selected_primitives"]["moving"]["movement_pattern"])
+        self.assertEqual("build_rising_sweep", differential["selected_primitives"]["moving"]["movement_pattern"])
         self.assertEqual("amber_teal", differential["selected_primitives"]["par"]["palette"])
         self.assertEqual("center_out_build", differential["selected_primitives"]["wash"]["wash_cue"])
         self.assertIn("Dynamic Composer • RME Build", differential["preview_cue"])
         self.assertNotEqual(baseline_previews["head"]["target_pan"], state["slot_previews"]["head"]["target_pan"])
-        self.assertNotEqual(
+        self.assertEqual(
             tuple(baseline_previews["par"][channel] for channel in ("red", "green", "blue")),
             tuple(state["slot_previews"]["par"][channel] for channel in ("red", "green", "blue")),
         )
-        self.assertNotEqual(
+        self.assertEqual(
             tuple(baseline_previews["wall_wash"][channel] for channel in ("red", "green", "blue")),
             tuple(state["slot_previews"]["wall_wash"][channel] for channel in ("red", "green", "blue")),
         )
@@ -844,6 +1295,38 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
         self.assertIn("motion_parameters", differential["composition_signature"])
         self.assertIn("selection", differential["variation"])
         self.assertTrue(differential["fixture_values_changed"])
+
+    def test_production_composer_without_current_rme_keeps_active_finite_output(self):
+        transport = PreviewTransport()
+        bridge = ProductionAuthorityBridge()
+        original_project = bridge.handoff.project
+
+        def without_event(state, include_shadow=False, include_rich_events=False):
+            result = original_project(state, include_shadow, include_rich_events)
+            if result:
+                result["rich_musical_events"]["events"] = []
+            return result
+
+        bridge.handoff.project = without_event
+        controller = DmxController(transport, bridge)
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.config["production_show_mode"] = "DYNAMIC_COMPOSER_ENABLED"
+        controller.render_active = True
+
+        with patch("beatbeam_app.time.time", return_value=300.0):
+            self.tick(controller)
+
+        state = controller.state()
+        self.assertEqual("dynamic_composer", state["production_show_selector"]["production_show_source"])
+        self.assertIsNone(state["rme_preview_differential"]["event"])
+        self.assertTrue(state["rme_preview_differential"]["dynamic_composer_active"])
+        self.assertIsNone(state["renderer_health"]["error"])
+        self.assertTrue(controller.current_values)
+        self.assertTrue(all(
+            math.isfinite(float(value))
+            for value in controller.current_values.values()
+        ))
 
     def test_arrival_envelope_outlives_point_context_and_keeps_physical_frame_identical(self):
         transport = PreviewTransport()

@@ -15,6 +15,7 @@
 | Smart Cue V1 placementreview | `HOLD_HUMAN_REVIEW` | Beoordeel 24 diverse tracks op MIX IN, MAIN, BREAK, MIX OUT en exacte 16/12/8/4-bar aftellingen. | Technische planner/writer-foundation is pass; muzikale plaatsing is niet menselijk geaccepteerd en auto-apply blijft hard uit. |
 | Show Simulator V1 review | `HOLD_USER_REVIEW` | Beoordeel timeline, cue/event/section-jumps en de gesimuleerde 2D/3D Preview Map. | Technische pass is gereed; Simulator heeft hard nul fysieke authority. |
 | VirtualDJ-native SongAnalyzer V1 review | `HOLD_USER_REVIEW` | Beoordeel SongAnalyzer-kolom en Analyze/Reanalyze/Retry als dagelijkse workflow. | Technische live/headless pass is gereed; bredere usabilityreview ontbreekt. |
+| SongAnalyzer Hot MyLists V1 | `HOLD_USER_HOT_MYLISTS_ACCEPTANCE` | Controleer exact de native `SongAnalyzer Hot` List Folder met directe/nested lijsten, queue en cachehergebruik. | Technische parser/watcher/runtimeinstallatie; echte VirtualDJ-map en bediening moeten door de gebruiker worden gecontroleerd. |
 | Dynamic Composer advanced effects V2 review | `HOLD_USER_REVIEW` | Beoordeel dimmermotieven, verzadigde paletten, kleur-/participatievariatie en gecontroleerde RETURN-herkenning in Beta-productie. | De productie-gate is lokaal persistent `DYNAMIC_COMPOSER_ENABLED`; manual/blackout en de fail-closed `existing_autoshow`-fallback behouden voorrang. |
 | iPad Color-first Override V1 review | `HOLD_USER_REVIEW` | Beoordeel single colors, twee-kleur-combos, verticale Energy-fader, compacte safety-actions en vaste landscape op de fysieke iPad. | Technische route is PASS, inclusief no-DMX Remote V2; menselijke performance/UX-review ontbreekt. |
 
@@ -25,6 +26,7 @@
 | FILL calibration decision | `BLOCKED_ON_HUMAN_LABELS` | Evalueer de gelabelde set; kies bounded kalibratie, shadow-event-experiment of geen promotie. | NOW/FILL-review. |
 | FILL shadow-event / envelope decision | `BLOCKED_ON_CALIBRATION_EVIDENCE` | Alleen bij aantoonbaar bewijs bepalen of FILL als bounded micro-event mag worden geprojecteerd. | Kalibratiebesluit; geen directe strobe-regel. |
 | Controlled VirtualDJ Smart Cue apply | `BLOCKED_ON_HUMAN_PLACEMENT_REVIEW` | Alleen met expliciete toestemming een write/readback/delete-cyclus op een disposable/testasset uitvoeren. | Smart Cue-human-review; geen normale librarytrack en geen library-wide apply. |
+| Embedded SongAnalyzer browser panel | `HOLD_VDJ_EMBEDDED_SONGANALYZER_PANEL_USER_ACCEPTANCE` | Toon de read-only SongAnalyzer queue/status in VirtualDJ's browser, naast Sideview/Info, zonder tweede queue of Effects-hijack. | Safe user-derivative, active selection, package/install/sign/hash, live Online/Idle-paneel en regressies zijn pass; menselijke layout/workflowreview plus reële queue/running/offline-herstelobservatie blijven open. |
 
 ## LATER
 

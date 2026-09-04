@@ -19,18 +19,36 @@ GROUP_NUMBERS = (
     "color_change_rate", "pulse_amount", "accent_strength",
 )
 PALETTE_ROLES = frozenset({"base", "tension", "space", "impact", "release"})
-KNOWN_MOTIONS = frozenset({
+LEGACY_KNOWN_MOTIONS = frozenset({
     "break_soft_blue_center", "break_slow_pulse_circle", "sweep_narrow", "sweep_mid",
     "sweep_arc", "sweep_wide", "fast_audience_circle", "build_fastening_circle",
-    "drop_fast_circle_white",
+    "fast_audience_sweep", "fast_audience_figure_8", "build_rising_sweep",
+    "build_audience_wave", "build_narrow_to_wide_fan", "drop_fast_circle_white",
 })
+# Production V3 identities are renderer-owned recipes.  The selector only
+# admits their stable public identifiers; keeping this explicit avoids an
+# import cycle with beatbeam_app, which imports this fail-closed boundary.
+FULL_SPHERE_V3_PRODUCTION_MOTIONS = frozenset({
+    "full_sphere_explode", "floor_hold_explode", "rear_hold_split",
+    "full_sphere_cannon", "floor_forward_cannon", "dome_sweep_3d",
+    "floor_forward_sweep", "forward_rear_arc", "cross_3d",
+    "volumetric_orbit", "volumetric_figure_8", "energy_scatter", "fan_3d",
+})
+KNOWN_MOTIONS = LEGACY_KNOWN_MOTIONS | FULL_SPHERE_V3_PRODUCTION_MOTIONS
 KNOWN_PALETTES = frozenset({
     "deep_blue_white", "cobalt_amber", "amber_teal", "rose_mint", "teal_orange",
     "magenta_cyan", "ice_fire", "violet_lime", "ruby_lime", "purple_gold",
     "pink_blue", "blue_amber",
 })
 KNOWN_PULSES = frozenset({"breathe", "soft_pulse", "strong_pulse", "lift", "hit"})
-KNOWN_WASHES = frozenset({"center_glow_blue", "blue_white_split", "center_out_build", "white_pixel_hits"})
+KNOWN_WASHES = frozenset({
+    "center_glow_blue", "blue_white_split", "center_out_build", "white_pixel_hits",
+    "wash_chase_forward", "wash_chase_reverse", "wash_bounce", "wash_center_out",
+    "wash_outside_in", "wash_alternating_halves", "wash_zone_alternate",
+    "wash_wave_forward", "wash_wave_reverse", "wash_ripple", "wash_color_wipe",
+    "wash_zone_hits", "wash_build_fill", "wash_drop_explosion", "wash_mirror_chase",
+    "wash_opposing_wave", "wash_cannon", "wash_call_response", "wash_cross_ripple",
+})
 PALETTE_RELATIONSHIPS = frozenset({
     "analogous", "complementary", "split_complementary", "monochromatic",
     "mono", "adjacent_hue", "two_color_split", "complementary_bright",

@@ -600,13 +600,27 @@ private struct LiveSafetyAndPhysicalCard: View {
 struct PreviewComposerWorkspaceView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            PanelSurface(title: "Preview / Composer", compact: true) {
-                Text("Preview controls and the fixture map are non-authoritative. Production remains baseline until an explicit future safety decision.")
+            PanelSurface(title: "Stage Map", compact: true) {
+                Text("Venue layout stays preview-only. Explicit Physical Aim and Move controls can lease bounded Pan/Tilt when DMX safety gates pass.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(BeatBeamPalette.secondaryText)
+            }
+            MapWorkspaceView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+struct AutoShowWorkspaceView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            PanelSurface(title: "Auto Show", compact: true) {
+                Text("Musical style, Preview Composer and Audience PAN settings live here. Stage Map and fixture calibration stay separate.")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(BeatBeamPalette.secondaryText)
             }
             AutoShowControlView()
-            MapWorkspaceView()
         }
     }
 }

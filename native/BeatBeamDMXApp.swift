@@ -111,6 +111,7 @@ let backendLogURL = FileManager.default.temporaryDirectory.appendingPathComponen
 private let stageMapAspectRatio: CGFloat = 16.0 / 9.0
 private let requiredBackendSchemaVersion = 4
 private let defaultBackendOscPort = beatBeamBackendOscPort
+private let stageMapInspectorWidthDefaultsKey = "BeatBeamDMX.stageMap.inspectorWidth"
 
 private func defaultRekordboxBridgeScriptPath() -> String {
     let fallback = (URL(fileURLWithPath: NSHomeDirectory()) as URL)
@@ -210,7 +211,11 @@ enum StageWorld {
     static let maxY: Double = 900
     static let minZ: Double = 0
     static let maxZ: Double = 450
-    static let gridStepCm: Double = 50
+    /// Projection storage remains centimetres for backward-compatible local
+    /// UserDefaults, but every authored/public coordinate is metres.
+    static let majorGridStepCm: Double = 100
+    static let minorGridStepCm: Double = 25
+    static let dragSnapCm: Double = 25
     static let beamMaxDistanceCm: Double = 700
     static let movingHeadBeamDistanceCm: Double = 350
 }
@@ -667,12 +672,17 @@ struct DmxState: Decodable {
     let lastSent: Double?
     let activeSlot: String
     let blackoutActive: Bool
+    let manualSmoke: ManualSmokeState?
     let autoShow: AutoShowState
     let slotOrder: [String]
     let slots: [String: SlotState]
     let slotRanges: [String: SlotRange]
     let slotCapabilities: [String: SlotCapabilities]
     let slotPreviews: [String: SlotPreview]
+    let renderedMotion: [String: RenderedMotionState]
+    let venueSpace: VenueSpaceState?
+    let venueTargetTest: VenueTargetTestAuthorityState?
+    let movementLab: MovementLabState?
     let conflicts: [ChannelConflict]
     let values: [String: Int]
     let developerVirtualdjBeatPulsePreview: VirtualDjBeatPulsePreviewState?
@@ -689,12 +699,17 @@ struct DmxState: Decodable {
         case lastSent
         case activeSlot
         case blackoutActive
+        case manualSmoke
         case autoShow
         case slotOrder
         case slots
         case slotRanges
         case slotCapabilities
         case slotPreviews
+        case renderedMotion
+        case venueSpace
+        case venueTargetTest
+        case movementLab
         case conflicts
         case values
         case developerVirtualdjBeatPulsePreview
@@ -713,12 +728,17 @@ struct DmxState: Decodable {
         lastSent = try container.decodeIfPresent(Double.self, forKey: .lastSent)
         activeSlot = try container.decode(String.self, forKey: .activeSlot)
         blackoutActive = try container.decode(Bool.self, forKey: .blackoutActive)
+        manualSmoke = try container.decodeIfPresent(ManualSmokeState.self, forKey: .manualSmoke)
         autoShow = try container.decodeIfPresent(AutoShowState.self, forKey: .autoShow) ?? .disabled
         slotOrder = try container.decode([String].self, forKey: .slotOrder)
         slots = try container.decode([String: SlotState].self, forKey: .slots)
         slotRanges = try container.decode([String: SlotRange].self, forKey: .slotRanges)
         slotCapabilities = try container.decode([String: SlotCapabilities].self, forKey: .slotCapabilities)
         slotPreviews = try container.decodeIfPresent([String: SlotPreview].self, forKey: .slotPreviews) ?? [:]
+        renderedMotion = try container.decodeIfPresent([String: RenderedMotionState].self, forKey: .renderedMotion) ?? [:]
+        venueSpace = try container.decodeIfPresent(VenueSpaceState.self, forKey: .venueSpace)
+        venueTargetTest = try container.decodeIfPresent(VenueTargetTestAuthorityState.self, forKey: .venueTargetTest)
+        movementLab = try container.decodeIfPresent(MovementLabState.self, forKey: .movementLab)
         conflicts = try container.decode([ChannelConflict].self, forKey: .conflicts)
         values = try container.decode([String: Int].self, forKey: .values)
         developerVirtualdjBeatPulsePreview = try container.decodeIfPresent(
@@ -739,6 +759,384 @@ struct DmxState: Decodable {
         )
         previewPulseTest = try container.decodeIfPresent(PreviewPulseTestState.self, forKey: .previewPulseTest)
     }
+}
+
+struct ManualSmokeState: Decodable, Equatable {
+    let supported: Bool
+    let reasonIfUnavailable: String?
+    let active: Bool
+    let outputPercent: Int
+    let resolvedDmxValue: Int
+    let fixtureSlotIds: [String]
+}
+
+struct VenuePointState: Codable {
+    let x: Double
+    let y: Double
+    let z: Double?
+
+    init(x: Double, y: Double, z: Double? = nil) {
+        self.x = x
+        self.y = y
+        self.z = z
+    }
+}
+
+struct VenuePhysicalPointState: Codable {
+    let x: Double
+    let y: Double
+    let z: Double
+}
+
+struct VenueVectorState: Codable {
+    let x: Double
+    let y: Double
+    let z: Double
+}
+
+struct VenueTargetState: Decodable, Identifiable {
+    let id: String
+    let zone: String?
+    let position: String?
+    let point: VenuePointState
+    let physicalPointM: VenuePhysicalPointState?
+    let missingGeometry: [String]?
+}
+
+struct VenueGeometryState: Decodable {
+    let venueWidthM: Double?
+    let venueForwardDepthM: Double?
+    let venueRearDepthM: Double?
+    let audienceTargetHeightM: Double?
+    let ceilingHeightM: Double?
+    let status: String
+    let missingGeometry: [String]
+}
+
+struct VenueTargetVerticalLayerState: Decodable, Identifiable {
+    let id: String
+    let available: Bool
+    let reason: String?
+}
+
+struct VenueResolverState: Decodable {
+    let status: String
+    let missingCalibration: [String]
+}
+
+struct VenueFixtureCapabilitiesState: Decodable {
+    let pan: Bool
+    let panFine: Bool
+    let tilt: Bool
+    let tiltFine: Bool
+    let panRangeDegrees: Double?
+    let tiltRangeDegrees: Double?
+    let physicalTiltMinDeg: Double?
+    let physicalTiltCenterDeg: Double?
+    let physicalTiltMaxDeg: Double?
+    let physicalTiltLimitsSource: String?
+    let panZeroReference: String
+    let tiltZeroReference: String
+}
+
+struct VenuePredictedOutputState: Decodable {
+    let pan: Int
+    let tilt: Int
+    let panFine: Int?
+    let tiltFine: Int?
+}
+
+struct VenueTargetResolutionState: Decodable {
+    let status: String
+    let reason: String?
+    let panDegrees: Double?
+    let tiltDegrees: Double?
+    let pan: Int?
+    let tilt: Int?
+    let fixtureXyzM: VenuePhysicalPointState?
+    let targetXyzM: VenuePhysicalPointState?
+    let targetVectorM: VenueVectorState?
+    let horizontalDistanceM: Double?
+    let verticalDeltaM: Double?
+    let directDistanceM: Double?
+    let predictedOutput: VenuePredictedOutputState?
+    let mappingSource: String?
+    let desiredWorldAzimuthDegrees: Double?
+    let desiredWorldElevationDegrees: Double?
+    let chosenPanRaw: Int?
+    let chosenTiltRaw: Int?
+    let predictedPhysicalAzimuthDegrees: Double?
+    let predictedPhysicalElevationDegrees: Double?
+}
+
+struct VenueTargetFixtureResultState: Decodable, Identifiable {
+    var id: String { slotID }
+    let slotID: String
+    let label: String
+    let classification: String
+    let resolverStatus: String
+    let resolution: VenueTargetResolutionState
+
+    private enum CodingKeys: String, CodingKey {
+        case slotID = "slotId"
+        case label
+        case classification
+        case resolverStatus
+        case resolution
+    }
+}
+
+struct VenueTargetResultSetState: Decodable {
+    let target: String
+    let verticalLayer: String?
+    let targetPoint: VenuePointState
+    let candidateCount: Int
+    let targetedCount: Int
+    let skippedCount: Int
+    let rendererHealthy: Bool
+    let dmxConnected: Bool
+    let physicalReady: Bool
+    let results: [VenueTargetFixtureResultState]
+}
+
+struct VenueTargetTestAuthorityState: Decodable {
+    let status: String
+    let active: Bool
+    let scope: String
+    let mode: String?
+    let axis: String?
+    let sampleIndex: Int?
+    let sampleRaw: Int?
+    let selectedFixtureID: String?
+    let target: String?
+    let verticalLayer: String?
+    let leaseRemainingSeconds: Double?
+    let participatingFixtureIDs: [String]?
+    let resultSet: VenueTargetResultSetState?
+    let renderedOutputs: [String: VenuePredictedOutputState]?
+    let theoreticalOutput: VenuePredictedOutputState?
+    let selectedResolution: VenueTargetResolutionState?
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case active
+        case scope
+        case mode
+        case axis
+        case sampleIndex
+        case sampleRaw
+        case selectedFixtureID = "selectedFixtureId"
+        case target
+        case verticalLayer
+        case leaseRemainingSeconds
+        case participatingFixtureIDs = "participatingFixtureIds"
+        case resultSet
+        case renderedOutputs
+        case theoreticalOutput
+        case selectedResolution
+    }
+}
+
+struct MovementLabState: Decodable {
+    let status: String
+    let active: Bool
+    let engine: String
+    let effectID: String?
+    let section: String?
+    let variation: Int?
+    let bpm: Double?
+    let route: String?
+    let dmxConnected: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case status, active, engine, section, variation, bpm, route
+        case effectID = "effectId"
+        case dmxConnected
+    }
+}
+
+struct KinematicAxisModelState: Decodable {
+    let slopeRawPerDegree: Double
+    let interceptRaw: Double
+    let maximumAbsoluteResidualRaw: Double
+    let rmsResidualRaw: Double
+    let inputSpreadDegrees: Double
+    let rawMax: Int?
+    let branchReferenceRaw: Int?
+}
+
+struct KinematicModelState: Decodable {
+    let status: String
+    let reason: String?
+    let model: String?
+    let pan: KinematicAxisModelState?
+    let tilt: KinematicAxisModelState?
+}
+
+struct KinematicAnchorState: Decodable {
+    let target: String
+    let desiredPanDegrees: Double
+    let desiredTiltDegrees: Double
+    let actualPanRaw: Int
+    let actualTiltRaw: Int
+    let actualOutput: VenuePredictedOutputState
+}
+
+struct KinematicValidationState: Decodable {
+    let target: String
+    let result: String?
+}
+
+struct KinematicCalibrationState: Decodable {
+    let status: String
+    let reason: String?
+    let anchorCount: Int
+    let requiredAnchorCount: Int
+    let requiredAnchors: [String]?
+    let missingAnchors: [String]?
+    let anchors: [String: KinematicAnchorState]?
+    let model: KinematicModelState?
+    let validation: KinematicValidationState?
+}
+
+struct AxisMappingV2SampleState: Decodable {
+    let index: Int
+    let raw: Int
+    let coarse: Int?
+    let fine: Int?
+    let normalizedFraction: Double?
+    let measuredAzimuthDegrees: Double?
+    let measuredElevationDegrees: Double?
+    let measuredTiltPlaneDegrees: Double?
+}
+
+struct AxisMappingV2PointState: Decodable {
+    let raw: Int
+    let physicalDegrees: Double
+    let index: Int
+}
+
+struct AxisMappingV2AxisModelState: Decodable {
+    let status: String?
+    let direction: String?
+    let coverageDegrees: Double?
+    let points: [AxisMappingV2PointState]?
+}
+
+struct AxisMappingV2ModelState: Decodable {
+    let status: String
+    let reason: String?
+    let model: String?
+    let pan: AxisMappingV2AxisModelState?
+    let tilt: AxisMappingV2AxisModelState?
+}
+
+struct AxisMappingV2ValidationState: Decodable {
+    let target: String
+    let result: String
+    let desiredWorldAzimuthDegrees: Double?
+    let desiredWorldElevationDegrees: Double?
+    let chosenPanRaw: Int?
+    let chosenTiltRaw: Int?
+}
+
+struct AxisMappingV2State: Decodable {
+    let status: String
+    let active: Bool
+    let movementMappingAuthority: String?
+    let panSampleCount: Int
+    let panRequiredCount: Int
+    let tiltSampleCount: Int
+    let tiltRequiredCount: Int
+    let panSamplePositions: [Int]?
+    let tiltSamplePositions: [Int]?
+    let panSamples: [String: AxisMappingV2SampleState]?
+    let tiltSamples: [String: AxisMappingV2SampleState]?
+    let legacyTiltSamples: [String: AxisMappingV2SampleState]?
+    let legacyTiltDirectionReviewRequired: Bool?
+    let model: AxisMappingV2ModelState?
+    let validations: [String: AxisMappingV2ValidationState]?
+    let requiredValidationTargets: [String]?
+    let validationStale: Bool?
+    let legacyPhysicalAimStatus: String?
+    let tiltSweepReferencePanRaw: Int?
+    let panSweepReferenceTiltPlaneDegrees: Double?
+    let legacyPanSweepReferenceElevationDegrees: Double?
+    let panSweepReferenceTiltRaw: Int?
+    let panSamplesReviewRequired: Bool?
+    let workflowPhase: String?
+    let workflowSampleIndex: Int?
+    let workflowSavedCount: Int?
+    let workflowMoveStatus: String?
+    let workflowMoveError: String?
+    let panStartAllowed: Bool?
+    let tiltStartAllowed: Bool?
+    let panSweepTiltPlaneOptions: [Double]?
+    let defaultPanSweepTiltPlaneDegrees: Double?
+}
+
+struct VenueTargetTestActionResponse: Decodable {
+    let accepted: Bool
+    let status: String
+    let reason: String?
+    let authority: VenueTargetTestAuthorityState?
+    let resultSet: VenueTargetResultSetState?
+}
+
+struct VenueFixtureCalibrationState: Decodable, Identifiable {
+    var id: String { slotID }
+    let slotID: String
+    let label: String
+    let status: String
+    let missingCalibration: [String]
+    let positionM: VenuePhysicalPointState?
+    let positionSource: String?
+    let position: VenuePointState?
+    let mountingHeightM: Double?
+    let physicalForward: VenueVectorState?
+    let physicalUp: VenueVectorState?
+    let derivedRight: VenueVectorState?
+    let basisReason: String?
+    let panCorrectionDegrees: Double
+    let tiltCorrectionDegrees: Double
+    let capabilities: VenueFixtureCapabilitiesState
+    let audienceCenterTest: VenueTargetResolutionState
+    let kinematicCalibration: KinematicCalibrationState?
+    let axisMappingV2: AxisMappingV2State?
+
+    private enum CodingKeys: String, CodingKey {
+        case slotID = "slotId"
+        case label
+        case status
+        case missingCalibration
+        case positionM
+        case positionSource
+        case position
+        case mountingHeightM
+        case physicalForward
+        case physicalUp
+        case derivedRight
+        case basisReason
+        case panCorrectionDegrees
+        case tiltCorrectionDegrees
+        case capabilities
+        case audienceCenterTest
+        case kinematicCalibration
+        case axisMappingV2
+    }
+}
+
+struct VenueSpaceState: Decodable {
+    let version: Int
+    let viewpoint: String
+    let origin: VenuePointState
+    let venueGeometry: VenueGeometryState?
+    let verticalLayers: [VenueTargetVerticalLayerState]?
+    let defaultVerticalLayer: String?
+    let targets: [VenueTargetState]
+    let resolver: VenueResolverState
+    let fixtures: [VenueFixtureCalibrationState]?
+    let audienceEffectMigration: String
 }
 
 struct ProductionShowSelectorState: Decodable {
@@ -1075,13 +1473,30 @@ private let frontProjectionMirrorDefaultsKey = defaultsKey("frontProjectionMirro
 private let topProjectionRotationDefaultsKey = defaultsKey("topProjectionRotationQuarterTurns")
 private let mapProjectionShow3DDefaultsKey = defaultsKey("mapProjectionShow3D")
 private let mapProjection2DZoomDefaultsKey = defaultsKey("mapProjection2DZoom")
+private let mapProjectionTopCenterXDefaultsKey = defaultsKey("mapProjectionTopCenterX")
+private let mapProjectionTopCenterYDefaultsKey = defaultsKey("mapProjectionTopCenterY")
+private let mapProjectionFrontCenterXDefaultsKey = defaultsKey("mapProjectionFrontCenterX")
+private let mapProjectionFrontCenterZDefaultsKey = defaultsKey("mapProjectionFrontCenterZ")
+private let mapProjectionBackCenterXDefaultsKey = defaultsKey("mapProjectionBackCenterX")
+private let mapProjectionBackCenterZDefaultsKey = defaultsKey("mapProjectionBackCenterZ")
+private let mapProjectionSideCenterYDefaultsKey = defaultsKey("mapProjectionSideCenterY")
+private let mapProjectionSideCenterZDefaultsKey = defaultsKey("mapProjectionSideCenterZ")
+private let mapFixtureSnapEnabledDefaultsKey = defaultsKey("fixtureSnapEnabled")
 
 private func normalizedQuarterTurns(_ value: Int) -> Int {
     ((value % 4) + 4) % 4
 }
 
 private func clampedProjection2DZoom(_ value: Double) -> Double {
-    min(max(value, 0.55), 1.80)
+    min(max(value, 0.75), 4.00)
+}
+
+/// Render identity for the metric 2D world. The revision is changed only by
+/// view/camera mutations; it is deliberately independent from all venue,
+/// fixture, calibration and DMX state.
+struct MetricStageMapViewportRenderKey: Hashable {
+    let zoom: Double
+    let cameraRevision: Int
 }
 
 private func projection2DZoomValue() -> Double {
@@ -1092,6 +1507,9 @@ private func projection2DZoomValue() -> Double {
     return clampedProjection2DZoom(stored)
 }
 
+/// This is deliberately a view-only transform. Its multiplier is applied once,
+/// after the unzoomed metric fit scale has been calculated, so it can never be
+/// cancelled by a second fit-to-viewport pass.
 private func projectionViewportTransform(_ point: CGPoint, zoom: Double = projection2DZoomValue()) -> CGPoint {
     let safeZoom = clampedProjection2DZoom(zoom)
     return CGPoint(
@@ -1134,6 +1552,88 @@ private func unrotatedTopProjectionPoint(_ point: CGPoint, quarterTurns: Int) ->
     }
 }
 
+/// Metric orthographic viewport. `screenHorizontal` and `screenDown` are in
+/// centimetres solely for the legacy local cache; both axes share one physical
+/// pixels-per-metre scale before zoom is applied.
+private func metricProjectionPoint(
+    screenHorizontal: Double,
+    horizontalBounds: ClosedRange<Double>,
+    screenDown: Double,
+    verticalBounds: ClosedRange<Double>,
+    cameraCenter: (horizontal: Double, down: Double)? = nil,
+    zoom: Double = projection2DZoomValue()
+) -> CGPoint {
+    let aspect = Double(stageMapAspectRatio)
+    let horizontalSpan = max(0.0001, horizontalBounds.upperBound - horizontalBounds.lowerBound)
+    let verticalSpan = max(0.0001, verticalBounds.upperBound - verticalBounds.lowerBound)
+    let unitsPerCanvasHeight = min(aspect / horizontalSpan, 1.0 / verticalSpan)
+    // Base scale is derived solely from viewport aspect and the unzoomed world
+    // bounds. `zoom` is applied only by projectionViewportTransform below.
+    let horizontalCenter = cameraCenter?.horizontal ?? (horizontalBounds.lowerBound + horizontalBounds.upperBound) * 0.5
+    let verticalCenter = cameraCenter?.down ?? (verticalBounds.lowerBound + verticalBounds.upperBound) * 0.5
+    let raw = CGPoint(
+        x: 0.5 + (screenHorizontal - horizontalCenter) * unitsPerCanvasHeight / aspect,
+        y: 0.5 + (screenDown - verticalCenter) * unitsPerCanvasHeight
+    )
+    return projectionViewportTransform(raw, zoom: zoom)
+}
+
+private func metricProjectionCoordinates(
+    _ point: CGPoint,
+    horizontalBounds: ClosedRange<Double>,
+    verticalBounds: ClosedRange<Double>,
+    cameraCenter: (horizontal: Double, down: Double)? = nil,
+    zoom: Double = projection2DZoomValue()
+) -> (horizontal: Double, down: Double) {
+    let raw = projectionViewportInverse(point, zoom: zoom)
+    let aspect = Double(stageMapAspectRatio)
+    let horizontalSpan = max(0.0001, horizontalBounds.upperBound - horizontalBounds.lowerBound)
+    let verticalSpan = max(0.0001, verticalBounds.upperBound - verticalBounds.lowerBound)
+    let unitsPerCanvasHeight = min(aspect / horizontalSpan, 1.0 / verticalSpan)
+    let horizontalCenter = cameraCenter?.horizontal ?? (horizontalBounds.lowerBound + horizontalBounds.upperBound) * 0.5
+    let verticalCenter = cameraCenter?.down ?? (verticalBounds.lowerBound + verticalBounds.upperBound) * 0.5
+    return (
+        horizontalCenter + (raw.x - 0.5) * aspect / unitsPerCanvasHeight,
+        verticalCenter + (raw.y - 0.5) / unitsPerCanvasHeight
+    )
+}
+
+private func metricWorldProjectedPoint(
+    _ world: SlotWorldPosition,
+    projection: StageProjection,
+    frontMirrored: Bool,
+    topQuarterTurns: Int,
+    viewportCenter: SlotWorldPosition? = nil
+) -> CGPoint {
+    let center = projectionCameraScreenCenter(
+        projection: projection,
+        worldCenter: viewportCenter ?? projectionViewportCenter(for: projection),
+        frontMirrored: frontMirrored,
+        topQuarterTurns: topQuarterTurns
+    )
+    switch projection {
+    case .top:
+        switch normalizedQuarterTurns(topQuarterTurns) {
+        case 1:
+            return metricProjectionPoint(screenHorizontal: -world.y, horizontalBounds: -StageWorld.maxY ... -StageWorld.minY, screenDown: -world.x, verticalBounds: -StageWorld.maxX ... -StageWorld.minX, cameraCenter: center)
+        case 2:
+            return metricProjectionPoint(screenHorizontal: world.x, horizontalBounds: StageWorld.minX ... StageWorld.maxX, screenDown: -world.y, verticalBounds: -StageWorld.maxY ... -StageWorld.minY, cameraCenter: center)
+        case 3:
+            return metricProjectionPoint(screenHorizontal: world.y, horizontalBounds: StageWorld.minY ... StageWorld.maxY, screenDown: world.x, verticalBounds: StageWorld.minX ... StageWorld.maxX, cameraCenter: center)
+        default:
+            return metricProjectionPoint(screenHorizontal: -world.x, horizontalBounds: -StageWorld.maxX ... -StageWorld.minX, screenDown: world.y, verticalBounds: StageWorld.minY ... StageWorld.maxY, cameraCenter: center)
+        }
+    case .front:
+        let horizontal = frontMirrored ? -world.x : world.x
+        let bounds = frontMirrored ? -StageWorld.maxX ... -StageWorld.minX : StageWorld.minX ... StageWorld.maxX
+        return metricProjectionPoint(screenHorizontal: horizontal, horizontalBounds: bounds, screenDown: -world.z, verticalBounds: -StageWorld.maxZ ... -StageWorld.minZ, cameraCenter: center)
+    case .back:
+        return metricProjectionPoint(screenHorizontal: -world.x, horizontalBounds: -StageWorld.maxX ... -StageWorld.minX, screenDown: -world.z, verticalBounds: -StageWorld.maxZ ... -StageWorld.minZ, cameraCenter: center)
+    case .side:
+        return metricProjectionPoint(screenHorizontal: world.y, horizontalBounds: StageWorld.minY ... StageWorld.maxY, screenDown: -world.z, verticalBounds: -StageWorld.maxZ ... -StageWorld.minZ, cameraCenter: center)
+    }
+}
+
 enum StageProjection: String, CaseIterable, Identifiable {
     case top
     case front
@@ -1169,6 +1669,158 @@ enum StageProjection: String, CaseIterable, Identifiable {
     }
 }
 
+/// Persistent camera centers are metres-in-cache (centimetres) and are strictly
+/// view state. They never participate in venue/calibration payloads.
+// The stage map can render many world-space elements for one pointer update.
+// Keep its view-only camera in memory so those render paths never repeatedly
+// query UserDefaults. Persistence is explicitly performed at the end of pan.
+private var inMemoryProjectionViewportCenters: [StageProjection: SlotWorldPosition] = [:]
+
+private func projectionViewportCenter(for projection: StageProjection) -> SlotWorldPosition {
+    if let cached = inMemoryProjectionViewportCenters[projection] {
+        return cached
+    }
+    let defaults = UserDefaults.standard
+    func stored(_ key: String, fallback: Double) -> Double {
+        (defaults.object(forKey: key) as? Double) ?? fallback
+    }
+    let center: SlotWorldPosition
+    switch projection {
+    case .top:
+        center = SlotWorldPosition(
+            x: stored(mapProjectionTopCenterXDefaultsKey, fallback: 0),
+            y: stored(mapProjectionTopCenterYDefaultsKey, fallback: (StageWorld.minY + StageWorld.maxY) * 0.5),
+            z: 0
+        )
+    case .front:
+        center = SlotWorldPosition(
+            x: stored(mapProjectionFrontCenterXDefaultsKey, fallback: 0),
+            y: 0,
+            z: stored(mapProjectionFrontCenterZDefaultsKey, fallback: (StageWorld.minZ + StageWorld.maxZ) * 0.5)
+        )
+    case .back:
+        center = SlotWorldPosition(
+            x: stored(mapProjectionBackCenterXDefaultsKey, fallback: 0),
+            y: 0,
+            z: stored(mapProjectionBackCenterZDefaultsKey, fallback: (StageWorld.minZ + StageWorld.maxZ) * 0.5)
+        )
+    case .side:
+        center = SlotWorldPosition(
+            x: 0,
+            y: stored(mapProjectionSideCenterYDefaultsKey, fallback: (StageWorld.minY + StageWorld.maxY) * 0.5),
+            z: stored(mapProjectionSideCenterZDefaultsKey, fallback: (StageWorld.minZ + StageWorld.maxZ) * 0.5)
+        )
+    }
+    inMemoryProjectionViewportCenters[projection] = center
+    return center
+}
+
+private func saveProjectionViewportCenter(_ center: SlotWorldPosition, for projection: StageProjection) {
+    inMemoryProjectionViewportCenters[projection] = center
+    let defaults = UserDefaults.standard
+    switch projection {
+    case .top:
+        defaults.set(center.x, forKey: mapProjectionTopCenterXDefaultsKey)
+        defaults.set(center.y, forKey: mapProjectionTopCenterYDefaultsKey)
+    case .front:
+        defaults.set(center.x, forKey: mapProjectionFrontCenterXDefaultsKey)
+        defaults.set(center.z, forKey: mapProjectionFrontCenterZDefaultsKey)
+    case .back:
+        defaults.set(center.x, forKey: mapProjectionBackCenterXDefaultsKey)
+        defaults.set(center.z, forKey: mapProjectionBackCenterZDefaultsKey)
+    case .side:
+        defaults.set(center.y, forKey: mapProjectionSideCenterYDefaultsKey)
+        defaults.set(center.z, forKey: mapProjectionSideCenterZDefaultsKey)
+    }
+}
+
+private func resetProjectionViewportCenters() {
+    inMemoryProjectionViewportCenters.removeAll()
+    for projection in StageProjection.allCases {
+        let defaults = UserDefaults.standard
+        switch projection {
+        case .top:
+            defaults.removeObject(forKey: mapProjectionTopCenterXDefaultsKey)
+            defaults.removeObject(forKey: mapProjectionTopCenterYDefaultsKey)
+        case .front:
+            defaults.removeObject(forKey: mapProjectionFrontCenterXDefaultsKey)
+            defaults.removeObject(forKey: mapProjectionFrontCenterZDefaultsKey)
+        case .back:
+            defaults.removeObject(forKey: mapProjectionBackCenterXDefaultsKey)
+            defaults.removeObject(forKey: mapProjectionBackCenterZDefaultsKey)
+        case .side:
+            defaults.removeObject(forKey: mapProjectionSideCenterYDefaultsKey)
+            defaults.removeObject(forKey: mapProjectionSideCenterZDefaultsKey)
+        }
+    }
+}
+
+private func projectionCameraScreenCenter(
+    projection: StageProjection,
+    worldCenter: SlotWorldPosition,
+    frontMirrored: Bool,
+    topQuarterTurns: Int
+) -> (horizontal: Double, down: Double) {
+    switch projection {
+    case .top:
+        switch normalizedQuarterTurns(topQuarterTurns) {
+        case 1: return (-worldCenter.y, -worldCenter.x)
+        case 2: return (worldCenter.x, -worldCenter.y)
+        case 3: return (worldCenter.y, worldCenter.x)
+        default: return (-worldCenter.x, worldCenter.y)
+        }
+    case .front:
+        return (frontMirrored ? -worldCenter.x : worldCenter.x, -worldCenter.z)
+    case .back:
+        return (-worldCenter.x, -worldCenter.z)
+    case .side:
+        return (worldCenter.y, -worldCenter.z)
+    }
+}
+
+private func metricWorldPosition(
+    from projectedPoint: CGPoint,
+    projection: StageProjection,
+    frontMirrored: Bool,
+    topQuarterTurns: Int,
+    viewportCenter: SlotWorldPosition? = nil
+) -> SlotWorldPosition {
+    let center = viewportCenter ?? projectionViewportCenter(for: projection)
+    let screenCenter = projectionCameraScreenCenter(
+        projection: projection,
+        worldCenter: center,
+        frontMirrored: frontMirrored,
+        topQuarterTurns: topQuarterTurns
+    )
+    switch projection {
+    case .top:
+        switch normalizedQuarterTurns(topQuarterTurns) {
+        case 1:
+            let value = metricProjectionCoordinates(projectedPoint, horizontalBounds: -StageWorld.maxY ... -StageWorld.minY, verticalBounds: -StageWorld.maxX ... -StageWorld.minX, cameraCenter: screenCenter)
+            return SlotWorldPosition(x: -value.down, y: -value.horizontal, z: center.z)
+        case 2:
+            let value = metricProjectionCoordinates(projectedPoint, horizontalBounds: StageWorld.minX ... StageWorld.maxX, verticalBounds: -StageWorld.maxY ... -StageWorld.minY, cameraCenter: screenCenter)
+            return SlotWorldPosition(x: value.horizontal, y: -value.down, z: center.z)
+        case 3:
+            let value = metricProjectionCoordinates(projectedPoint, horizontalBounds: StageWorld.minY ... StageWorld.maxY, verticalBounds: StageWorld.minX ... StageWorld.maxX, cameraCenter: screenCenter)
+            return SlotWorldPosition(x: value.down, y: value.horizontal, z: center.z)
+        default:
+            let value = metricProjectionCoordinates(projectedPoint, horizontalBounds: -StageWorld.maxX ... -StageWorld.minX, verticalBounds: StageWorld.minY ... StageWorld.maxY, cameraCenter: screenCenter)
+            return SlotWorldPosition(x: -value.horizontal, y: value.down, z: center.z)
+        }
+    case .front:
+        let bounds = frontMirrored ? -StageWorld.maxX ... -StageWorld.minX : StageWorld.minX ... StageWorld.maxX
+        let value = metricProjectionCoordinates(projectedPoint, horizontalBounds: bounds, verticalBounds: -StageWorld.maxZ ... -StageWorld.minZ, cameraCenter: screenCenter)
+        return SlotWorldPosition(x: frontMirrored ? -value.horizontal : value.horizontal, y: center.y, z: -value.down)
+    case .back:
+        let value = metricProjectionCoordinates(projectedPoint, horizontalBounds: -StageWorld.maxX ... -StageWorld.minX, verticalBounds: -StageWorld.maxZ ... -StageWorld.minZ, cameraCenter: screenCenter)
+        return SlotWorldPosition(x: -value.horizontal, y: center.y, z: -value.down)
+    case .side:
+        let value = metricProjectionCoordinates(projectedPoint, horizontalBounds: StageWorld.minY ... StageWorld.maxY, verticalBounds: -StageWorld.maxZ ... -StageWorld.minZ, cameraCenter: screenCenter)
+        return SlotWorldPosition(x: center.x, y: value.horizontal, z: -value.down)
+    }
+}
+
 struct LegacyProjectionPoint: Codable {
     let x: Double
     let y: Double
@@ -1184,6 +1836,49 @@ struct StageMotionState {
     let estimatedSpeedDegreesPerSecond: Double
     let trail: [StageBeamPose]
     let updatedAt: TimeInterval
+    /// Non-nil only when the backend has decoded the post-merge renderer frame
+    /// through the fixture calibration. Live Stage Map must display this vector
+    /// directly and must not apply local panFlip/heading logic to it.
+    let worldDirection: VenueVectorState?
+}
+
+struct RenderedMotionState: Decodable {
+    let slotId: String
+    let fixtureId: String
+    let label: String
+    let source: String
+    let supported: Bool
+    let available: Bool
+    let status: String
+    let pan: Int?
+    let panFine: Int?
+    let tilt: Int?
+    let tiltFine: Int?
+    let pan16bit: Int?
+    let tilt16bit: Int?
+    let physicalPanDegrees: Double?
+    let physicalTiltDegrees: Double?
+    let physicalTiltPlaneDegrees: Double?
+    let commandedPanDegrees: Double?
+    let commandedTiltDegrees: Double?
+    let worldDirection: VenueVectorState?
+    let fixturePositionM: VenuePhysicalPointState?
+    let calibrationStatus: String?
+}
+
+/// A semantic venue-target preview uses the same canonical target point as the
+/// resolver, rather than attempting to replay its fixture-local pan/tilt in
+/// the generic stage-map orientation model.  This keeps the existing fixture
+/// beam as the sole visual while ensuring its endpoint really is the selected
+/// audience target in every projection.
+struct VenueTargetPreviewVisual {
+    let startEndpoint: SlotWorldPosition
+    let endpoint: SlotWorldPosition
+    let progress: Double
+
+    var easedProgress: Double {
+        progress * progress * (3.0 - 2.0 * progress)
+    }
 }
 
 struct AutoShowState: Decodable {
@@ -1216,6 +1911,7 @@ struct AutoShowState: Decodable {
     let overrideActive: Bool
     let overrideColor: String
     let overrideColorLabel: String
+    let overrideColorCombo: String
     let overrideManualStrobe: Bool
     let overrideAudienceSweep: Bool
     let overrideAllOn: Bool
@@ -1256,6 +1952,7 @@ struct AutoShowState: Decodable {
         case overrideActive
         case overrideColor
         case overrideColorLabel
+        case overrideColorCombo
         case overrideManualStrobe
         case overrideAudienceSweep
         case overrideAllOn
@@ -1297,6 +1994,7 @@ struct AutoShowState: Decodable {
         overrideActive: false,
         overrideColor: "none",
         overrideColorLabel: "Auto",
+        overrideColorCombo: "none",
         overrideManualStrobe: false,
         overrideAudienceSweep: false,
         overrideAllOn: false,
@@ -1338,6 +2036,7 @@ struct AutoShowState: Decodable {
         overrideActive: Bool,
         overrideColor: String,
         overrideColorLabel: String,
+        overrideColorCombo: String,
         overrideManualStrobe: Bool,
         overrideAudienceSweep: Bool,
         overrideAllOn: Bool,
@@ -1377,6 +2076,7 @@ struct AutoShowState: Decodable {
         self.overrideActive = overrideActive
         self.overrideColor = overrideColor
         self.overrideColorLabel = overrideColorLabel
+        self.overrideColorCombo = overrideColorCombo
         self.overrideManualStrobe = overrideManualStrobe
         self.overrideAudienceSweep = overrideAudienceSweep
         self.overrideAllOn = overrideAllOn
@@ -1425,6 +2125,7 @@ struct AutoShowState: Decodable {
             overrideActive: try container.decodeIfPresent(Bool.self, forKey: .overrideActive) ?? fallback.overrideActive,
             overrideColor: try container.decodeIfPresent(String.self, forKey: .overrideColor) ?? fallback.overrideColor,
             overrideColorLabel: try container.decodeIfPresent(String.self, forKey: .overrideColorLabel) ?? fallback.overrideColorLabel,
+            overrideColorCombo: try container.decodeIfPresent(String.self, forKey: .overrideColorCombo) ?? fallback.overrideColorCombo,
             overrideManualStrobe: try container.decodeIfPresent(Bool.self, forKey: .overrideManualStrobe) ?? fallback.overrideManualStrobe,
             overrideAudienceSweep: try container.decodeIfPresent(Bool.self, forKey: .overrideAudienceSweep) ?? fallback.overrideAudienceSweep,
             overrideAllOn: try container.decodeIfPresent(Bool.self, forKey: .overrideAllOn) ?? fallback.overrideAllOn,
@@ -2217,6 +2918,198 @@ struct SlotUpdateRequest: Encodable {
     let slot: SlotUpdateBody
 }
 
+struct VenueCalibrationUpdateRequest: Encodable {
+    let slotID: String
+    let activeSlot: String
+    let slot: VenueCalibrationSlotUpdate
+}
+
+struct VenueCalibrationSlotUpdate: Encodable {
+    let venueCalibration: VenueCalibrationPayload
+}
+
+struct PhysicalTiltLimitsPayload: Encodable {
+    let minDeg: Double
+    let centerDeg: Double
+    let maxDeg: Double
+}
+
+struct VenueCalibrationPayload: Encodable {
+    let version: Int
+    let positionM: VenuePhysicalPointState
+    let position: VenuePointState
+    let mountingHeightM: Double
+    let physicalForward: VenueVectorState
+    let physicalUp: VenueVectorState
+    let panCorrectionDegrees: Double
+    let tiltCorrectionDegrees: Double
+    let physicalTiltLimits: PhysicalTiltLimitsPayload?
+
+    init(
+        version: Int,
+        positionM: VenuePhysicalPointState,
+        position: VenuePointState,
+        mountingHeightM: Double,
+        physicalForward: VenueVectorState,
+        physicalUp: VenueVectorState,
+        panCorrectionDegrees: Double,
+        tiltCorrectionDegrees: Double,
+        physicalTiltLimits: PhysicalTiltLimitsPayload? = nil
+    ) {
+        self.version = version
+        self.positionM = positionM
+        self.position = position
+        self.mountingHeightM = mountingHeightM
+        self.physicalForward = physicalForward
+        self.physicalUp = physicalUp
+        self.panCorrectionDegrees = panCorrectionDegrees
+        self.tiltCorrectionDegrees = tiltCorrectionDegrees
+        self.physicalTiltLimits = physicalTiltLimits
+    }
+}
+
+/// A Stage Map edit owns fixture position only.  It intentionally leaves the
+/// separately calibrated Forward/Up basis and aim mappings intact.
+struct FixturePositionUpdateRequest: Encodable {
+    let activeSlot: String
+    let slots: [String: FixturePositionSlotUpdate]
+}
+
+struct FixturePositionSlotUpdate: Encodable {
+    let venueCalibration: FixturePositionOnlyPayload
+}
+
+struct FixturePositionOnlyPayload: Encodable {
+    let positionM: VenuePhysicalPointState
+}
+
+struct VenueGeometryUpdateRequest: Encodable {
+    let venueGeometry: VenueGeometryUpdatePayload
+}
+
+struct VenueGeometryUpdatePayload: Encodable {
+    let venueWidthM: Double?
+    let venueForwardDepthM: Double?
+    let venueRearDepthM: Double?
+    let audienceTargetHeightM: Double?
+    let ceilingHeightM: Double?
+}
+
+struct VenueTargetTestRequest: Encodable {
+    let slotID: String
+    let venueCalibration: VenueCalibrationPayload
+    let target: String?
+    let verticalLayer: String?
+}
+
+struct VenueTargetGroupRequest: Encodable {
+    let target: String
+    let verticalLayer: String
+}
+
+struct AimCalibrationMoveRequest: Encodable {
+    let slotID: String
+    let target: String
+}
+
+struct AimCalibrationNudgeRequest: Encodable {
+    let axis: String
+    let direction: String
+    let granularity: String
+}
+
+struct AimCalibrationValidationRequest: Encodable {
+    let result: String
+}
+
+struct AimCalibrationResetRequest: Encodable {
+    let slotID: String
+    let confirm: Bool
+}
+
+struct AimCalibrationActionResponse: Decodable {
+    let accepted: Bool
+    let status: String
+    let reason: String?
+    let authority: VenueTargetTestAuthorityState?
+    let aimCalibration: KinematicCalibrationState?
+}
+
+struct AxisMappingV2BeginRequest: Encodable { let slotID: String; let axis: String }
+struct AxisMappingV2ReferencePoseNudgeRequest: Encodable { let slotID: String; let axis: String; let direction: String; let granularity: String }
+struct AxisMappingV2LockTiltReferenceRequest: Encodable { }
+struct AxisMappingV2PanReferenceRequest: Encodable { let slotID: String; let tiltPlaneDegrees: Double }
+struct AxisMappingV2MoveSampleRequest: Encodable { let slotID: String; let axis: String; let index: Int }
+struct AxisMappingV2SaveSampleRequest: Encodable { let axis: String; let measuredDegrees: Double }
+struct AxisMappingV2ValidationMoveRequest: Encodable { let slotID: String; let target: String }
+struct AxisMappingV2ValidationResultRequest: Encodable { let result: String }
+struct AxisMappingV2ActivateRequest: Encodable { let slotID: String }
+struct AxisMappingV2ResetRequest: Encodable { let slotID: String; let confirm: Bool }
+
+struct AxisMappingV2ActionResponse: Decodable {
+    let accepted: Bool
+    let status: String
+    let reason: String?
+    let authority: VenueTargetTestAuthorityState?
+    let axisMappingV2: AxisMappingV2State?
+}
+
+struct MovementLabRequest: Encodable {
+    let effectID: String
+    let section: String
+    let variation: Int
+    let bpm: Double
+}
+
+struct MovementLabResponse: Decodable {
+    let accepted: Bool
+    let reason: String?
+    let movementLab: MovementLabState
+}
+
+struct VenueTargetGroupResponse: Decodable {
+    let target: String
+    let verticalLayer: String?
+    let targetPoint: VenuePointState
+    let candidateCount: Int
+    let targetedCount: Int
+    let skippedCount: Int
+    let rendererHealthy: Bool
+    let dmxConnected: Bool
+    let physicalReady: Bool
+    let results: [VenueTargetFixtureResultState]
+    let physicalCommandSent: Bool
+
+    var resultSet: VenueTargetResultSetState {
+        VenueTargetResultSetState(
+            target: target,
+            verticalLayer: verticalLayer,
+            targetPoint: targetPoint,
+            candidateCount: candidateCount,
+            targetedCount: targetedCount,
+            skippedCount: skippedCount,
+            rendererHealthy: rendererHealthy,
+            dmxConnected: dmxConnected,
+            physicalReady: physicalReady,
+            results: results
+        )
+    }
+}
+
+struct VenueTargetTestResponse: Decodable {
+    let slotID: String
+    let target: String
+    let result: VenueTargetResolutionState
+    let physicalCommandSent: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case slotID = "slotId"
+        case target
+        case result
+        case physicalCommandSent
+    }
+}
+
 struct MultiSlotUpdateRequest: Encodable {
     let activeSlot: String
     let slots: [String: SlotUpdateBody]
@@ -2261,6 +3154,7 @@ struct AutoShowUpdateBody: Encodable {
     let audienceTurnPanMax: Int
     let audienceTiltSplit: Int
     let overrideColor: String
+    let overrideColorCombo: String
     let overrideManualStrobe: Bool
     let overrideAudienceSweep: Bool
     let overrideAllOn: Bool
@@ -2618,7 +3512,51 @@ final class AppModel: ObservableObject {
     @Published var availableFixtures: [FixtureProfile] = []
     @Published var slotEditors: [SlotEditor] = []
     @Published var slotPreviews: [String: SlotPreview] = [:]
+    @Published var manualSmoke: ManualSmokeState?
+    @Published private var manualSmokeReleasedAt: Date?
+    @Published var venueSpace: VenueSpaceState?
+    @Published var fixtureCalibrations: [String: VenueFixtureCalibrationState] = [:]
+    @Published var venueWidthMetersText = ""
+    @Published var venueForwardDepthMetersText = ""
+    @Published var venueRearDepthMetersText = ""
+    @Published var audienceTargetHeightMetersText = ""
+    @Published var ceilingHeightMetersText = ""
+    @Published var venueGeometrySaveInFlight = false
+    @Published var calibrationTestSlotID: String?
+    @Published var audienceCenterTestResults: [String: VenueTargetResolutionState] = [:]
+    @Published var previewVenueTargetResolution: VenueTargetResolutionState?
+    @Published var previewVenueTargetResultSet: VenueTargetResultSetState?
+    @Published var previewVenueTargetResolutions: [String: VenueTargetResolutionState] = [:]
+    @Published var previewVenueTargetSlotID: String?
+    @Published var previewVenueTargetSlotIDs = Set<String>()
+    @Published var previewVenueTargetStartedAt: Date?
+    @Published var previewVenueTargetStartPanDegrees: Double?
+    @Published var previewVenueTargetStartTiltDegrees: Double?
+    @Published var previewVenueTargetStartEndpoint: SlotWorldPosition?
+    @Published var previewVenueTargetStartEndpoints: [String: SlotWorldPosition] = [:]
+    @Published var previewVenueTargetStartPanBySlot: [String: Double] = [:]
+    @Published var previewVenueTargetStartTiltBySlot: [String: Double] = [:]
+    @Published var calibrationTestInFlightSlotID: String?
+    @Published var calibrationSaveInFlight = false
+    @Published var projectionLayoutSaveInFlight = false
+    @Published var selectedVenueTargetZone = "MID"
+    @Published var selectedVenueTargetPosition = "CENTER"
+    @Published var selectedVenueTarget = "AUDIENCE_MID_CENTER"
+    @Published var selectedVenueTargetVerticalLayer = "NORMAL"
+    @Published var venueTargetTestState: VenueTargetTestAuthorityState?
+    @Published var movementLabState: MovementLabState?
+    @Published var movementLabEffectID = "fast_audience_circle"
+    @Published var movementLabSection = "chorus"
+    @Published var movementLabVariation = 0
+    @Published var movementLabInFlight = false
+    @Published var venueTargetTestStatusText = "READY • Select a target, then move when every physical safety gate passes."
+    @Published var venueTargetTestInFlight = false
+    @Published var aimCalibrationGranularity = "FINE"
+    @Published var aimCalibrationInFlight = false
+    @Published var axisMappingV2InFlight = false
+    private var venueTargetLeaseTask: Task<Void, Never>?
     @Published var stageMotionStates: [String: StageMotionState] = [:]
+    private var venueGeometryFieldsInitialized = false
     @Published var dmxSlotOrder: [String] = []
     @Published var dmxSlotRanges: [String: SlotRange] = [:]
     @Published var dmxValues: [Int: Int] = [:]
@@ -2626,13 +3564,31 @@ final class AppModel: ObservableObject {
     @Published var mapAssignments: [String: String] = [:]
     @Published var projectionLayouts: [String: SlotWorldPosition] = [:]
     @Published var projectionLayoutDrafts: [String: SlotWorldPosition] = [:]
+    /// Explicit SwiftUI render dependency for the persistent, view-only
+    /// camera centers. A paused TimelineView does not observe UserDefaults by
+    /// itself, so every camera mutation advances this token.
+    @Published private(set) var metricStageMapViewportRevision = 0
+    /// Global Stage Map editor preference. It is deliberately UI-only and is
+    /// never included in venue geometry or fixture calibration payloads.
+    @Published var fixtureSnapEnabled = true {
+        didSet {
+            UserDefaults.standard.set(fixtureSnapEnabled, forKey: mapFixtureSnapEnabledDefaultsKey)
+        }
+    }
     @Published var frontProjectionMirrored = false {
-        didSet { saveFrontProjectionMirrored() }
+        didSet {
+            saveFrontProjectionMirrored()
+            invalidateMetricStageMapViewport()
+        }
     }
     @Published var topProjectionRotationQuarterTurns = 0 {
-        didSet { saveTopProjectionRotation() }
+        didSet {
+            saveTopProjectionRotation()
+            invalidateMetricStageMapViewport()
+        }
     }
     @Published var isEditingProjectionLayout = false
+    @Published var isFixtureCalibrationMode = false
     @Published var previewSelectedSlotIDs: Set<String> = []
     @Published var selectedSlotID = ""
     @Published var selectedPortLabel = "" {
@@ -2708,6 +3664,7 @@ final class AppModel: ObservableObject {
     @Published var universeSummary = "Geen actieve kanalen"
     @Published var conflictSummary = "Geen kanaalconflicten"
     @Published var rawValuesText = "Geen actieve DMX-waarden."
+    @Published var renderedMotionSummary = "Geen final-motionprojectie beschikbaar."
     @Published var virtualDjBeatPulsePreviewEnabled = false
     @Published var virtualDjBeatPulsePreviewStatus = "Visuele VirtualDJ-test uit"
     @Published var activeLivePreset: LivePreset?
@@ -2721,6 +3678,7 @@ final class AppModel: ObservableObject {
     @Published var simulatorTracks: [SimulatorTrack] = []
     @Published var simulatorState: SimulatorState?
     @Published var simulatorSlotPreviews: [String: SlotPreview] = [:]
+    @Published var renderedMotion: [String: RenderedMotionState] = [:]
 
     /// The stage maps are read-only consumers.  When the simulator is active,
     /// they deliberately render its isolated preview frame instead of live DMX.
@@ -2731,8 +3689,103 @@ final class AppModel: ObservableObject {
         return simulatorSlotPreviews
     }
 
+    func smokePreviewIntensity(at date: Date = Date()) -> Double {
+        if let smoke = manualSmoke, smoke.active, smoke.resolvedDmxValue > 0 {
+            return Double(smoke.resolvedDmxValue) / 255.0
+        }
+        guard let releasedAt = manualSmokeReleasedAt else { return 0 }
+        return max(0, 1 - date.timeIntervalSince(releasedAt) / 0.55) * 0.72
+    }
+
+    private func reconcileManualSmoke(_ next: ManualSmokeState?) {
+        let previousWasVisible = (manualSmoke?.resolvedDmxValue ?? 0) > 0 && manualSmoke?.active == true
+        let nextIsVisible = (next?.resolvedDmxValue ?? 0) > 0 && next?.active == true
+        if previousWasVisible && !nextIsVisible { manualSmokeReleasedAt = Date() }
+        if nextIsVisible { manualSmokeReleasedAt = nil }
+        manualSmoke = next
+    }
+
     var presentedStageMotionStates: [String: StageMotionState] {
-        simulatorState?.mode == "SIMULATION" ? [:] : stageMotionStates
+        var states = simulatorState?.mode == "SIMULATION" ? [:] : stageMotionStates
+        if simulatorState?.mode != "SIMULATION" {
+            for (slotID, motion) in renderedMotion where motion.supported && motion.available && motion.status == "AVAILABLE" {
+                guard let direction = motion.worldDirection else { continue }
+                let existing = states[slotID]
+                let preview = slotPreviews[slotID]
+                states[slotID] = StageMotionState(
+                    currentPanDegrees: motion.physicalPanDegrees ?? existing?.currentPanDegrees ?? preview?.logicalPanDegrees ?? 0,
+                    currentTiltDegrees: motion.physicalTiltDegrees ?? existing?.currentTiltDegrees ?? preview?.logicalTiltDegrees ?? 0,
+                    targetPanDegrees: motion.physicalPanDegrees ?? existing?.targetPanDegrees ?? preview?.logicalTargetPanDegrees ?? 0,
+                    targetTiltDegrees: motion.physicalTiltDegrees ?? existing?.targetTiltDegrees ?? preview?.logicalTargetTiltDegrees ?? 0,
+                    panRange: existing?.panRange ?? preview?.panRange ?? 540,
+                    tiltRange: existing?.tiltRange ?? preview?.tiltRange ?? 180,
+                    estimatedSpeedDegreesPerSecond: existing?.estimatedSpeedDegreesPerSecond ?? 0,
+                    trail: [],
+                    updatedAt: Date().timeIntervalSinceReferenceDate,
+                    worldDirection: direction
+                )
+            }
+        }
+        guard let startedAt = previewVenueTargetStartedAt else { return states }
+        let progress = min(1.0, max(0.0, Date().timeIntervalSince(startedAt) / 0.65))
+        let eased = progress * progress * (3.0 - 2.0 * progress)
+        for (slotID, resolution) in previewVenueTargetResolutions {
+            guard
+                resolution.status == "RESOLVED",
+                let targetPan = resolution.panDegrees,
+                let targetTilt = resolution.tiltDegrees
+            else { continue }
+            let existing = states[slotID]
+            let panRange = existing?.panRange ?? 540
+            let tiltRange = existing?.tiltRange ?? 180
+            let startPan = previewVenueTargetStartPanBySlot[slotID] ?? existing?.currentPanDegrees ?? 0
+            let startTilt = previewVenueTargetStartTiltBySlot[slotID] ?? existing?.currentTiltDegrees ?? 0
+            let currentPan = startPan + (targetPan - startPan) * eased
+            let currentTilt = startTilt + (targetTilt - startTilt) * eased
+            states[slotID] = StageMotionState(
+                currentPanDegrees: currentPan,
+                currentTiltDegrees: currentTilt,
+                targetPanDegrees: targetPan,
+                targetTiltDegrees: targetTilt,
+                panRange: panRange,
+                tiltRange: tiltRange,
+                estimatedSpeedDegreesPerSecond: max(120, existing?.estimatedSpeedDegreesPerSecond ?? 240),
+                trail: [
+                    StageBeamPose(panDegrees: startPan, tiltDegrees: startTilt),
+                    StageBeamPose(panDegrees: currentPan, tiltDegrees: currentTilt),
+                ],
+                updatedAt: Date().timeIntervalSinceReferenceDate,
+                worldDirection: existing?.worldDirection
+            )
+        }
+        return states
+    }
+
+    /// Returns a direct world-space endpoint for the active preview target.
+    /// The resolver remains authoritative for physical pan/tilt; this is only
+    /// the equivalent visual endpoint for the existing fixture beam.
+    func venueTargetPreviewVisual(for slotID: String) -> VenueTargetPreviewVisual? {
+        guard
+            previewVenueTargetSlotIDs.contains(slotID),
+            previewVenueTargetResolutions[slotID]?.status == "RESOLVED",
+            let startedAt = previewVenueTargetStartedAt,
+            let target = venueSpace?.targets.first(where: { $0.id == selectedVenueTarget }),
+            let startEndpoint = previewVenueTargetStartEndpoints[slotID]
+        else { return nil }
+
+        guard let physicalTarget = target.physicalPointM else { return nil }
+
+        let endpoint = SlotWorldPosition(
+            x: physicalTarget.x * 100,
+            y: physicalTarget.y * 100,
+            z: physicalTarget.z * 100
+        )
+        let progress = min(1.0, max(0.0, Date().timeIntervalSince(startedAt) / 0.65))
+        return VenueTargetPreviewVisual(
+            startEndpoint: startEndpoint,
+            endpoint: endpoint,
+            progress: progress
+        )
     }
     @Published var autoShowCueText = "Auto Show uit"
     @Published var autoShowDetailText = "Zet Auto Show aan om phrase- en beat-gestuurde output te laten spelen."
@@ -2744,6 +3797,7 @@ final class AppModel: ObservableObject {
     @Published var autoShowAudienceTiltSplit = 127
     @Published var liveOverrideColor = "none"
     @Published var liveOverrideColorLabel = "Auto"
+    @Published var liveOverrideColorCombo = "none"
     @Published var liveOverrideManualStrobe = false
     @Published var liveOverrideAudienceSweep = false
     @Published var liveOverrideAllOn = false
@@ -2753,6 +3807,9 @@ final class AppModel: ObservableObject {
     @Published var liveOneShotCueLabel = "None"
     @Published var liveOneShotCueProgress = 0.0
     @Published var remoteURLText = "-"
+    /// Optional overlay-network route. Keep this separate from the normal
+    /// preferred LAN/USB route so either pairing workflow remains explicit.
+    @Published var remoteTailscaleURLText = "-"
     @Published var remoteStatusText = "Remote niet beschikbaar"
     @Published var remotePairingCodeText = "-"
     @Published var errorText = ""
@@ -2802,6 +3859,9 @@ final class AppModel: ObservableObject {
     private let bridgeScriptDefaultsKey = defaultsKey("bridgeScriptPath")
 
     init() {
+        if let storedSnap = UserDefaults.standard.object(forKey: mapFixtureSnapEnabledDefaultsKey) as? Bool {
+            fixtureSnapEnabled = storedSnap
+        }
         loadMapAssignments()
         loadProjectionLayouts()
         loadFrontProjectionMirrored()
@@ -2844,6 +3904,13 @@ final class AppModel: ObservableObject {
     func openRemoteURL() {
         guard let url = URL(string: remoteURLText), url.scheme?.hasPrefix("http") == true else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    func copyTailscaleRemoteURL() {
+        guard remoteTailscaleURLText != "-" else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(remoteTailscaleURLText, forType: .string)
     }
 
     func refreshDebugState() {
@@ -3223,6 +4290,9 @@ final class AppModel: ObservableObject {
     }
 
     func selectSlot(_ slotID: String) {
+        if venueTargetTestState?.active == true, selectedSlotID != slotID {
+            releaseVenueTargetTest()
+        }
         selectedSlotID = slotID
     }
 
@@ -3380,9 +4450,10 @@ final class AppModel: ObservableObject {
 
     func setLiveOverrideColor(_ color: String) {
         let normalized = color.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if normalized == liveOverrideColor { return }
+        if normalized == liveOverrideColor && liveOverrideColorCombo == "none" { return }
         beginLocalMutationHold(seconds: 1.2)
         liveOverrideColor = normalized
+        liveOverrideColorCombo = "none"
         let request = currentAutoShowUpdateBody()
         setPendingAutoShowRequest(request)
         postAutoShow(request)
@@ -3727,18 +4798,926 @@ final class AppModel: ObservableObject {
 
     func startProjectionLayoutEditing() {
         projectionLayoutDrafts = projectionLayouts
+        isFixtureCalibrationMode = false
+        isEditingProjectionLayout = true
+    }
+
+    func startFixtureCalibration() {
+        guard
+            !selectedSlotID.isEmpty,
+            let editor = editorsByID[selectedSlotID],
+            editor.supportsPan && editor.supportsTilt
+        else {
+            errorText = "Selecteer eerst één moving head met Pan en Tilt."
+            return
+        }
+        projectionLayoutDrafts = projectionLayouts
+        isFixtureCalibrationMode = true
+        calibrationTestSlotID = nil
         isEditingProjectionLayout = true
     }
 
     func cancelProjectionLayoutEditing() {
         projectionLayoutDrafts = projectionLayouts
+        isFixtureCalibrationMode = false
+        calibrationTestSlotID = nil
         isEditingProjectionLayout = false
     }
 
     func applyProjectionLayoutEditing() {
-        projectionLayouts = projectionLayoutDrafts
-        saveProjectionLayouts()
-        isEditingProjectionLayout = false
+        if isFixtureCalibrationMode {
+            saveSelectedFixtureCalibration()
+            return
+        }
+        saveProjectionLayoutPositions()
+    }
+
+    private func saveProjectionLayoutPositions() {
+        guard !projectionLayoutSaveInFlight else { return }
+        let updates = Dictionary(uniqueKeysWithValues: projectionLayoutDrafts.map { slotID, world in
+            (
+                slotID,
+                FixturePositionSlotUpdate(
+                    venueCalibration: FixturePositionOnlyPayload(
+                        positionM: VenuePhysicalPointState(
+                            x: world.x / 100,
+                            y: world.y / 100,
+                            z: world.z / 100
+                        )
+                    )
+                )
+            )
+        })
+        guard !updates.isEmpty else {
+            isEditingProjectionLayout = false
+            return
+        }
+        let payload = FixturePositionUpdateRequest(
+            activeSlot: selectedSlotID,
+            slots: updates
+        )
+        projectionLayoutSaveInFlight = true
+        Task {
+            do {
+                let state: AppState = try await post("/api/dmx/update", body: payload, as: AppState.self)
+                projectionLayouts = projectionLayoutDrafts
+                saveProjectionLayouts()
+                isEditingProjectionLayout = false
+                projectionLayoutSaveInFlight = false
+                apply(state, source: .action)
+                errorText = ""
+            } catch {
+                projectionLayoutSaveInFlight = false
+                errorText = "Fixtureposities opslaan mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func savePhysicalTiltLimits(minimumText: String, centerText: String, maximumText: String) {
+        guard
+            let minimum = Double(minimumText.trimmingCharacters(in: .whitespacesAndNewlines)),
+            let center = Double(centerText.trimmingCharacters(in: .whitespacesAndNewlines)),
+            let maximum = Double(maximumText.trimmingCharacters(in: .whitespacesAndNewlines)),
+            minimum.isFinite, center.isFinite, maximum.isFinite, minimum < center, center < maximum
+        else {
+            errorText = "Tilt limits require finite MIN < CENTER < MAX."
+            return
+        }
+        saveSelectedFixtureCalibrationWithPhysicalTiltLimits(
+            physicalTiltLimits: PhysicalTiltLimitsPayload(minDeg: minimum, centerDeg: center, maxDeg: maximum),
+            preserveCalibrationMode: true
+        )
+    }
+
+    private func saveSelectedFixtureCalibration() {
+        saveSelectedFixtureCalibrationWithPhysicalTiltLimits()
+    }
+
+    private func saveSelectedFixtureCalibrationWithPhysicalTiltLimits(
+        physicalTiltLimits: PhysicalTiltLimitsPayload? = nil,
+        preserveCalibrationMode: Bool = false
+    ) {
+        guard
+            !calibrationSaveInFlight,
+            !selectedSlotID.isEmpty,
+            let editor = editorsByID[selectedSlotID],
+            editor.supportsPan && editor.supportsTilt,
+            let world = projectionLayoutDrafts[selectedSlotID] ?? projectionLayouts[selectedSlotID]
+        else { return }
+        let basis = venueOrientationBasis(for: world)
+        let position = VenuePointState(
+            x: venueNormalizedCoordinate(world.x, negativeExtent: abs(StageWorld.minX), positiveExtent: StageWorld.maxX),
+            y: venueNormalizedCoordinate(world.y, negativeExtent: abs(StageWorld.minY), positiveExtent: StageWorld.maxY)
+        )
+        let calibration = fixtureCalibrations[selectedSlotID]
+        let payload = VenueCalibrationUpdateRequest(
+            slotID: selectedSlotID,
+            activeSlot: selectedSlotID,
+            slot: VenueCalibrationSlotUpdate(
+                venueCalibration: VenueCalibrationPayload(
+                    version: 3,
+                    positionM: VenuePhysicalPointState(
+                        x: world.x / 100,
+                        y: world.y / 100,
+                        z: world.z / 100
+                    ),
+                    position: position,
+                    mountingHeightM: world.z / 100,
+                    physicalForward: basis.forward,
+                    physicalUp: basis.up,
+                    panCorrectionDegrees: calibration?.panCorrectionDegrees ?? 0,
+                    tiltCorrectionDegrees: calibration?.tiltCorrectionDegrees ?? 0,
+                    physicalTiltLimits: physicalTiltLimits
+                )
+            )
+        )
+        calibrationSaveInFlight = true
+        Task {
+            do {
+                let state: AppState = try await post("/api/dmx/update", body: payload, as: AppState.self)
+                projectionLayouts = projectionLayoutDrafts
+                saveProjectionLayouts()
+                if !preserveCalibrationMode {
+                    isFixtureCalibrationMode = false
+                    isEditingProjectionLayout = false
+                }
+                calibrationSaveInFlight = false
+                apply(state, source: .action)
+                errorText = ""
+            } catch {
+                calibrationSaveInFlight = false
+                errorText = "Fixturecalibratie opslaan mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func testAllMovingHeadsInPreview() {
+        guard calibrationTestInFlightSlotID == nil else { return }
+        calibrationTestInFlightSlotID = "__venue_target_group__"
+        Task {
+            do {
+                let response: VenueTargetTestActionResponse = try await post(
+                    "/api/dmx/venue-target-preview",
+                    body: VenueTargetGroupRequest(target: selectedVenueTarget, verticalLayer: selectedVenueTargetVerticalLayer),
+                    as: VenueTargetTestActionResponse.self
+                )
+                venueTargetTestState = response.authority
+                if response.accepted, let resultSet = response.authority?.resultSet {
+                    clearVenueTargetPreview()
+                    previewVenueTargetResultSet = resultSet
+                    venueTargetTestStatusText = "\(resultSet.targetedCount)/\(resultSet.candidateCount) TARGETED • PREVIEW TEST ACTIVE"
+                    startVenueTargetLeaseHeartbeat()
+                } else {
+                    venueTargetTestStatusText = response.reason ?? response.status
+                }
+                calibrationTestInFlightSlotID = nil
+                errorText = response.accepted ? "" : (response.reason ?? "Venue target preview-test was rejected.")
+            } catch {
+                calibrationTestInFlightSlotID = nil
+                errorText = "Venue target preview-test mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Kept for the calibration inspector: resolve and preview only the head
+    /// currently being calibrated.
+    func testAudienceCenterForSelectedFixture() {
+        testAudienceTargetPreview()
+    }
+
+    /// The selected moving head supplies the normal resolver diagnostic.  The
+    /// optional group then shares that canonical target visually, without any
+    /// physical movement endpoint being called.
+    private func testAudienceTargetPreview() {
+        guard
+            let editor = editorsByID[selectedSlotID],
+            editor.supportsPan && editor.supportsTilt
+        else {
+            errorText = "Selecteer eerst één moving head."
+            return
+        }
+        calibrationTestSlotID = selectedSlotID
+        calibrationTestInFlightSlotID = selectedSlotID
+        let world = projectionLayoutDrafts[selectedSlotID] ?? projectionLayouts[selectedSlotID] ?? effectiveWorldPosition(for: selectedSlotID)
+        let basis = venueOrientationBasis(for: world)
+        let position = VenuePointState(
+            x: venueNormalizedCoordinate(world.x, negativeExtent: abs(StageWorld.minX), positiveExtent: StageWorld.maxX),
+            y: venueNormalizedCoordinate(world.y, negativeExtent: abs(StageWorld.minY), positiveExtent: StageWorld.maxY)
+        )
+        let persisted = fixtureCalibrations[selectedSlotID]
+        let request = VenueTargetTestRequest(
+            slotID: selectedSlotID,
+            venueCalibration: VenueCalibrationPayload(
+                version: 3,
+                positionM: VenuePhysicalPointState(
+                    x: world.x / 100,
+                    y: world.y / 100,
+                    z: world.z / 100
+                ),
+                position: position,
+                mountingHeightM: world.z / 100,
+                physicalForward: basis.forward,
+                physicalUp: basis.up,
+                panCorrectionDegrees: persisted?.panCorrectionDegrees ?? 0,
+                tiltCorrectionDegrees: persisted?.tiltCorrectionDegrees ?? 0
+            ),
+            target: selectedVenueTarget,
+            verticalLayer: selectedVenueTargetVerticalLayer
+        )
+        Task {
+            do {
+                let response: VenueTargetTestResponse = try await post(
+                    "/api/dmx/venue-target-test",
+                    body: request,
+                    as: VenueTargetTestResponse.self
+                )
+                audienceCenterTestResults[response.slotID] = response.result
+                activateVenueTargetPreview(
+                    response.result,
+                    slotID: response.slotID
+                )
+                calibrationTestInFlightSlotID = nil
+                errorText = ""
+            } catch {
+                calibrationTestInFlightSlotID = nil
+                errorText = "Audience target preview-test mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func selectVenueTarget(_ target: String) {
+        let parts = target.split(separator: "_").map(String.init)
+        let zone: String
+        let position: String
+        if parts.count == 3, parts[0] == "AUDIENCE" {
+            zone = parts[1]
+            position = parts[2]
+        } else if parts.count == 2, parts[0] == "REAR" {
+            zone = "REAR"
+            position = parts[1]
+        } else {
+            return
+        }
+        guard venueTargetTestState?.active != true else {
+            errorText = "Release the active physical target test before changing target."
+            return
+        }
+        selectedVenueTargetZone = zone
+        selectedVenueTargetPosition = position
+        selectedVenueTarget = target
+        clearVenueTargetPreview()
+        venueTargetTestStatusText = "READY • \(zone) / \(position) selected."
+    }
+
+    func selectVenueTargetZone(_ zone: String) {
+        selectVenueTarget(zone == "REAR"
+            ? "REAR_\(selectedVenueTargetPosition)"
+            : "AUDIENCE_\(zone)_\(selectedVenueTargetPosition)")
+    }
+
+    func selectVenueTargetPosition(_ position: String) {
+        selectVenueTarget(selectedVenueTargetZone == "REAR"
+            ? "REAR_\(position)"
+            : "AUDIENCE_\(selectedVenueTargetZone)_\(position)")
+    }
+
+    func selectVenueTargetVerticalLayer(_ layer: String) {
+        guard venueTargetTestState?.active != true else {
+            errorText = "Release the active target test before changing vertical layer."
+            return
+        }
+        guard venueTargetVerticalLayerState(layer)?.available != false else {
+            venueTargetTestStatusText = "CEILING UNAVAILABLE • \(venueTargetVerticalLayerState(layer)?.reason ?? "CEILING_HEIGHT_UNSET")"
+            return
+        }
+        selectedVenueTargetVerticalLayer = layer
+        clearVenueTargetPreview()
+        venueTargetTestStatusText = "READY • \(selectedVenueTarget) / \(layer) selected."
+    }
+
+    func venueTargetVerticalLayerState(_ layer: String) -> VenueTargetVerticalLayerState? {
+        venueSpace?.verticalLayers?.first(where: { $0.id == layer })
+    }
+
+    func moveAimCalibration(to target: String) {
+        guard !selectedSlotID.isEmpty, venueTargetTestState?.active != true else {
+            errorText = "Release the active movement lease before changing calibration target."
+            return
+        }
+        aimCalibrationInFlight = true
+        Task {
+            do {
+                let response: AimCalibrationActionResponse = try await post(
+                    "/api/dmx/aim-calibration/move",
+                    body: AimCalibrationMoveRequest(slotID: selectedSlotID, target: target),
+                    as: AimCalibrationActionResponse.self
+                )
+                aimCalibrationInFlight = false
+                venueTargetTestState = response.authority
+                venueTargetTestStatusText = response.reason ?? response.status
+                if response.accepted, response.authority?.active == true {
+                    selectedVenueTarget = target
+                    if let resultSet = response.authority?.resultSet { activateVenueTargetPreview(resultSet) }
+                    startVenueTargetLeaseHeartbeat()
+                    errorText = ""
+                }
+            } catch {
+                aimCalibrationInFlight = false
+                errorText = "Physical aim move failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func nudgeAimCalibration(axis: String, direction: String) {
+        guard venueTargetTestState?.mode == "PHYSICAL_AIM_CALIBRATION" else { return }
+        Task {
+            do {
+                let response: AimCalibrationActionResponse = try await post(
+                    "/api/dmx/aim-calibration/nudge",
+                    body: AimCalibrationNudgeRequest(axis: axis, direction: direction, granularity: aimCalibrationGranularity),
+                    as: AimCalibrationActionResponse.self
+                )
+                venueTargetTestState = response.authority
+                venueTargetTestStatusText = response.reason ?? response.status
+                if !response.accepted { errorText = response.reason ?? "Aim adjustment was rejected." }
+            } catch {
+                errorText = "Aim adjustment failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func saveAimCalibrationAnchor() {
+        aimCalibrationInFlight = true
+        Task {
+            do {
+                let response: AimCalibrationActionResponse = try await post(
+                    "/api/dmx/aim-calibration/save-anchor",
+                    body: EmptyRequest(),
+                    as: AimCalibrationActionResponse.self
+                )
+                aimCalibrationInFlight = false
+                venueTargetTestState = response.authority
+                stopVenueTargetLeaseHeartbeat()
+                clearVenueTargetPreview()
+                try await refreshState()
+                errorText = response.accepted ? "" : (response.reason ?? "Anchor was not saved.")
+            } catch {
+                aimCalibrationInFlight = false
+                errorText = "Save anchor failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func recordAimValidation(_ result: String) {
+        aimCalibrationInFlight = true
+        Task {
+            do {
+                let response: AimCalibrationActionResponse = try await post(
+                    "/api/dmx/aim-calibration/validation",
+                    body: AimCalibrationValidationRequest(result: result),
+                    as: AimCalibrationActionResponse.self
+                )
+                aimCalibrationInFlight = false
+                venueTargetTestState = response.authority
+                stopVenueTargetLeaseHeartbeat()
+                clearVenueTargetPreview()
+                try await refreshState()
+                errorText = response.accepted ? "" : (response.reason ?? "Validation was not recorded.")
+            } catch {
+                aimCalibrationInFlight = false
+                errorText = "Validation save failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func resetAimCalibration() {
+        guard !selectedSlotID.isEmpty else { return }
+        aimCalibrationInFlight = true
+        Task {
+            do {
+                let response: AimCalibrationActionResponse = try await post(
+                    "/api/dmx/aim-calibration/reset",
+                    body: AimCalibrationResetRequest(slotID: selectedSlotID, confirm: true),
+                    as: AimCalibrationActionResponse.self
+                )
+                aimCalibrationInFlight = false
+                venueTargetTestState = response.authority
+                stopVenueTargetLeaseHeartbeat()
+                clearVenueTargetPreview()
+                try await refreshState()
+                errorText = response.accepted ? "" : (response.reason ?? "Aim calibration reset failed.")
+            } catch {
+                aimCalibrationInFlight = false
+                errorText = "Aim calibration reset failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func beginAxisMappingV2(axis: String) {
+        guard !selectedSlotID.isEmpty else { return }
+        axisMappingV2InFlight = true
+        Task {
+            do {
+                let response: AxisMappingV2ActionResponse = try await post(
+                    "/api/dmx/axis-mapping-v2/begin",
+                    body: AxisMappingV2BeginRequest(slotID: selectedSlotID, axis: axis),
+                    as: AxisMappingV2ActionResponse.self
+                )
+                axisMappingV2InFlight = false
+                venueTargetTestState = response.authority
+                try await refreshState()
+                errorText = response.accepted ? "" : (response.reason ?? "Axis mapping could not start.")
+            } catch {
+                axisMappingV2InFlight = false
+                errorText = "Axis mapping start failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func nudgeAxisMappingV2ReferencePose(axis: String, direction: String, granularity: String) {
+        guard !selectedSlotID.isEmpty else { return }
+        axisMappingV2InFlight = true
+        Task { do {
+            let response: AxisMappingV2ActionResponse = try await post("/api/dmx/axis-mapping-v2/tilt-reference/nudge", body: AxisMappingV2ReferencePoseNudgeRequest(slotID: selectedSlotID, axis: axis, direction: direction, granularity: granularity), as: AxisMappingV2ActionResponse.self)
+            axisMappingV2InFlight = false; venueTargetTestState = response.authority
+            if response.accepted { startVenueTargetLeaseHeartbeat(); errorText = "" } else { errorText = response.reason ?? "Reference-pose movement was rejected." }
+        } catch { axisMappingV2InFlight = false; errorText = "Reference-pose movement failed: \(error.localizedDescription)" } }
+    }
+
+    func lockAxisMappingV2TiltReference() {
+        axisMappingV2InFlight = true
+        Task { do {
+            let response: AxisMappingV2ActionResponse = try await post("/api/dmx/axis-mapping-v2/tilt-reference/lock", body: AxisMappingV2LockTiltReferenceRequest(), as: AxisMappingV2ActionResponse.self)
+            axisMappingV2InFlight = false; venueTargetTestState = response.authority
+            if response.authority?.active == true { startVenueTargetLeaseHeartbeat() } else { stopVenueTargetLeaseHeartbeat() }
+            try await refreshState()
+            errorText = response.accepted && response.status != "NEXT_MOVE_FAILED" ? "" : (response.reason ?? "Pan reference lock was rejected.")
+        } catch { axisMappingV2InFlight = false; errorText = "Pan reference lock failed: \(error.localizedDescription)" } }
+    }
+
+    func setAxisMappingV2PanReference(tiltPlaneDegrees: Double) {
+        guard !selectedSlotID.isEmpty else { return }
+        axisMappingV2InFlight = true
+        Task { do {
+            let response: AxisMappingV2ActionResponse = try await post("/api/dmx/axis-mapping-v2/pan-reference", body: AxisMappingV2PanReferenceRequest(slotID: selectedSlotID, tiltPlaneDegrees: tiltPlaneDegrees), as: AxisMappingV2ActionResponse.self)
+            axisMappingV2InFlight = false; venueTargetTestState = response.authority
+            if response.authority?.active == true { startVenueTargetLeaseHeartbeat() } else { stopVenueTargetLeaseHeartbeat() }
+            try await refreshState()
+            errorText = response.accepted && response.status != "NEXT_MOVE_FAILED" ? "" : (response.reason ?? "Pan sweep reference was rejected.")
+        } catch { axisMappingV2InFlight = false; errorText = "Pan sweep reference failed: \(error.localizedDescription)" } }
+    }
+
+    func moveAxisMappingV2Sample(axis: String, index: Int) {
+        guard !selectedSlotID.isEmpty else { return }
+        axisMappingV2InFlight = true
+        Task {
+            do {
+                let response: AxisMappingV2ActionResponse = try await post(
+                    "/api/dmx/axis-mapping-v2/move-sample",
+                    body: AxisMappingV2MoveSampleRequest(slotID: selectedSlotID, axis: axis, index: index),
+                    as: AxisMappingV2ActionResponse.self
+                )
+                axisMappingV2InFlight = false
+                venueTargetTestState = response.authority
+                venueTargetTestStatusText = response.reason ?? response.status
+                if response.accepted { startVenueTargetLeaseHeartbeat(); errorText = "" }
+                else { errorText = response.reason ?? "Motor position was rejected." }
+            } catch {
+                axisMappingV2InFlight = false
+                errorText = "Motor position failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func saveAxisMappingV2Sample(axis: String, measuredDegrees: Double) {
+        axisMappingV2InFlight = true
+        Task {
+            do {
+                let response: AxisMappingV2ActionResponse = try await post(
+                    "/api/dmx/axis-mapping-v2/save-sample",
+                    body: AxisMappingV2SaveSampleRequest(axis: axis, measuredDegrees: measuredDegrees),
+                    as: AxisMappingV2ActionResponse.self
+                )
+                axisMappingV2InFlight = false
+                venueTargetTestState = response.authority
+                if response.authority?.active == true { startVenueTargetLeaseHeartbeat() }
+                else { stopVenueTargetLeaseHeartbeat() }
+                try await refreshState()
+                errorText = response.accepted && response.status != "NEXT_MOVE_FAILED" ? "" : (response.reason ?? "Measured direction was not saved.")
+            } catch {
+                axisMappingV2InFlight = false
+                errorText = "Save measured direction failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func moveAxisMappingV2Validation(target: String) {
+        guard !selectedSlotID.isEmpty, venueTargetTestState?.active != true else { return }
+        axisMappingV2InFlight = true
+        Task {
+            do {
+                let response: AxisMappingV2ActionResponse = try await post(
+                    "/api/dmx/axis-mapping-v2/validation-move",
+                    body: AxisMappingV2ValidationMoveRequest(slotID: selectedSlotID, target: target),
+                    as: AxisMappingV2ActionResponse.self
+                )
+                axisMappingV2InFlight = false
+                venueTargetTestState = response.authority
+                if response.accepted {
+                    if let resultSet = response.authority?.resultSet { activateVenueTargetPreview(resultSet) }
+                    startVenueTargetLeaseHeartbeat()
+                    errorText = ""
+                } else { errorText = response.reason ?? "Validation move was rejected." }
+            } catch {
+                axisMappingV2InFlight = false
+                errorText = "Validation move failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func recordAxisMappingV2Validation(_ result: String) {
+        axisMappingV2InFlight = true
+        Task {
+            do {
+                let response: AxisMappingV2ActionResponse = try await post(
+                    "/api/dmx/axis-mapping-v2/validation-result",
+                    body: AxisMappingV2ValidationResultRequest(result: result),
+                    as: AxisMappingV2ActionResponse.self
+                )
+                axisMappingV2InFlight = false
+                venueTargetTestState = response.authority
+                stopVenueTargetLeaseHeartbeat()
+                clearVenueTargetPreview()
+                try await refreshState()
+                errorText = response.accepted ? "" : (response.reason ?? "Validation was not recorded.")
+            } catch {
+                axisMappingV2InFlight = false
+                errorText = "Validation result failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func activateAxisMappingV2() {
+        guard !selectedSlotID.isEmpty else { return }
+        axisMappingV2InFlight = true
+        Task {
+            do {
+                let response: AxisMappingV2ActionResponse = try await post(
+                    "/api/dmx/axis-mapping-v2/activate",
+                    body: AxisMappingV2ActivateRequest(slotID: selectedSlotID),
+                    as: AxisMappingV2ActionResponse.self
+                )
+                axisMappingV2InFlight = false
+                try await refreshState()
+                errorText = response.accepted ? "" : (response.reason ?? "V2 activation was rejected.")
+            } catch {
+                axisMappingV2InFlight = false
+                errorText = "V2 activation failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func resetAxisMappingV2() {
+        guard !selectedSlotID.isEmpty else { return }
+        axisMappingV2InFlight = true
+        Task {
+            do {
+                let response: AxisMappingV2ActionResponse = try await post(
+                    "/api/dmx/axis-mapping-v2/reset",
+                    body: AxisMappingV2ResetRequest(slotID: selectedSlotID, confirm: true),
+                    as: AxisMappingV2ActionResponse.self
+                )
+                axisMappingV2InFlight = false
+                venueTargetTestState = response.authority
+                stopVenueTargetLeaseHeartbeat()
+                clearVenueTargetPreview()
+                try await refreshState()
+                errorText = response.accepted ? "" : (response.reason ?? "V2 reset was rejected.")
+            } catch {
+                axisMappingV2InFlight = false
+                errorText = "V2 reset failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func moveSelectedFixtureToVenueTarget() {
+        guard (previewVenueTargetResultSet?.targetedCount ?? 0) > 0 else {
+            errorText = "Run TEST ALL IN PREVIEW first; no targetable moving heads are available."
+            return
+        }
+        guard venueTargetTestState?.active != true else {
+            errorText = "Target test is already active; release it before selecting another target."
+            return
+        }
+        venueTargetTestInFlight = true
+        Task {
+            do {
+                let response: VenueTargetTestActionResponse = try await post(
+                    "/api/dmx/venue-target-move",
+                    body: VenueTargetGroupRequest(target: selectedVenueTarget, verticalLayer: selectedVenueTargetVerticalLayer),
+                    as: VenueTargetTestActionResponse.self
+                )
+                venueTargetTestInFlight = false
+                venueTargetTestState = response.authority
+                venueTargetTestStatusText = response.reason ?? response.status
+                if response.accepted, response.authority?.active == true {
+                    if let resultSet = response.authority?.resultSet {
+                        activateVenueTargetPreview(resultSet)
+                        venueTargetTestStatusText = "\(resultSet.targetedCount)/\(resultSet.candidateCount) TARGETED • PHYSICAL TEST ACTIVE"
+                    }
+                    startVenueTargetLeaseHeartbeat()
+                    errorText = ""
+                } else {
+                    stopVenueTargetLeaseHeartbeat()
+                }
+            } catch {
+                venueTargetTestInFlight = false
+                venueTargetTestStatusText = "ERROR"
+                errorText = "Target movement failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func releaseVenueTargetTest() {
+        stopVenueTargetLeaseHeartbeat()
+        Task {
+            do {
+                let response: VenueTargetTestActionResponse = try await post(
+                    "/api/dmx/venue-target-release",
+                    body: EmptyRequest(),
+                    as: VenueTargetTestActionResponse.self
+                )
+                venueTargetTestState = response.authority
+                venueTargetTestStatusText = "READY • Pan/tilt test released."
+                clearVenueTargetPreview()
+                errorText = ""
+            } catch {
+                errorText = "Target test release failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func playMovementLab() {
+        movementLabInFlight = true
+        Task {
+            do {
+                let response: MovementLabResponse = try await post(
+                    "/api/dmx/movement-lab/play",
+                    body: MovementLabRequest(
+                        effectID: movementLabEffectID,
+                        section: movementLabSection,
+                        variation: movementLabVariation,
+                        bpm: 124
+                    ),
+                    as: MovementLabResponse.self
+                )
+                movementLabInFlight = false
+                movementLabState = response.movementLab
+                errorText = response.accepted ? "" : (response.reason ?? "Movement Lab was rejected.")
+            } catch {
+                movementLabInFlight = false
+                errorText = "Movement Lab play failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func stopMovementLab() {
+        movementLabInFlight = true
+        Task {
+            do {
+                let response: MovementLabResponse = try await post(
+                    "/api/dmx/movement-lab/stop",
+                    body: EmptyRequest(),
+                    as: MovementLabResponse.self
+                )
+                movementLabInFlight = false
+                movementLabState = response.movementLab
+                errorText = ""
+            } catch {
+                movementLabInFlight = false
+                errorText = "Movement Lab stop failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func startVenueTargetLeaseHeartbeat() {
+        stopVenueTargetLeaseHeartbeat()
+        venueTargetLeaseTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                do {
+                    let response: VenueTargetTestActionResponse = try await self.post(
+                        "/api/dmx/venue-target-renew",
+                        body: EmptyRequest(),
+                        as: VenueTargetTestActionResponse.self
+                    )
+                    self.venueTargetTestState = response.authority
+                    self.venueTargetTestStatusText = response.reason ?? response.status
+                    if !response.accepted || response.authority?.active != true {
+                        self.stopVenueTargetLeaseHeartbeat()
+                        return
+                    }
+                } catch {
+                    self.venueTargetTestStatusText = "Lease heartbeat lost; backend will release safely."
+                    self.stopVenueTargetLeaseHeartbeat()
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopVenueTargetLeaseHeartbeat() {
+        venueTargetLeaseTask?.cancel()
+        venueTargetLeaseTask = nil
+    }
+
+    /// The backend owns both physical and renderer-only Venue Target Tests. A fresh State poll may
+    /// arrive after navigation, redraw, or reconnect without the Swift process
+    /// that originally pressed MOVE TO TARGET.  Reconstruct only its UI state;
+    /// live beams themselves come from `rendered_motion`, never from this
+    /// frontend-side target preview.
+    private func reconcileVenueTargetPresentation(_ authority: VenueTargetTestAuthorityState?) {
+        guard authority?.active == true else { return }
+        if let target = authority?.target {
+            let parts = target.split(separator: "_").map(String.init)
+            if parts.count == 3, parts[0] == "AUDIENCE" {
+                selectedVenueTargetZone = parts[1]
+                selectedVenueTargetPosition = parts[2]
+            } else if parts.count == 2, parts[0] == "REAR" {
+                selectedVenueTargetZone = "REAR"
+                selectedVenueTargetPosition = parts[1]
+            }
+            selectedVenueTarget = target
+        }
+        if let verticalLayer = authority?.verticalLayer {
+            selectedVenueTargetVerticalLayer = verticalLayer
+        }
+        // A local preview might contain a stale, pre-authority start point.
+        // Do not let it cover the backend's post-render direction after a poll.
+        if !previewVenueTargetSlotIDs.isEmpty {
+            clearVenueTargetPreview()
+        }
+        previewVenueTargetResultSet = authority?.resultSet
+        if let resultSet = authority?.resultSet {
+            let label = authority?.mode == "VENUE_TARGET_PREVIEW" ? "PREVIEW TEST ACTIVE" : "PHYSICAL TEST ACTIVE"
+            venueTargetTestStatusText = "\(resultSet.targetedCount)/\(resultSet.candidateCount) TARGETED • \(label)"
+        }
+        if venueTargetLeaseTask == nil {
+            startVenueTargetLeaseHeartbeat()
+        }
+    }
+
+    private func activateVenueTargetPreview(
+        _ resolution: VenueTargetResolutionState,
+        slotID: String
+    ) {
+        previewVenueTargetResolution = resolution
+        guard resolution.status == "RESOLVED" else {
+            clearVenueTargetPreview()
+            return
+        }
+        let state = stageMotionStates[slotID]
+        previewVenueTargetStartPanDegrees = state?.currentPanDegrees
+        previewVenueTargetStartTiltDegrees = state?.currentTiltDegrees
+        let slotIDs: Set<String> = [slotID]
+        previewVenueTargetStartEndpoints = Dictionary(
+            uniqueKeysWithValues: slotIDs.map { candidateID in
+                (candidateID, venueTargetPreviewStartEndpoint(for: candidateID))
+            }
+        )
+        previewVenueTargetStartEndpoint = previewVenueTargetStartEndpoints[slotID]
+        previewVenueTargetSlotIDs = slotIDs
+        previewVenueTargetSlotID = slotID
+        previewVenueTargetResolutions = [slotID: resolution]
+        previewVenueTargetStartPanBySlot = [slotID: state?.currentPanDegrees ?? 0]
+        previewVenueTargetStartTiltBySlot = [slotID: state?.currentTiltDegrees ?? 0]
+        previewVenueTargetStartedAt = Date()
+    }
+
+    private func activateVenueTargetPreview(_ resultSet: VenueTargetResultSetState) {
+        let targetable = resultSet.results.filter { $0.classification == "TARGETABLE" && $0.resolution.status == "RESOLVED" }
+        previewVenueTargetResultSet = resultSet
+        previewVenueTargetResolutions = Dictionary(uniqueKeysWithValues: targetable.map { ($0.slotID, $0.resolution) })
+        previewVenueTargetSlotIDs = Set(targetable.map(\.slotID))
+        previewVenueTargetStartEndpoints = Dictionary(
+            uniqueKeysWithValues: previewVenueTargetSlotIDs.map { ($0, venueTargetPreviewStartEndpoint(for: $0)) }
+        )
+        previewVenueTargetStartPanBySlot = Dictionary(
+            uniqueKeysWithValues: previewVenueTargetSlotIDs.map { ($0, stageMotionStates[$0]?.currentPanDegrees ?? 0) }
+        )
+        previewVenueTargetStartTiltBySlot = Dictionary(
+            uniqueKeysWithValues: previewVenueTargetSlotIDs.map { ($0, stageMotionStates[$0]?.currentTiltDegrees ?? 0) }
+        )
+        previewVenueTargetSlotID = targetable.first?.slotID
+        previewVenueTargetResolution = targetable.first?.resolution
+        previewVenueTargetStartedAt = targetable.isEmpty ? nil : Date()
+    }
+
+    private func venueTargetPreviewStartEndpoint(for slotID: String) -> SlotWorldPosition {
+        let world = worldPosition(for: slotID)
+        let state = stageMotionStates[slotID]
+        if let preview = presentedSlotPreviews[slotID] {
+            let isMovingHead = slotEditors.first(where: { $0.id == slotID }).map { $0.supportsPan && $0.supportsTilt } ?? false
+            let panRange = state?.panRange ?? (preview.panRange ?? (isMovingHead ? 540.0 : 180.0))
+            let tiltRange = state?.tiltRange ?? (preview.tiltRange ?? (isMovingHead ? 180.0 : 90.0))
+            let pose = StageBeamPose(
+                panDegrees: state?.currentPanDegrees
+                    ?? preview.logicalPanDegrees
+                    ?? preview.panDegrees
+                    ?? panDegrees(forDMX: preview.pan, range: panRange),
+                tiltDegrees: state?.currentTiltDegrees
+                    ?? preview.logicalTiltDegrees
+                    ?? preview.tiltDegrees
+                    ?? tiltDegrees(forDMX: preview.tilt, range: tiltRange)
+            )
+            return beamWorldEndpoint(
+                worldOrigin: world,
+                mountYawDegrees: world.yawDegrees,
+                mountPitchDegrees: world.pitchDegrees,
+                pose: pose,
+                panRange: panRange,
+                tiltRange: tiltRange,
+                beamKind: isMovingHead ? .movingHead : .staticWash
+            )
+        }
+        return worldOrientationEndpoint(world, distance: 260)
+    }
+
+    private func clearVenueTargetPreview() {
+        previewVenueTargetResolution = nil
+        previewVenueTargetResultSet = nil
+        previewVenueTargetResolutions.removeAll()
+        previewVenueTargetSlotID = nil
+        previewVenueTargetSlotIDs.removeAll()
+        previewVenueTargetStartedAt = nil
+        previewVenueTargetStartPanDegrees = nil
+        previewVenueTargetStartTiltDegrees = nil
+        previewVenueTargetStartEndpoint = nil
+        previewVenueTargetStartEndpoints.removeAll()
+        previewVenueTargetStartPanBySlot.removeAll()
+        previewVenueTargetStartTiltBySlot.removeAll()
+    }
+
+    func saveVenueGeometry() {
+        guard !venueGeometrySaveInFlight else { return }
+        let fields: [(String, String, Bool)] = [
+            ("Venue width", venueWidthMetersText, false),
+            ("Forward audience depth", venueForwardDepthMetersText, false),
+            ("Rear depth", venueRearDepthMetersText, true),
+            ("Audience target height", audienceTargetHeightMetersText, true),
+            ("Ceiling height", ceilingHeightMetersText, false),
+        ]
+        for (label, text, allowsZero) in fields {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty || (venueNumber(trimmed).map { allowsZero ? $0 >= 0 : $0 > 0 } ?? false) else {
+                errorText = "\(label) must be a valid positive value, or left UNSET."
+                return
+            }
+        }
+        if let ceiling = venueNumber(ceilingHeightMetersText),
+           let normal = venueNumber(audienceTargetHeightMetersText),
+           ceiling <= normal {
+            errorText = "Ceiling height must be above audience target height, or left UNSET."
+            return
+        }
+        let request = VenueGeometryUpdateRequest(
+            venueGeometry: VenueGeometryUpdatePayload(
+                venueWidthM: venueNumber(venueWidthMetersText),
+                venueForwardDepthM: venueNumber(venueForwardDepthMetersText),
+                venueRearDepthM: venueNumber(venueRearDepthMetersText),
+                audienceTargetHeightM: venueNumber(audienceTargetHeightMetersText),
+                ceilingHeightM: venueNumber(ceilingHeightMetersText)
+            )
+        )
+        venueGeometrySaveInFlight = true
+        Task {
+            do {
+                beginLocalMutationHold()
+                let state: AppState = try await post("/api/dmx/update", body: request, as: AppState.self)
+                venueGeometrySaveInFlight = false
+                apply(state, source: .action)
+                errorText = ""
+            } catch {
+                venueGeometrySaveInFlight = false
+                errorText = "Venue Geometry opslaan mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func venueNumber(_ text: String) -> Double? {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ",", with: ".")
+        guard !normalized.isEmpty, let value = Double(normalized), value.isFinite else { return nil }
+        return value
+    }
+
+    func calibrationState(for slotID: String) -> VenueFixtureCalibrationState? {
+        fixtureCalibrations[slotID]
+    }
+
+    func audienceCenterTestResult(for slotID: String) -> VenueTargetResolutionState? {
+        audienceCenterTestResults[slotID]
     }
 
     func projectionPoint(for slotID: String, projection: StageProjection) -> CGPoint {
@@ -3750,10 +5729,87 @@ final class AppModel: ObservableObject {
         effectiveWorldPosition(for: slotID)
     }
 
-    func updateProjectionPoint(for slotID: String, projection: StageProjection, point: CGPoint) {
+    func updateProjectionPoint(
+        for slotID: String,
+        projection: StageProjection,
+        point: CGPoint,
+        snapEnabled: Bool? = nil
+    ) {
         guard isEditingProjectionLayout else { return }
         var world = effectiveWorldPosition(for: slotID)
         update(world: &world, from: point, projection: projection)
+        if snapEnabled ?? fixtureSnapEnabled {
+            switch projection {
+            case .top:
+                world.x = (world.x / StageWorld.dragSnapCm).rounded() * StageWorld.dragSnapCm
+                world.y = (world.y / StageWorld.dragSnapCm).rounded() * StageWorld.dragSnapCm
+            case .front, .back:
+                world.x = (world.x / StageWorld.dragSnapCm).rounded() * StageWorld.dragSnapCm
+                world.z = (world.z / StageWorld.dragSnapCm).rounded() * StageWorld.dragSnapCm
+            case .side:
+                world.y = (world.y / StageWorld.dragSnapCm).rounded() * StageWorld.dragSnapCm
+                world.z = (world.z / StageWorld.dragSnapCm).rounded() * StageWorld.dragSnapCm
+            }
+        }
+        projectionLayoutDrafts[slotID] = world
+    }
+
+    /// Commit a completed visual pan. Active pointer updates use only a local
+    /// screen-space compositor offset; the canonical metric camera changes
+    /// once here, at release, with the exact existing inverse transform.
+    func commitProjectionViewportPan(
+        projection: StageProjection,
+        startCenter: SlotWorldPosition,
+        translation: CGSize,
+        canvasSize: CGSize
+    ) {
+        guard canvasSize.width > 0, canvasSize.height > 0 else { return }
+        let projectedCenter = CGPoint(
+            x: 0.5 - translation.width / canvasSize.width,
+            y: 0.5 - translation.height / canvasSize.height
+        )
+        let next = metricWorldPosition(
+            from: projectedCenter,
+            projection: projection,
+            frontMirrored: frontProjectionMirrored,
+            topQuarterTurns: topProjectionRotationQuarterTurns,
+            viewportCenter: startCenter
+        )
+        inMemoryProjectionViewportCenters[projection] = next
+        saveProjectionViewportCenter(next, for: projection)
+        // One authoritative world rebuild after the visual translation clears.
+        invalidateMetricStageMapViewport()
+    }
+
+    func resetMetricStageMapView() {
+        resetProjectionViewportCenters()
+        topProjectionRotationQuarterTurns = 0
+        frontProjectionMirrored = false
+        UserDefaults.standard.set(1.0, forKey: mapProjection2DZoomDefaultsKey)
+        invalidateMetricStageMapViewport()
+    }
+
+    private func invalidateMetricStageMapViewport() {
+        metricStageMapViewportRevision &+= 1
+    }
+
+    func fixturePositionMeters(for slotID: String) -> VenuePhysicalPointState {
+        let world = effectiveWorldPosition(for: slotID)
+        return VenuePhysicalPointState(x: world.x / 100, y: world.y / 100, z: world.z / 100)
+    }
+
+    func setFixturePositionMeters(for slotID: String, axis: String, value: Double) {
+        guard isEditingProjectionLayout, value.isFinite else { return }
+        var world = effectiveWorldPosition(for: slotID)
+        let centimeters = value * 100
+        switch axis.lowercased() {
+        case "x": world.x = min(max(centimeters, StageWorld.minX), StageWorld.maxX)
+        case "y": world.y = min(max(centimeters, StageWorld.minY), StageWorld.maxY)
+        case "z": world.z = min(max(centimeters, StageWorld.minZ), StageWorld.maxZ)
+        default: return
+        }
+        // Numeric entry intentionally preserves 0.01 m precision and is not
+        // quantized to the visual drag grid.
         projectionLayoutDrafts[slotID] = world
     }
 
@@ -4170,6 +6226,7 @@ final class AppModel: ObservableObject {
             audienceTurnPanMax: autoShowAudienceTurnPanMax,
             audienceTiltSplit: autoShowAudienceTiltSplit,
             overrideColor: liveOverrideColor,
+            overrideColorCombo: liveOverrideColorCombo,
             overrideManualStrobe: liveOverrideManualStrobe,
             overrideAudienceSweep: liveOverrideAudienceSweep,
             overrideAllOn: liveOverrideAllOn,
@@ -4201,6 +6258,7 @@ final class AppModel: ObservableObject {
             remote.audienceTurnPanMax == pending.audienceTurnPanMax &&
             remote.audienceTiltSplit == pending.audienceTiltSplit &&
             remote.overrideColor == pending.overrideColor &&
+            remote.overrideColorCombo == pending.overrideColorCombo &&
             remote.overrideManualStrobe == pending.overrideManualStrobe &&
             remote.overrideAudienceSweep == pending.overrideAudienceSweep &&
             remote.overrideAllOn == pending.overrideAllOn &&
@@ -4329,6 +6387,7 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 do {
                     try await refreshState()
+                    clearRecoveredStatusPollError()
                     refreshBridgeStatus()
                 } catch {
                     errorText = "Status ophalen mislukt: \(error.localizedDescription)"
@@ -4336,6 +6395,11 @@ final class AppModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 33_000_000)
             }
         }
+    }
+
+    private func clearRecoveredStatusPollError() {
+        guard errorText.hasPrefix("Status ophalen mislukt:") else { return }
+        errorText = ""
     }
 
     private func loadPorts() async throws {
@@ -4370,6 +6434,7 @@ final class AppModel: ObservableObject {
         if let remote = state.remote {
             nativeLog("remote state decoded: preferred=\(redactedRemoteURL(remote.preferredUrl)) usb=\(redactedRemoteURL(remote.usbUrl)) tailscale=\(redactedRemoteURL(remote.tailscaleUrl)) lan=\(redactedRemoteURL(remote.lanUrl)) local=\(redactedRemoteURL(remote.localUrl))")
             remoteURLText = remote.preferredUrl ?? remote.usbUrl ?? remote.tailscaleUrl ?? remote.lanUrl ?? remote.localUrl ?? "-"
+            remoteTailscaleURLText = remote.tailscaleUrl ?? "-"
             remotePairingCodeText = remote.pairingCode ?? "-"
             if let usbUrl = remote.usbUrl, !usbUrl.isEmpty, remoteURLText == usbUrl {
                 remoteStatusText = "USB/Wired remote: \(usbUrl)"
@@ -4384,6 +6449,7 @@ final class AppModel: ObservableObject {
             }
         } else {
             remoteURLText = "-"
+            remoteTailscaleURLText = "-"
             remoteStatusText = "Remote info niet beschikbaar"
             remotePairingCodeText = "-"
         }
@@ -4407,6 +6473,24 @@ final class AppModel: ObservableObject {
         structureBehaviorSource = state.developerStructureBehavior?.selectedSource == "song_analyzer"
             ? "song_analyzer" : "legacy"
         slotPreviews = state.dmx.slotPreviews
+        reconcileManualSmoke(state.dmx.manualSmoke)
+        renderedMotion = state.dmx.renderedMotion
+        venueSpace = state.dmx.venueSpace
+        venueTargetTestState = state.dmx.venueTargetTest
+        movementLabState = state.dmx.movementLab
+        reconcileVenueTargetPresentation(state.dmx.venueTargetTest)
+        if state.dmx.venueTargetTest?.active != true {
+            stopVenueTargetLeaseHeartbeat()
+        }
+        fixtureCalibrations = Dictionary(uniqueKeysWithValues: (state.dmx.venueSpace?.fixtures ?? []).map { ($0.slotID, $0) })
+        if !venueGeometryFieldsInitialized, let geometry = state.dmx.venueSpace?.venueGeometry {
+            venueWidthMetersText = geometry.venueWidthM.map { String(format: "%.2f", $0) } ?? ""
+            venueForwardDepthMetersText = geometry.venueForwardDepthM.map { String(format: "%.2f", $0) } ?? ""
+            venueRearDepthMetersText = geometry.venueRearDepthM.map { String(format: "%.2f", $0) } ?? ""
+            audienceTargetHeightMetersText = geometry.audienceTargetHeightM.map { String(format: "%.2f", $0) } ?? ""
+            ceilingHeightMetersText = geometry.ceilingHeightM.map { String(format: "%.2f", $0) } ?? ""
+            venueGeometryFieldsInitialized = true
+        }
         previewComposition = state.dmx.rmePreviewDifferential
         physicalOutputSource = state.dmx.rmePreviewDifferential?.physicalOutputSource ?? "auto_show -> current_values"
         productionShowSource = state.dmx.rmePreviewDifferential?.productionSource ?? "existing_autoshow"
@@ -4443,6 +6527,7 @@ final class AppModel: ObservableObject {
             autoShowAudienceTiltSplit = state.dmx.autoShow.audienceTiltSplit
             liveOverrideColor = state.dmx.autoShow.overrideColor
             liveOverrideColorLabel = state.dmx.autoShow.overrideColorLabel
+            liveOverrideColorCombo = state.dmx.autoShow.overrideColorCombo
             liveOverrideManualStrobe = state.dmx.autoShow.overrideManualStrobe
             liveOverrideAudienceSweep = state.dmx.autoShow.overrideAudienceSweep
             liveOverrideAllOn = state.dmx.autoShow.overrideAllOn
@@ -4677,6 +6762,7 @@ final class AppModel: ObservableObject {
             }
         }
         syncEditors(from: state, forceSelectionToActiveSlot: forceSelectionToActiveSlot)
+        syncAuthoritativeVenueLayouts()
 
         let sortedChannels = state.dmx.values.keys.compactMap(Int.init).sorted()
         if let first = sortedChannels.first, let last = sortedChannels.last {
@@ -4700,6 +6786,21 @@ final class AppModel: ObservableObject {
                 "\(channel): \(state.dmx.values[String(channel)] ?? 0)"
             }.joined(separator: "\n")
         }
+        let motionLines = state.dmx.renderedMotion.values
+            .filter { $0.supported }
+            .sorted { $0.slotId < $1.slotId }
+            .map { motion in
+                let preview = state.dmx.slotPreviews[motion.slotId]
+                let previewMotion = "intent p/t \(preview?.pan ?? -1)/\(preview?.tilt ?? -1)"
+                let finalMotion = "final p/f/t/f \(motion.pan ?? -1)/\(motion.panFine ?? -1)/\(motion.tilt ?? -1)/\(motion.tiltFine ?? -1)"
+                let direction = motion.worldDirection.map {
+                    String(format: "dir %.3f, %.3f, %.3f", $0.x, $0.y, $0.z)
+                } ?? "dir unavailable"
+                return "\(motion.slotId) • \(motion.status) • \(previewMotion) • \(finalMotion) • \(direction)"
+            }
+        renderedMotionSummary = motionLines.isEmpty
+            ? "Geen final-motionprojectie beschikbaar."
+            : motionLines.joined(separator: "\n")
         advanceStageSimulation(forceSnapIfNeeded: false)
     }
 
@@ -4872,7 +6973,8 @@ final class AppModel: ObservableObject {
                 tiltRange: tiltRange,
                 estimatedSpeedDegreesPerSecond: estimatedSpeed,
                 trail: trail,
-                updatedAt: now
+                updatedAt: now,
+                worldDirection: nil
             )
         }
 
@@ -5056,6 +7158,43 @@ final class AppModel: ObservableObject {
         return fallbackWorldPosition(for: slotID)
     }
 
+    private func syncAuthoritativeVenueLayouts() {
+        guard !isEditingProjectionLayout else { return }
+        var changed = false
+        for (slotID, calibration) in fixtureCalibrations {
+            guard calibration.positionM != nil || calibration.position != nil else { continue }
+            var world = projectionLayouts[slotID] ?? fallbackWorldPosition(for: slotID)
+            if let positionM = calibration.positionM {
+                world.x = positionM.x * 100
+                world.y = positionM.y * 100
+                world.z = positionM.z * 100
+            }
+            if let forward = calibration.physicalForward, let up = calibration.physicalUp {
+                let normalizedForward = venueVectorNormalized(venueVectorTuple(forward))
+                world.yawDegrees = atan2(normalizedForward.x, normalizedForward.y) * 180.0 / .pi
+                world.pitchDegrees = asin(min(1, max(-1, normalizedForward.z))) * 180.0 / .pi
+                var zeroRollWorld = world
+                zeroRollWorld.rollDegrees = 0
+                let zeroRollUp = venueVectorTuple(venueOrientationBasis(for: zeroRollWorld).up)
+                let normalizedUp = venueVectorNormalized(venueVectorTuple(up))
+                let sine = venueVectorDot(
+                    normalizedForward,
+                    venueVectorCross(zeroRollUp, normalizedUp)
+                )
+                let cosine = min(1, max(-1, venueVectorDot(zeroRollUp, normalizedUp)))
+                world.rollDegrees = atan2(sine, cosine) * 180.0 / .pi
+            }
+            projectionLayouts[slotID] = world
+            projectionLayoutDrafts[slotID] = world
+            changed = true
+        }
+        if changed {
+            // Compatibility cache only. The decoded backend calibration above
+            // remains authoritative and can reconstruct this local projection.
+            saveProjectionLayouts()
+        }
+    }
+
     private func fallbackWorldPosition(for slotID: String) -> SlotWorldPosition {
         if
             let raw = mapAssignments[slotID],
@@ -5075,61 +7214,32 @@ final class AppModel: ObservableObject {
     }
 
     private func project(world: SlotWorldPosition, projection: StageProjection) -> CGPoint {
-        let rawPoint: CGPoint
-        switch projection {
-        case .top:
-            rawPoint = rotatedTopProjectionPoint(
-                CGPoint(
-                x: scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
-                y: scalarNormalized(world.y, lower: StageWorld.minY, upper: StageWorld.maxY)
-                ),
-                quarterTurns: topProjectionRotationQuarterTurns
-            )
-        case .front:
-            rawPoint = CGPoint(
-                x: frontProjectionMirrored
-                    ? 1.0 - scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX)
-                    : scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
-                y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-            )
-        case .back:
-            rawPoint = CGPoint(
-                x: 1.0 - scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
-                y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-            )
-        case .side:
-            rawPoint = CGPoint(
-                x: scalarNormalized(world.y, lower: StageWorld.minY, upper: StageWorld.maxY),
-                y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-            )
-        }
-        return projectionViewportTransform(rawPoint)
+        metricWorldProjectedPoint(
+            world,
+            projection: projection,
+            frontMirrored: frontProjectionMirrored,
+            topQuarterTurns: topProjectionRotationQuarterTurns
+        )
     }
 
     private func update(world: inout SlotWorldPosition, from point: CGPoint, projection: StageProjection) {
-        let unzoomed = projectionViewportInverse(point)
-        let clampedX = min(max(unzoomed.x, 0.04), 0.96)
-        let clampedY = min(max(unzoomed.y, 0.06), 0.94)
+        let projected = metricWorldPosition(
+            from: point,
+            projection: projection,
+            frontMirrored: frontProjectionMirrored,
+            topQuarterTurns: topProjectionRotationQuarterTurns
+        )
         switch projection {
         case .top:
-            let unrotated = unrotatedTopProjectionPoint(
-                CGPoint(x: clampedX, y: clampedY),
-                quarterTurns: topProjectionRotationQuarterTurns
-            )
-            world.x = scalarDenormalized(unrotated.x, lower: StageWorld.minX, upper: StageWorld.maxX)
-            world.y = scalarDenormalized(unrotated.y, lower: StageWorld.minY, upper: StageWorld.maxY)
-        case .front:
-            world.x = frontProjectionMirrored
-                ? scalarDenormalized(1.0 - clampedX, lower: StageWorld.minX, upper: StageWorld.maxX)
-                : scalarDenormalized(clampedX, lower: StageWorld.minX, upper: StageWorld.maxX)
-            world.z = scalarDenormalized(1.0 - clampedY, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-        case .back:
-            world.x = scalarDenormalized(1.0 - clampedX, lower: StageWorld.minX, upper: StageWorld.maxX)
-            world.z = scalarDenormalized(1.0 - clampedY, lower: StageWorld.minZ, upper: StageWorld.maxZ)
+            world.x = projected.x; world.y = projected.y
+        case .front, .back:
+            world.x = projected.x; world.z = projected.z
         case .side:
-            world.y = scalarDenormalized(clampedX, lower: StageWorld.minY, upper: StageWorld.maxY)
-            world.z = scalarDenormalized(1.0 - clampedY, lower: StageWorld.minZ, upper: StageWorld.maxZ)
+            world.y = projected.y; world.z = projected.z
         }
+        world.x = min(max(world.x, StageWorld.minX), StageWorld.maxX)
+        world.y = min(max(world.y, StageWorld.minY), StageWorld.maxY)
+        world.z = min(max(world.z, StageWorld.minZ), StageWorld.maxZ)
     }
 
     private func scalarNormalized(_ value: Double, lower: Double, upper: Double) -> Double {
@@ -5792,7 +7902,8 @@ struct ContentView: View {
 
     private enum WorkspaceMode: String, CaseIterable, Identifiable {
         case live = "Live Show"
-        case preview = "Preview"
+        case preview = "Stage Map"
+        case autoShow = "Auto Show"
         case simulator = "Simulator"
         case manual = "Manual"
         case advanced = "Advanced"
@@ -5998,8 +8109,12 @@ struct ContentView: View {
                         .padding(.bottom, 32)
                 }
             } else if workspaceMode == .preview {
+                PreviewComposerWorkspaceView()
+                    .padding(.trailing, 4)
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
+            } else if workspaceMode == .autoShow {
                 ScrollView {
-                    PreviewComposerWorkspaceView()
+                    AutoShowWorkspaceView()
                         .padding(.trailing, 4)
                         .padding(.bottom, 32)
                 }
@@ -6064,6 +8179,7 @@ struct ContentView: View {
                     .menuStyle(.borderlessButton)
                     .disabled(model.availableFixtures.isEmpty)
                 }
+
             }
         }
     }
@@ -6285,6 +8401,15 @@ struct ContentView: View {
                     .font(.headline)
                 Text(model.conflictSummary)
                     .foregroundStyle(.secondary)
+
+                DisclosureGroup("Final Motion Projection") {
+                    Text(model.renderedMotionSummary)
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
+                }
+                .font(.system(.caption, design: .monospaced))
 
                 Group {
                     if monitorFixtures.isEmpty {
@@ -6899,6 +9024,35 @@ struct RemoteAccessPanel: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(model.remoteURLText == "-")
+            }
+
+            if model.remoteTailscaleURLText != "-" {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Tailscale URL")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(BeatBeamPalette.brandCyan)
+                    Text(model.remoteTailscaleURLText)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(BeatBeamPalette.raisedBackground)
+                        )
+                    HStack {
+                        Button("Copy Tailscale URL") {
+                            model.copyTailscaleRemoteURL()
+                        }
+                        .buttonStyle(.bordered)
+                        Spacer()
+                    }
+                    HStack {
+                        Spacer(minLength: 0)
+                        QRCodeCard(text: model.remoteTailscaleURLText, size: 132, label: "Scan with iPad via Tailscale")
+                        Spacer(minLength: 0)
+                    }
+                }
             }
 
             if model.remoteURLText != "-" {
@@ -8333,13 +10487,25 @@ struct MapWorkspaceView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
+    private let workspaceMinimumHeight: CGFloat = 660
+    @State private var inspectorWidth: CGFloat
+
+    init() {
+        let storedWidth = UserDefaults.standard.object(forKey: stageMapInspectorWidthDefaultsKey) as? Double
+        _inspectorWidth = State(initialValue: CGFloat(storedWidth ?? 340))
+    }
+
     var body: some View {
         PanelSurface(title: "Stage Map", compact: true) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 12) {
-                    Text("Use this view to place fixtures. Open the detached preview on a second screen.")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Place fixtures and calibrate one moving head at a time.")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Map editing is preview-only. Only explicit Physical Aim or Move actions lease bounded Pan/Tilt; all other show dimensions remain untouched.")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Button("Open Preview") {
                         openWindow(id: "map-preview")
@@ -8347,21 +10513,435 @@ struct MapWorkspaceView: View {
                     .buttonStyle(.borderedProminent)
                 }
 
-                HStack(alignment: .top, spacing: 12) {
-                    StageProjectionDeckView(
-                        showControls: true,
-                        topInteractive: true,
-                        showSelection: true,
-                        showAnchorLabels: true,
-                        selectionMode: .editor
-                    )
-                    .frame(maxWidth: .infinity)
-
-                    FixtureMapAssignmentPanel()
-                        .frame(width: 300)
+                StageMapResizableSplitView(
+                    inspectorWidth: $inspectorWidth,
+                    left: stageMapWorkSurface,
+                    right: stageMapSidebar
+                )
+                .frame(minHeight: workspaceMinimumHeight, alignment: .top)
+                .onChange(of: inspectorWidth) { _, width in
+                    UserDefaults.standard.set(Double(width), forKey: stageMapInspectorWidthDefaultsKey)
                 }
             }
         }
+    }
+
+    private var stageMapWorkSurface: some View {
+        StageProjectionDeckView(
+            showControls: true,
+            topInteractive: true,
+            showSelection: true,
+            showAnchorLabels: true,
+            selectionMode: .editor,
+            singlePrimaryView: true
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(BeatBeamPalette.mutedBackground.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var stageMapSidebar: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.vertical) {
+                Color.clear
+                    .frame(height: 1)
+                    .id("stage-map-sidebar-top")
+                LazyVStack(spacing: 10) {
+                    VenueGeometryPanel()
+                    FixtureVenueCalibrationPanel()
+                    VenueTargetTestPanel()
+                    MovementLabPanel()
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(.trailing, 2)
+            }
+            .scrollIndicators(.visible)
+            .onAppear {
+                proxy.scrollTo("stage-map-sidebar-top", anchor: .top)
+            }
+        }
+        .padding(1)
+        .background(BeatBeamPalette.mutedBackground.opacity(0.22))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+private struct StageMapResizableSplitView<Left: View, Right: View>: NSViewRepresentable {
+    @EnvironmentObject private var model: AppModel
+    @Binding var inspectorWidth: CGFloat
+    let left: Left
+    let right: Right
+
+    private let mapMinimumWidth: CGFloat = 620
+    private let inspectorMinimumWidth: CGFloat = 290
+    private let inspectorMaximumWidth: CGFloat = 520
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            inspectorWidth: $inspectorWidth,
+            mapMinimumWidth: mapMinimumWidth,
+            inspectorMinimumWidth: inspectorMinimumWidth,
+            inspectorMaximumWidth: inspectorMaximumWidth
+        )
+    }
+
+    func makeNSView(context: Context) -> NSSplitView {
+        let splitView = NSSplitView()
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.delegate = context.coordinator
+
+        let mapHost = NSHostingView(rootView: AnyView(left.environmentObject(model)))
+        let inspectorHost = NSHostingView(rootView: AnyView(right.environmentObject(model)))
+        mapHost.translatesAutoresizingMaskIntoConstraints = true
+        inspectorHost.translatesAutoresizingMaskIntoConstraints = true
+        splitView.addArrangedSubview(mapHost)
+        splitView.addArrangedSubview(inspectorHost)
+        context.coordinator.applyInitialInspectorWidth(inspectorWidth, to: splitView)
+        return splitView
+    }
+
+    func updateNSView(_ splitView: NSSplitView, context: Context) {
+        guard splitView.subviews.count == 2,
+              let mapHost = splitView.subviews[0] as? NSHostingView<AnyView>,
+              let inspectorHost = splitView.subviews[1] as? NSHostingView<AnyView> else { return }
+        mapHost.rootView = AnyView(left.environmentObject(model))
+        inspectorHost.rootView = AnyView(right.environmentObject(model))
+    }
+
+    final class Coordinator: NSObject, NSSplitViewDelegate {
+        private var inspectorWidth: Binding<CGFloat>
+        private let mapMinimumWidth: CGFloat
+        private let inspectorMinimumWidth: CGFloat
+        private let inspectorMaximumWidth: CGFloat
+        private var appliedInitialWidth = false
+
+        init(
+            inspectorWidth: Binding<CGFloat>,
+            mapMinimumWidth: CGFloat,
+            inspectorMinimumWidth: CGFloat,
+            inspectorMaximumWidth: CGFloat
+        ) {
+            self.inspectorWidth = inspectorWidth
+            self.mapMinimumWidth = mapMinimumWidth
+            self.inspectorMinimumWidth = inspectorMinimumWidth
+            self.inspectorMaximumWidth = inspectorMaximumWidth
+        }
+
+        func applyInitialInspectorWidth(_ requestedWidth: CGFloat, to splitView: NSSplitView) {
+            guard !appliedInitialWidth else { return }
+            appliedInitialWidth = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak splitView] in
+                guard let self, let splitView else { return }
+                self.applyInspectorWidth(requestedWidth, to: splitView)
+            }
+        }
+
+        private func applyInspectorWidth(_ requestedWidth: CGFloat, to splitView: NSSplitView) {
+            let dividerWidth = splitView.dividerThickness
+            let availableWidth = max(0, splitView.bounds.width - dividerWidth)
+            guard availableWidth > 0 else { return }
+            let maximumInspectorWidth = min(
+                inspectorMaximumWidth,
+                max(inspectorMinimumWidth, availableWidth - mapMinimumWidth)
+            )
+            let resolvedInspectorWidth = min(max(requestedWidth, inspectorMinimumWidth), maximumInspectorWidth)
+            splitView.setPosition(max(0, availableWidth - resolvedInspectorWidth), ofDividerAt: 0)
+        }
+
+        func splitViewDidResizeSubviews(_ notification: Notification) {
+            guard let splitView = notification.object as? NSSplitView,
+                  splitView.subviews.count == 2 else { return }
+            let width = splitView.subviews[1].frame.width
+            guard width > 0 else { return }
+            DispatchQueue.main.async { [inspectorWidth] in
+                inspectorWidth.wrappedValue = width
+            }
+        }
+
+        func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+            let availableWidth = max(0, splitView.bounds.width - splitView.dividerThickness)
+            let maximumInspectorWidth = min(
+                inspectorMaximumWidth,
+                max(inspectorMinimumWidth, availableWidth - mapMinimumWidth)
+            )
+            return max(mapMinimumWidth, availableWidth - maximumInspectorWidth)
+        }
+
+        func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+            let availableWidth = max(0, splitView.bounds.width - splitView.dividerThickness)
+            let minimumMapWidth = min(mapMinimumWidth, max(0, availableWidth - inspectorMinimumWidth))
+            return max(minimumMapWidth, availableWidth - inspectorMinimumWidth)
+        }
+    }
+}
+
+struct VenueTargetTestPanel: View {
+    @EnvironmentObject private var model: AppModel
+    private let zones = ["NEAR", "MID", "FAR", "REAR"]
+    private let positions = ["LEFT", "CENTER", "RIGHT"]
+
+    var body: some View {
+        PanelSurface(title: "Target Test", compact: true) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Physical PAN / TILT only. Colour, dimmer, effects, fog and master stay under the normal renderer.")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                selectorRow(title: "ZONE", values: zones, selected: model.selectedVenueTargetZone) {
+                    model.selectVenueTargetZone($0)
+                }
+                selectorRow(title: "POSITION", values: positions, selected: model.selectedVenueTargetPosition) {
+                    model.selectVenueTargetPosition($0)
+                }
+                verticalLayerRow
+                if let ceiling = model.venueTargetVerticalLayerState("CEILING"), !ceiling.available {
+                    Text("CEILING UNAVAILABLE • \(ceiling.reason ?? "CEILING_HEIGHT_UNSET")")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    Button(model.calibrationTestInFlightSlotID == model.selectedSlotID ? "TESTING…" : "TEST ALL IN PREVIEW") {
+                        model.testAllMovingHeadsInPreview()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.calibrationTestInFlightSlotID != nil)
+                    if model.venueTargetTestState?.active == true {
+                        Button("RELEASE TEST") { model.releaseVenueTargetTest() }
+                            .buttonStyle(.bordered)
+                    } else {
+                        Button(model.venueTargetTestInFlight ? "MOVING…" : "MOVE TO TARGET") {
+                            model.moveSelectedFixtureToVenueTarget()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.venueTargetTestInFlight || model.previewVenueTargetResultSet?.physicalReady != true)
+                    }
+                    Spacer()
+                    Text(model.venueTargetTestState?.active == true ? "ACTIVE" : "READY")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(model.venueTargetTestState?.active == true ? BeatBeamPalette.brandCyan : .secondary)
+                }
+                Text(model.venueTargetTestStatusText)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let resultSet = displayedResultSet {
+                    Text("\(resultSet.targetedCount)/\(resultSet.candidateCount) TARGETED • \(resultSet.skippedCount) SKIPPED")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(resultSet.targetedCount > 0 ? BeatBeamPalette.brandCyan : BeatBeamPalette.brandAmber)
+                        .fixedSize(horizontal: false, vertical: true)
+                    DisclosureGroup("FIXTURE DETAILS") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(resultSet.results) { item in
+                                HStack(spacing: 6) {
+                                    Circle()
+                                        .fill(item.classification == "TARGETABLE" ? BeatBeamPalette.brandCyan : BeatBeamPalette.brandAmber)
+                                        .frame(width: 6, height: 6)
+                                    Text(item.label)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text(item.classification.replacingOccurrences(of: "SKIPPED_", with: "SKIP "))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .padding(.top, 4)
+                    }
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                }
+            }
+        }
+    }
+
+    private var displayedResultSet: VenueTargetResultSetState? {
+        model.venueTargetTestState?.resultSet ?? model.previewVenueTargetResultSet
+    }
+
+    private var verticalLayerRow: some View {
+        HStack(spacing: 6) {
+            Text("HEIGHT")
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .leading)
+            ForEach(["FLOOR", "NORMAL", "CEILING"] as [String], id: \.self) { layer in
+                let available = model.venueTargetVerticalLayerState(layer)?.available ?? (layer != "CEILING")
+                let selected = model.selectedVenueTargetVerticalLayer == layer
+                Button(layer) { model.selectVenueTargetVerticalLayer(layer) }
+                    .buttonStyle(.bordered)
+                    .tint(selected ? BeatBeamPalette.brandCyan : nil)
+                    .disabled((model.venueTargetTestState?.active == true && !selected) || !available)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func selectorRow(
+        title: String,
+        values: [String],
+        selected: String,
+        action: @escaping (String) -> Void
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .leading)
+            ForEach(values, id: \.self) { value in
+                selectorButton(value, selected: selected, action: action)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func selectorButton(_ value: String, selected: String, action: @escaping (String) -> Void) -> some View {
+        let disabled = model.venueTargetTestState?.active == true && value != selected
+        if value == selected {
+            Button(value) { action(value) }
+                .buttonStyle(.borderedProminent)
+                .disabled(disabled)
+                .frame(maxWidth: .infinity)
+        } else {
+            Button(value) { action(value) }
+                .buttonStyle(.bordered)
+                .disabled(disabled)
+                .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+struct MovementLabPanel: View {
+    @EnvironmentObject private var model: AppModel
+    private let effects = [
+        "slow_audience_circle", "fast_audience_circle", "slow_audience_oval",
+        "fast_audience_figure_8", "fast_audience_sweep", "build_rising_sweep",
+        "build_narrow_to_wide_fan", "drop_crossing_beams", "slow_random_searchlight",
+        // Existing production V3 identities. Keep this picker as an explicit
+        // audition inventory: its values travel unchanged to the production
+        // Movement Lab API and V3 recipe catalog.
+        "full_sphere_explode", "floor_hold_explode", "rear_hold_split",
+        "full_sphere_cannon", "floor_forward_cannon", "dome_sweep_3d",
+        "floor_forward_sweep", "forward_rear_arc", "cross_3d",
+        "volumetric_orbit", "volumetric_figure_8", "energy_scatter", "fan_3d",
+        "baseline_phrase_motion"
+    ]
+    private let sections = ["break", "verse", "build", "chorus", "drop"]
+
+    var body: some View {
+        PanelSurface(title: "Movement Lab", compact: true) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Production audition • world-space V3 recipes; unmigrated effects show the V2 world-native fallback.")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Picker("EFFECT", selection: $model.movementLabEffectID) {
+                    ForEach(effects, id: \.self) { effect in Text(effect.replacingOccurrences(of: "_", with: " ")).tag(effect) }
+                }
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                HStack(spacing: 5) {
+                    ForEach(["slow_audience_circle", "fast_audience_sweep", "build_narrow_to_wide_fan", "drop_crossing_beams"], id: \.self) { effect in
+                        Button(effect == "slow_audience_circle" ? "SLOW" : effect == "fast_audience_sweep" ? "FAST" : effect == "build_narrow_to_wide_fan" ? "FAN" : "DROP") { model.movementLabEffectID = effect }
+                            .buttonStyle(.bordered)
+                            .tint(model.movementLabEffectID == effect ? BeatBeamPalette.brandCyan : nil)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                HStack(spacing: 5) {
+                    Text("CONTEXT").font(.system(size: 8, weight: .bold, design: .monospaced)).foregroundStyle(.secondary)
+                    ForEach(sections, id: \.self) { section in
+                        Button(section.uppercased()) { model.movementLabSection = section }
+                            .buttonStyle(.bordered)
+                            .tint(model.movementLabSection == section ? BeatBeamPalette.brandCyan : nil)
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    }
+                }
+                HStack(spacing: 8) {
+                    Button("‹ VAR") { model.movementLabVariation = max(0, model.movementLabVariation - 1) }
+                        .buttonStyle(.bordered)
+                    Text("V\(model.movementLabVariation)").font(.system(size: 9, weight: .bold, design: .monospaced))
+                    Button("VAR ›") { model.movementLabVariation = min(31, model.movementLabVariation + 1) }
+                        .buttonStyle(.bordered)
+                    Spacer()
+                    Button(model.movementLabState?.active == true ? "STOP" : "PLAY") {
+                        if model.movementLabState?.active == true { model.stopMovementLab() } else { model.playMovementLab() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.movementLabInFlight)
+                }
+                HStack(spacing: 5) {
+                    Text(model.movementLabState?.active == true ? "ACTIVE" : "READY")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(model.movementLabState?.active == true ? BeatBeamPalette.brandCyan : .secondary)
+                    Text("• \(model.movementLabState?.engine ?? "V3")")
+                    Text("• \(model.movementLabState?.route ?? "PRODUCTION READY")")
+                }
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+struct VenueGeometryPanel: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        PanelSurface(title: "Venue Geometry", compact: true) {
+            VStack(alignment: .leading, spacing: 9) {
+                Text("Enter measured physical dimensions. Empty fields remain UNSET; BeatBeam never guesses scale.")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    geometryField("WIDTH", unit: "m", text: $model.venueWidthMetersText)
+                    geometryField("AUDIENCE DEPTH", unit: "m", text: $model.venueForwardDepthMetersText)
+                }
+                HStack(spacing: 10) {
+                    geometryField("REAR DEPTH", unit: "m", text: $model.venueRearDepthMetersText)
+                    geometryField("AUDIENCE HEIGHT", unit: "m", text: $model.audienceTargetHeightMetersText)
+                }
+                HStack(spacing: 10) {
+                    geometryField("CEILING HEIGHT", unit: "m", text: $model.ceilingHeightMetersText)
+                    Text("UNSET keeps CEILING targeting unavailable.")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack(spacing: 8) {
+                    Text(model.venueSpace?.venueGeometry?.status ?? "MISSING_VENUE_SCALE")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(geometryReady ? BeatBeamPalette.brandCyan : BeatBeamPalette.brandAmber)
+                    Spacer()
+                    Button(model.venueGeometrySaveInFlight ? "SAVING…" : "SAVE GEOMETRY") {
+                        model.saveVenueGeometry()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.venueGeometrySaveInFlight)
+                }
+            }
+        }
+    }
+
+    private var geometryReady: Bool {
+        model.venueSpace?.venueGeometry?.status == "READY"
+    }
+
+    private func geometryField(_ label: String, unit: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 5) {
+                TextField("UNSET", text: text)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                Text(unit)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -8402,6 +10982,23 @@ struct FixtureMapAssignmentPanel: View {
                                     }
                                 }
                                 .pickerStyle(.menu)
+
+                                if editor.supportsPan && editor.supportsTilt {
+                                    HStack(spacing: 8) {
+                                        Button("Select") {
+                                            model.selectSlot(editor.id)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        Spacer()
+                                        Text(model.calibrationState(for: editor.id)?.status ?? "UNCALIBRATED")
+                                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                            .foregroundStyle(
+                                                model.calibrationState(for: editor.id)?.status == "VALID"
+                                                    ? BeatBeamPalette.brandCyan
+                                                    : BeatBeamPalette.brandAmber
+                                            )
+                                    }
+                                }
                             }
                             .padding(10)
                             .background(BeatBeamPalette.raisedBackground)
@@ -8422,6 +11019,852 @@ struct FixtureMapAssignmentPanel: View {
     }
 }
 
+struct FixtureVenueCalibrationPanel: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var showAimResetConfirmation = false
+    @State private var showAxisV2ResetConfirmation = false
+    @State private var axisV2SelectedAxis = "TILT"
+    @State private var axisV2PanSampleIndex = 0
+    @State private var axisV2TiltSampleIndex = 0
+    @State private var axisV2MeasuredPan = 0.0
+    @State private var axisV2MeasuredTilt = 0.0
+    @State private var showLegacyAim = false
+    @State private var showAxisV2Details = false
+    @State private var physicalTiltMinimumText = ""
+    @State private var physicalTiltCenterText = ""
+    @State private var physicalTiltMaximumText = ""
+
+    var body: some View {
+        PanelSurface(title: "Selected Fixture", compact: true) {
+            if let editor = selectedMovingFixture {
+                let world = model.worldPosition(for: editor.id)
+                let basis = venueOrientationBasis(for: world)
+                let state = model.calibrationState(for: editor.id)
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack {
+                        Text(editor.label)
+                            .font(.system(size: 12, weight: .semibold))
+                        Spacer()
+                        Text(state?.status ?? "UNCALIBRATED")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(state?.status == "VALID" ? BeatBeamPalette.brandCyan : BeatBeamPalette.brandAmber)
+                    }
+                    HStack(spacing: 7) {
+                        positionField("X", axis: "x", slotID: editor.id)
+                        positionField("Y", axis: "y", slotID: editor.id)
+                        positionField("Z", axis: "z", slotID: editor.id)
+                    }
+                    Text("X − LEFT / + RIGHT  •  Y + AUDIENCE / − REAR  •  exact to 0.01 m")
+                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    calibrationLine("POSITION SOURCE", state?.positionSource ?? "LOCAL DRAFT")
+                    calibrationLine("FORWARD", vectorText(basis.forward))
+                    calibrationLine("UP", vectorText(basis.up))
+                    calibrationLine("RIGHT (derived)", vectorText(basis.right))
+                    if let capabilities = state?.capabilities {
+                        calibrationLine(
+                            "PAN / TILT",
+                            "\(Int((capabilities.panRangeDegrees ?? 0).rounded()))° / \(Int((capabilities.tiltRangeDegrees ?? 0).rounded()))°"
+                        )
+                    }
+                    physicalMovementLimits(state: state)
+                    if model.isFixtureCalibrationMode {
+                        calibrationGuide
+                    }
+                    HStack {
+                        if model.isFixtureCalibrationMode {
+                            Label("CALIBRATION ACTIVE", systemImage: "checkmark.circle.fill")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(BeatBeamPalette.brandCyan)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 7)
+                                .background(BeatBeamPalette.brandCyan.opacity(0.12))
+                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        } else {
+                            Button("CALIBRATE SELECTED") {
+                                model.startFixtureCalibration()
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        Button {
+                            model.testAudienceCenterForSelectedFixture()
+                        } label: {
+                            if model.calibrationTestInFlightSlotID == editor.id {
+                                Label("TESTING…", systemImage: "clock.arrow.circlepath")
+                            } else {
+                                Label("TEST AUDIENCE CENTER", systemImage: "scope")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(model.calibrationTestInFlightSlotID != nil)
+                    }
+                    .disabled(model.calibrationSaveInFlight)
+                    if model.calibrationTestSlotID == editor.id {
+                        let result = model.audienceCenterTestResult(for: editor.id)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(
+                                model.calibrationTestInFlightSlotID == editor.id
+                                    ? "Resolving current draft…"
+                                    : audienceTestText(result)
+                            )
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(result?.status == "RESOLVED" ? BeatBeamPalette.brandCyan : BeatBeamPalette.brandAmber)
+                            Text("DRAFT DIAGNOSTIC • no config save • no DMX movement")
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                            if let result {
+                                if let fixture = result.fixtureXyzM, let target = result.targetXyzM {
+                                    Text("FIXTURE \(physicalPointText(fixture))  TARGET \(physicalPointText(target))")
+                                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let horizontal = result.horizontalDistanceM,
+                                   let vertical = result.verticalDeltaM,
+                                   let direct = result.directDistanceM {
+                                    Text(String(format: "H %.2f m  ΔZ %.2f m  DIRECT %.2f m", horizontal, vertical, direct))
+                                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let output = result.predictedOutput {
+                                    Text(
+                                        "PREDICTED DMX • PAN \(output.pan)"
+                                            + (output.panFine.map { "/\($0)" } ?? "")
+                                            + " • TILT \(output.tilt)"
+                                            + (output.tiltFine.map { "/\($0)" } ?? "")
+                                    )
+                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    Divider()
+                    physicalAxisMappingV2(editor: editor, state: state)
+                    DisclosureGroup("LEGACY / EXPERIMENTAL PHYSICAL AIM", isExpanded: $showLegacyAim) {
+                        physicalAimCalibration(editor: editor, state: state)
+                            .padding(.top, 6)
+                    }
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                }
+                .onAppear { seedPhysicalTiltLimits(from: state) }
+                .onChange(of: editor.id) { seedPhysicalTiltLimits(from: state) }
+                .onChange(of: state?.capabilities.physicalTiltLimitsSource) { seedPhysicalTiltLimits(from: state) }
+            } else {
+                Text("Select one moving head to calibrate Position, Forward and Up.")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .alert("Reset physical aim calibration?", isPresented: $showAimResetConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Reset Aim Calibration", role: .destructive) { model.resetAimCalibration() }
+        } message: {
+            Text("This removes only the selected fixture's physical aim anchors and model. Venue Position, Forward and Up remain unchanged.")
+        }
+        .alert("Fixture remounted / reset Axis Mapping V2?", isPresented: $showAxisV2ResetConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Reset Axis Mapping V2", role: .destructive) { model.resetAxisMappingV2() }
+        } message: {
+            Text("This removes only this fixture's measured V2 motor-axis samples and activation. Venue calibration and legacy Physical Aim evidence remain intact.")
+        }
+    }
+
+    @ViewBuilder
+    private func physicalMovementLimits(state: VenueFixtureCalibrationState?) -> some View {
+        let capabilities = state?.capabilities
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("PHYSICAL MOVEMENT LIMITS")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(BeatBeamPalette.brandCyan)
+                Spacer()
+                Text(capabilities?.physicalTiltLimitsSource == "FIXTURE_OVERRIDE" ? "FIXTURE OVERRIDE" : "PROFILE DEFAULT")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            Text("Local mechanical Tilt travel. Axis Mapping V2 separately determines the installed world direction.")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 7) {
+                physicalTiltField("TILT MIN", text: $physicalTiltMinimumText)
+                physicalTiltField("TILT CENTER", text: $physicalTiltCenterText)
+                physicalTiltField("TILT MAX", text: $physicalTiltMaximumText)
+            }
+            HStack {
+                Text("At least 1° precision • MIN < CENTER < MAX")
+                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(model.calibrationSaveInFlight ? "SAVING…" : "SAVE LIMITS") {
+                    model.savePhysicalTiltLimits(
+                        minimumText: physicalTiltMinimumText,
+                        centerText: physicalTiltCenterText,
+                        maximumText: physicalTiltMaximumText
+                    )
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.calibrationSaveInFlight)
+            }
+        }
+        .padding(8)
+        .background(BeatBeamPalette.mutedBackground.opacity(0.62))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func physicalTiltField(_ label: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(.system(size: 8, weight: .bold, design: .monospaced)).foregroundStyle(.secondary)
+            HStack(spacing: 3) {
+                TextField("—", text: text)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                Text("°").font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func seedPhysicalTiltLimits(from state: VenueFixtureCalibrationState?) {
+        guard let capabilities = state?.capabilities,
+              let minimum = capabilities.physicalTiltMinDeg,
+              let center = capabilities.physicalTiltCenterDeg,
+              let maximum = capabilities.physicalTiltMaxDeg
+        else { return }
+        physicalTiltMinimumText = String(format: "%.1f", minimum)
+        physicalTiltCenterText = String(format: "%.1f", center)
+        physicalTiltMaximumText = String(format: "%.1f", maximum)
+    }
+
+    @ViewBuilder
+    private func physicalAxisMappingV2(editor: SlotEditor, state: VenueFixtureCalibrationState?) -> some View {
+        let mapping = state?.axisMappingV2
+        let active = model.venueTargetTestState?.selectedFixtureID == editor.id
+            && ["PHYSICAL_AXIS_MAPPING_V2", "AXIS_MAPPING_V2_VALIDATION"].contains(model.venueTargetTestState?.mode ?? "")
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("PHYSICAL AXIS MAPPING")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(BeatBeamPalette.brandCyan)
+                    Text("Known raw motor position → measured real beam direction")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(mapping?.status ?? "UNCALIBRATED")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(mapping?.status == "ACTIVE" ? BeatBeamPalette.brandCyan : BeatBeamPalette.brandAmber)
+            }
+            HStack(spacing: 8) {
+                calibrationLine("PAN", "\(mapping?.panSampleCount ?? 0)/\(mapping?.panRequiredCount ?? 7)")
+                Divider().frame(height: 18)
+                calibrationLine("TILT", "\(mapping?.tiltSampleCount ?? 0)/\(mapping?.tiltRequiredCount ?? 5)")
+                Divider().frame(height: 18)
+                calibrationLine("MAPPING", mapping?.movementMappingAuthority ?? "LEGACY / UNCALIBRATED")
+            }
+
+            axisV2TiltFirstFlow(mapping: mapping, active: active)
+
+            if mapping?.workflowPhase == "PAN" {
+                axisV2PanWizard(editor: editor, mapping: mapping, active: active)
+            } else if mapping?.workflowPhase == "TILT" {
+                axisV2TiltWizard(editor: editor, mapping: mapping, active: active)
+            }
+
+            DisclosureGroup("RECOVERY / MANUAL SAMPLE") {
+                VStack(alignment: .leading, spacing: 7) {
+                    Picker("Axis", selection: $axisV2SelectedAxis) {
+                        Text("TILT").tag("TILT")
+                        Text("PAN").tag("PAN")
+                    }
+                    .pickerStyle(.segmented)
+                    if axisV2SelectedAxis == "PAN" {
+                        Picker("Sample", selection: $axisV2PanSampleIndex) {
+                            ForEach(0..<7, id: \.self) { Text("\($0 + 1)").tag($0) }
+                        }
+                        Button("MOVE SELECTED EXACT PAN RAW") {
+                            model.moveAxisMappingV2Sample(axis: "PAN", index: axisV2PanSampleIndex)
+                        }
+                        .disabled(model.axisMappingV2InFlight || mapping?.panStartAllowed != true)
+                    } else {
+                        Picker("Sample", selection: $axisV2TiltSampleIndex) {
+                            ForEach(0..<5, id: \.self) { Text("\($0 + 1)").tag($0) }
+                        }
+                        Button("MOVE SELECTED EXACT TILT RAW") {
+                            model.moveAxisMappingV2Sample(axis: "TILT", index: axisV2TiltSampleIndex)
+                        }
+                        .disabled(model.axisMappingV2InFlight || mapping?.tiltStartAllowed != true)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .padding(.top, 5)
+            }
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+
+            if let modelState = mapping?.model, modelState.status == "CALIBRATED_CANDIDATE" || ["CALIBRATED_CANDIDATE", "VALIDATED", "VALIDATION_FAILED", "ACTIVE"].contains(mapping?.status ?? "") {
+                Divider()
+                Text("OUT-OF-SAMPLE VENUE VALIDATION • DO NOT ADJUST")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                ForEach([("NEAR CENTER", "AUDIENCE_NEAR_CENTER"), ("MID LEFT", "AUDIENCE_MID_LEFT"), ("FAR RIGHT", "AUDIENCE_FAR_RIGHT")], id: \.1) { label, target in
+                    HStack {
+                        Image(systemName: mapping?.validations?[target]?.result == "PASS" ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(mapping?.validations?[target]?.result == "PASS" ? BeatBeamPalette.brandCyan : .secondary)
+                        Text(label).font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        Spacer()
+                        Button("MOVE") { model.moveAxisMappingV2Validation(target: target) }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(active || model.axisMappingV2InFlight)
+                    }
+                }
+                if model.venueTargetTestState?.mode == "AXIS_MAPPING_V2_VALIDATION" {
+                    HStack {
+                        Button("RELEASE") { model.releaseVenueTargetTest() }.buttonStyle(.bordered)
+                        Spacer()
+                        Button("FAIL") { model.recordAxisMappingV2Validation("FAIL") }.buttonStyle(.bordered)
+                        Button("PASS") { model.recordAxisMappingV2Validation("PASS") }.buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+
+            if mapping?.status == "VALIDATED" {
+                Button("ACTIVATE AXIS MAPPING V2") { model.activateAxisMappingV2() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
+            }
+            if mapping?.status == "ACTIVE" {
+                Label("Movement Mapping: AXIS MAPPING V2 — ACTIVE", systemImage: "checkmark.seal.fill")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(BeatBeamPalette.brandCyan)
+            }
+            if let pan = mapping?.model?.pan, let tilt = mapping?.model?.tilt {
+                DisclosureGroup("DETAILS", isExpanded: $showAxisV2Details) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(String(format: "PAN • %@ • %.1f° physical coverage • %d points", pan.direction ?? "—", pan.coverageDegrees ?? 0, pan.points?.count ?? 0))
+                        Text(String(format: "TILT • %@ • %.1f° physical coverage • %d points", tilt.direction ?? "—", tilt.coverageDegrees ?? 0, tilt.points?.count ?? 0))
+                        Text("Final trace is exposed through desired world direction, chosen raw Pan/Tilt, final rendered bytes and rendered_motion mapping authority.")
+                    }
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                }
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+            }
+            HStack {
+                Text("Legacy Aim: \(mapping?.legacyPhysicalAimStatus ?? "LEGACY_AVAILABLE")")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("FIXTURE REMOUNTED / RESET…", role: .destructive) { showAxisV2ResetConfirmation = true }
+                    .buttonStyle(.bordered)
+                    .disabled(active || ((mapping?.panSampleCount ?? 0) + (mapping?.tiltSampleCount ?? 0) == 0))
+            }
+        }
+        .padding(10)
+        .background(BeatBeamPalette.mutedBackground.opacity(0.72))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(BeatBeamPalette.brandCyan.opacity(0.22)))
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .onDisappear {
+            if ["PHYSICAL_AXIS_MAPPING_V2", "AXIS_MAPPING_V2_VALIDATION"].contains(model.venueTargetTestState?.mode ?? "") {
+                model.releaseVenueTargetTest()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func axisV2TiltFirstFlow(mapping: AxisMappingV2State?, active: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if mapping?.tiltSweepReferencePanRaw == nil {
+                Text("STEP 1  SET TILT CALIBRATION VIEWING POSE")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(BeatBeamPalette.brandAmber)
+                Text("POSITION THE REAL FIXTURE  •  Pan and Tilt physically move only the selected fixture. Position it where vertical beam motion is easy to see.")
+                    .font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
+                Grid(horizontalSpacing: 6, verticalSpacing: 5) {
+                    GridRow {
+                        Text("PAN").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(BeatBeamPalette.brandCyan)
+                        Button("LEFT · COARSE") { model.nudgeAxisMappingV2ReferencePose(axis: "PAN", direction: "LEFT", granularity: "COARSE") }
+                        Button("LEFT · FINE") { model.nudgeAxisMappingV2ReferencePose(axis: "PAN", direction: "LEFT", granularity: "FINE") }
+                        Button("RIGHT · FINE") { model.nudgeAxisMappingV2ReferencePose(axis: "PAN", direction: "RIGHT", granularity: "FINE") }
+                        Button("RIGHT · COARSE") { model.nudgeAxisMappingV2ReferencePose(axis: "PAN", direction: "RIGHT", granularity: "COARSE") }
+                    }
+                    GridRow {
+                        Text("TILT").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(BeatBeamPalette.brandCyan)
+                        Button("UP · COARSE") { model.nudgeAxisMappingV2ReferencePose(axis: "TILT", direction: "UP", granularity: "COARSE") }
+                        Button("UP · FINE") { model.nudgeAxisMappingV2ReferencePose(axis: "TILT", direction: "UP", granularity: "FINE") }
+                        Button("DOWN · FINE") { model.nudgeAxisMappingV2ReferencePose(axis: "TILT", direction: "DOWN", granularity: "FINE") }
+                        Button("DOWN · COARSE") { model.nudgeAxisMappingV2ReferencePose(axis: "TILT", direction: "DOWN", granularity: "COARSE") }
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(active || model.axisMappingV2InFlight)
+                HStack { Button("RELEASE") { model.releaseVenueTargetTest() }.buttonStyle(.bordered); Spacer(); Button("LOCK PAN FOR TILT SWEEP") { model.lockAxisMappingV2TiltReference() }.buttonStyle(.borderedProminent).disabled(model.venueTargetTestState?.mode != "PHYSICAL_AXIS_MAPPING_V2_REFERENCE") }
+            } else if (mapping?.tiltSampleCount ?? 0) < (mapping?.tiltRequiredCount ?? 5) {
+                Text("STEP 2  RECORD ALL FIVE DIRECTED TILT SAMPLES")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(BeatBeamPalette.brandAmber)
+                Text("TILT SWEEP Pan reference: LOCKED · raw \(mapping?.tiltSweepReferencePanRaw ?? 0)  •  \(mapping?.tiltSampleCount ?? 0)/\(mapping?.tiltRequiredCount ?? 5) directed samples")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
+            } else if mapping?.panSweepReferenceTiltRaw == nil {
+                Text("AUTO FRONT REFERENCE FAILED")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(BeatBeamPalette.brandAmber)
+                Text("TILT SWEEP Pan reference: LOCKED · raw \(mapping?.tiltSweepReferencePanRaw ?? 0)")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
+                Text(mapping?.workflowMoveError ?? "HORIZON FRONT 0° is not reachable in the measured Tilt map.")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced)).foregroundStyle(BeatBeamPalette.brandAmber)
+                Button("RETRY MEASURED HORIZON FRONT") { model.setAxisMappingV2PanReference(tiltPlaneDegrees: 0) }
+                    .buttonStyle(.bordered).disabled(model.axisMappingV2InFlight)
+            } else {
+                Text(String(format: "PAN SWEEP  Directed Tilt plane: %.1f° FRONT-side  •  Tilt reference: LOCKED · raw %d", mapping?.panSweepReferenceTiltPlaneDegrees ?? 0, mapping?.panSweepReferenceTiltRaw ?? 0))
+                    .font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(BeatBeamPalette.brandCyan)
+            }
+            if mapping?.legacyTiltDirectionReviewRequired == true { Text("LEGACY TILT DIRECTION REVIEW REQUIRED: old elevation-only samples remain stored but cannot distinguish HORIZON FRONT from HORIZON BACK. Remeasure all five Tilt samples.").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(BeatBeamPalette.brandAmber) }
+            if mapping?.panSamplesReviewRequired == true { Text("LEGACY ORDER / REVIEW REQUIRED: existing PAN samples stay stored but cannot be used until remeasured at this Tilt reference.").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(BeatBeamPalette.brandAmber) }
+        }
+        .padding(8).background(BeatBeamPalette.panelBackground.opacity(0.55)).clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+
+    @ViewBuilder
+    private func axisV2PanWizard(editor: SlotEditor, mapping: AxisMappingV2State?, active: Bool) -> some View {
+        let positions = mapping?.panSamplePositions ?? []
+        let sampleIndex = mapping?.workflowPhase == "PAN" ? (mapping?.workflowSampleIndex ?? 0) : axisV2PanSampleIndex
+        let raw: Int? = positions.indices.contains(sampleIndex) ? positions[sampleIndex] : nil
+        let sampleActive = model.venueTargetTestState?.mode == "PHYSICAL_AXIS_MAPPING_V2"
+            && model.venueTargetTestState?.axis == "PAN"
+            && model.venueTargetTestState?.sampleIndex == sampleIndex
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Sample \(sampleIndex + 1) / 7 • raw \(raw.map(String.init) ?? "—") • \(mapping?.panSampleCount ?? 0) saved")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            }
+            Button(sampleActive ? "AT EXACT PAN SAMPLE POSITION" : "START / RETRY CURRENT PAN SAMPLE") { model.moveAxisMappingV2Sample(axis: "PAN", index: sampleIndex) }
+                .buttonStyle(.borderedProminent).controlSize(.large).frame(maxWidth: .infinity)
+                .disabled(sampleActive || model.axisMappingV2InFlight || mapping?.panStartAllowed != true)
+            Text("WHERE DOES THE REAL BEAM POINT? • Audience = 0°, Right = 90°, Rear = 180°, Left = 270°")
+                .font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(.secondary)
+            AxisMeasuredDirectionEditor(axis: .pan, degrees: $axisV2MeasuredPan)
+                .frame(height: 172)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 6) {
+                ForEach([("AUDIENCE", 0.0), ("FRONT-RIGHT", 45.0), ("RIGHT", 90.0), ("REAR-RIGHT", 135.0), ("REAR", 180.0), ("REAR-LEFT", 225.0), ("LEFT", 270.0), ("FRONT-LEFT", 315.0)], id: \.0) { label, value in
+                    Button(label) { axisV2MeasuredPan = value }
+                        .buttonStyle(.bordered).tint(abs(axisV2MeasuredPan - value) < 0.1 ? BeatBeamPalette.brandCyan : nil)
+                }
+            }
+            HStack {
+                Button("−5°") { axisV2MeasuredPan = (axisV2MeasuredPan - 5).truncatingRemainder(dividingBy: 360) }
+                Button("−1°") { axisV2MeasuredPan = (axisV2MeasuredPan - 1).truncatingRemainder(dividingBy: 360) }
+                Spacer(); Text(String(format: "%.1f°", normalizedCompass(axisV2MeasuredPan))).font(.system(.body, design: .monospaced))
+                Spacer(); Button("+1°") { axisV2MeasuredPan = (axisV2MeasuredPan + 1).truncatingRemainder(dividingBy: 360) }
+                Button("+5°") { axisV2MeasuredPan = (axisV2MeasuredPan + 5).truncatingRemainder(dividingBy: 360) }
+            }.buttonStyle(.bordered)
+            HStack {
+                Button("RELEASE") { model.releaseVenueTargetTest() }.buttonStyle(.bordered)
+                Spacer()
+                Button("SAVE SAMPLE") { model.saveAxisMappingV2Sample(axis: "PAN", measuredDegrees: normalizedCompass(axisV2MeasuredPan)) }
+                    .buttonStyle(.borderedProminent).controlSize(.large)
+                    .disabled(model.venueTargetTestState?.mode != "PHYSICAL_AXIS_MAPPING_V2" || model.venueTargetTestState?.axis != "PAN")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func axisV2TiltWizard(editor: SlotEditor, mapping: AxisMappingV2State?, active: Bool) -> some View {
+        let positions = mapping?.tiltSamplePositions ?? []
+        let sampleIndex = mapping?.workflowPhase == "TILT" ? (mapping?.workflowSampleIndex ?? 0) : axisV2TiltSampleIndex
+        let raw: Int? = positions.indices.contains(sampleIndex) ? positions[sampleIndex] : nil
+        let sampleActive = model.venueTargetTestState?.mode == "PHYSICAL_AXIS_MAPPING_V2"
+            && model.venueTargetTestState?.axis == "TILT"
+            && model.venueTargetTestState?.sampleIndex == sampleIndex
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Sample \(sampleIndex + 1) / 5 • raw \(raw.map(String.init) ?? "—") • \(mapping?.tiltSampleCount ?? 0) saved")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            }
+            Button(sampleActive ? "AT EXACT TILT SAMPLE POSITION" : "START / RETRY CURRENT TILT SAMPLE") { model.moveAxisMappingV2Sample(axis: "TILT", index: sampleIndex) }
+                .buttonStyle(.borderedProminent).controlSize(.large).frame(maxWidth: .infinity)
+                .disabled(sampleActive || model.axisMappingV2InFlight || mapping?.tiltStartAllowed != true)
+            Text("OBSERVED BEAM DIRECTION  •  Tell BeatBeam where the real beam is pointing in the Tilt plane. These controls do not move the fixture.")
+                .font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(.secondary)
+            Text("FRONT / BACK are relative to the locked Pan reference — not automatically Audience / Rear.")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced)).foregroundStyle(BeatBeamPalette.brandAmber)
+            AxisMeasuredDirectionEditor(axis: .tilt, degrees: $axisV2MeasuredTilt)
+                .frame(height: 172)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 6) {
+                ForEach([("HORIZON FRONT", 0.0), ("UP", 90.0), ("HORIZON BACK", 180.0), ("DOWN", -90.0)], id: \.0) { label, value in
+                    Button(label) { axisV2MeasuredTilt = value }
+                        .buttonStyle(.bordered).tint(abs(normalizedDirectedTiltPlane(axisV2MeasuredTilt - value)) < 0.1 ? BeatBeamPalette.brandCyan : nil)
+                }
+            }
+            HStack {
+                Button("−5°") { axisV2MeasuredTilt = normalizedDirectedTiltPlane(axisV2MeasuredTilt - 5) }
+                Button("−1°") { axisV2MeasuredTilt = normalizedDirectedTiltPlane(axisV2MeasuredTilt - 1) }
+                Spacer(); Text(String(format: "%.1f°", axisV2MeasuredTilt)).font(.system(.body, design: .monospaced))
+                Spacer(); Button("+1°") { axisV2MeasuredTilt = normalizedDirectedTiltPlane(axisV2MeasuredTilt + 1) }
+                Button("+5°") { axisV2MeasuredTilt = normalizedDirectedTiltPlane(axisV2MeasuredTilt + 5) }
+            }.buttonStyle(.bordered)
+            HStack {
+                Button("RELEASE") { model.releaseVenueTargetTest() }.buttonStyle(.bordered)
+                Spacer()
+                Button("SAVE SAMPLE") { model.saveAxisMappingV2Sample(axis: "TILT", measuredDegrees: axisV2MeasuredTilt) }
+                    .buttonStyle(.borderedProminent).controlSize(.large)
+                    .disabled(model.venueTargetTestState?.mode != "PHYSICAL_AXIS_MAPPING_V2" || model.venueTargetTestState?.axis != "TILT")
+            }
+        }
+    }
+
+    private func normalizedCompass(_ value: Double) -> Double {
+        let result = value.truncatingRemainder(dividingBy: 360)
+        return result < 0 ? result + 360 : result
+    }
+
+    private func normalizedDirectedTiltPlane(_ value: Double) -> Double {
+        var result = value.truncatingRemainder(dividingBy: 360)
+        if result > 180 { result -= 360 }
+        if result <= -180 { result += 360 }
+        return result
+    }
+
+    @ViewBuilder
+    private func physicalAimCalibration(editor: SlotEditor, state: VenueFixtureCalibrationState?) -> some View {
+        let aim = state?.kinematicCalibration
+        let active = model.venueTargetTestState?.mode == "PHYSICAL_AIM_CALIBRATION"
+            && model.venueTargetTestState?.selectedFixtureID == editor.id
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("PHYSICAL AIM CALIBRATION")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(BeatBeamPalette.brandCyan)
+                Spacer()
+                Text("Venue: \(state?.status ?? "UNCALIBRATED") • Aim: \(aimStatus(aim))")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(aim?.status == "CALIBRATED" ? BeatBeamPalette.brandCyan : BeatBeamPalette.brandAmber)
+            }
+            Text("One selected fixture only. Pan/Tilt are leased; colour, dimmer, Master and effects remain under the live renderer.")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(Array([
+                ("1", "MID CENTER", "AUDIENCE_MID_CENTER"),
+                ("2", "FAR LEFT", "AUDIENCE_FAR_LEFT"),
+                ("3", "NEAR CENTER", "AUDIENCE_NEAR_CENTER"),
+            ].enumerated()), id: \.offset) { _, step in
+                HStack(spacing: 7) {
+                    Image(systemName: aim?.anchors?[step.2] == nil ? "circle" : "checkmark.circle.fill")
+                        .foregroundStyle(aim?.anchors?[step.2] == nil ? .secondary : BeatBeamPalette.brandCyan)
+                    Text("\(step.0)  \(step.1)")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    Spacer()
+                    Button("MOVE") { model.moveAimCalibration(to: step.2) }
+                        .buttonStyle(.bordered)
+                        .disabled(active || state?.status != "VALID" || model.aimCalibrationInFlight)
+                }
+            }
+
+            if active {
+                Picker("Adjustment", selection: $model.aimCalibrationGranularity) {
+                    Text("FINE").tag("FINE")
+                    Text("COARSE").tag("COARSE")
+                }
+                .pickerStyle(.segmented)
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button { model.nudgeAimCalibration(axis: "tilt", direction: "positive") } label: {
+                        Label("TILT UP", systemImage: "arrow.up")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Spacer()
+                }
+                HStack(spacing: 8) {
+                    Button { model.nudgeAimCalibration(axis: "pan", direction: "negative") } label: {
+                        Label("PAN LEFT", systemImage: "arrow.left")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Spacer()
+                    Button { model.nudgeAimCalibration(axis: "pan", direction: "positive") } label: {
+                        Label("PAN RIGHT", systemImage: "arrow.right")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button { model.nudgeAimCalibration(axis: "tilt", direction: "negative") } label: {
+                        Label("TILT DOWN", systemImage: "arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Spacer()
+                }
+                if let target = model.venueTargetTestState?.target,
+                   let output = model.venueTargetTestState?.renderedOutputs?[editor.id] {
+                    if let resolution = model.venueTargetTestState?.selectedResolution {
+                        Text(String(format: "DESIRED • pan %.2f° • tilt %.2f°", resolution.panDegrees ?? 0, resolution.tiltDegrees ?? 0))
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("\(target.replacingOccurrences(of: "AUDIENCE_", with: "")) • FINAL PAN \(output.pan)\(output.panFine.map { "/\($0)" } ?? "") • TILT \(output.tilt)\(output.tiltFine.map { "/\($0)" } ?? "")")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    if let theoretical = model.venueTargetTestState?.theoreticalOutput {
+                        Text("Δ THEORETICAL • pan \(rawAxis(output.pan, output.panFine) - rawAxis(theoretical.pan, theoretical.panFine)) • tilt \(rawAxis(output.tilt, output.tiltFine) - rawAxis(theoretical.tilt, theoretical.tiltFine)) raw")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                HStack {
+                    Button("RELEASE") { model.releaseVenueTargetTest() }
+                        .buttonStyle(.bordered)
+                    Spacer()
+                    if model.venueTargetTestState?.target == "AUDIENCE_FAR_RIGHT" {
+                        Button("ADJUSTMENT REQUIRED") { model.recordAimValidation("ADJUSTMENT_REQUIRED") }
+                            .buttonStyle(.bordered)
+                        Button("PASS") { model.recordAimValidation("PASS") }
+                            .buttonStyle(.borderedProminent)
+                    } else {
+                        Button("SAVE ANCHOR") { model.saveAimCalibrationAnchor() }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+
+            if aim?.status == "CALIBRATED", !active {
+                HStack {
+                    Text("OUT-OF-SAMPLE")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("MOVE FAR RIGHT • DO NOT ADJUST") {
+                        model.moveAimCalibration(to: "AUDIENCE_FAR_RIGHT")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            if let pan = aim?.model?.pan, let tilt = aim?.model?.tilt {
+                Text(String(format: "MODEL residual • pan %.0f raw • tilt %.0f raw • spread %.1f° / %.1f°", pan.maximumAbsoluteResidualRaw, tilt.maximumAbsoluteResidualRaw, pan.inputSpreadDegrees, tilt.inputSpreadDegrees))
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                if let validation = aim?.validation?.result {
+                    Text("FAR RIGHT: \(validation)")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(validation == "PASS" ? BeatBeamPalette.brandCyan : BeatBeamPalette.brandAmber)
+                }
+                Spacer()
+                Button("RESET AIM…", role: .destructive) { showAimResetConfirmation = true }
+                    .buttonStyle(.bordered)
+                    .disabled(active || (aim?.anchorCount ?? 0) == 0)
+            }
+        }
+        .padding(8)
+        .background(BeatBeamPalette.mutedBackground.opacity(0.62))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func aimStatus(_ aim: KinematicCalibrationState?) -> String {
+        guard let aim else { return "0/3 anchors" }
+        if aim.status == "CALIBRATED" { return "CALIBRATED" }
+        if aim.status == "STALE" { return "STALE" }
+        if aim.status == "KINEMATIC_MODEL_MISMATCH" { return "MODEL MISMATCH" }
+        if aim.status == "INSUFFICIENT_ANCHOR_SPREAD" { return "INSUFFICIENT SPREAD" }
+        return "\(aim.anchorCount)/\(aim.requiredAnchorCount) anchors"
+    }
+
+    private func rawAxis(_ coarse: Int, _ fine: Int?) -> Int {
+        fine.map { (coarse << 8) | $0 } ?? coarse
+    }
+
+    private var selectedMovingFixture: SlotEditor? {
+        guard let editor = model.slotEditors.first(where: { $0.id == model.selectedSlotID }) else { return nil }
+        return editor.supportsPan && editor.supportsTilt ? editor : nil
+    }
+
+    private func venuePosition(_ world: SlotWorldPosition) -> VenuePointState {
+        VenuePointState(
+            x: venueNormalizedCoordinate(world.x, negativeExtent: abs(StageWorld.minX), positiveExtent: StageWorld.maxX),
+            y: venueNormalizedCoordinate(world.y, negativeExtent: abs(StageWorld.minY), positiveExtent: StageWorld.maxY)
+        )
+    }
+
+    private func physicalPointText(_ point: VenuePhysicalPointState) -> String {
+        String(format: "(%.2f, %.2f, %.2f)m", point.x, point.y, point.z)
+    }
+
+    private func vectorText(_ vector: VenueVectorState) -> String {
+        String(format: "%.2f  %.2f  %.2f", vector.x, vector.y, vector.z)
+    }
+
+    private func calibrationLine(_ name: String, _ value: String) -> some View {
+        HStack {
+            Text(name)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+        }
+    }
+
+    private func positionField(_ label: String, axis: String, slotID: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("\(label) · m")
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            TextField(
+                label,
+                value: Binding(
+                    get: {
+                        let point = model.fixturePositionMeters(for: slotID)
+                        if axis == "x" { return point.x }
+                        if axis == "y" { return point.y }
+                        return point.z
+                    },
+                    set: { model.setFixturePositionMeters(for: slotID, axis: axis, value: $0) }
+                ),
+                format: .number.precision(.fractionLength(2))
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            .disabled(!model.isEditingProjectionLayout)
+        }
+    }
+
+    private var calibrationGuide: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("CALIBRATION LEGEND")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            calibrationLegendRow(
+                BeatBeamPalette.brandAmber,
+                "AMBER F",
+                "Forward: physical lens/nose direction"
+            )
+            calibrationLegendRow(
+                BeatBeamPalette.brandCyan,
+                "BLUE / CYAN",
+                "Right: derived from Forward × Up; do not set separately"
+            )
+            calibrationLegendRow(
+                BeatBeamPalette.brandMagenta,
+                "RED / MAGENTA",
+                "Up: physical top/mount direction"
+            )
+            calibrationLegendRow(
+                BeatBeamPalette.brandCyan.opacity(0.78),
+                "DOTTED LINE",
+                "Fixture → Audience Center diagnostic only; no movement"
+            )
+            Text("1 Drag Position  2 Set Forward  3 Set Up  4 Apply  5 Test Audience Center")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Red fixture glow is live preview/selection feedback, not a calibration vector.")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .background(BeatBeamPalette.mutedBackground.opacity(0.62))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func calibrationLegendRow(_ color: Color, _ title: String, _ detail: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text(title)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(color)
+                .frame(width: 98, alignment: .leading)
+            Text(detail)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func audienceTestText(_ result: VenueTargetResolutionState?) -> String {
+        guard let result else { return "TEST DID NOT RETURN A RESULT" }
+        let pan = result.panDegrees.map { String(format: "pan %.1f°", $0) } ?? "pan HOLD"
+        let tilt = result.tiltDegrees.map { String(format: "tilt %.1f°", $0) } ?? "tilt HOLD"
+        return "\(result.status) • \(pan) • \(tilt) • \(result.reason ?? "diagnostic only")"
+    }
+}
+
+private enum AxisMeasuredDirectionKind { case pan, tilt }
+
+private struct AxisMeasuredDirectionEditor: View {
+    let axis: AxisMeasuredDirectionKind
+    @Binding var degrees: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = min(proxy.size.width, proxy.size.height)
+            let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            let radius = max(38, size / 2 - 17)
+            ZStack {
+                Circle()
+                    .fill(BeatBeamPalette.raisedBackground)
+                    .overlay(Circle().stroke(BeatBeamPalette.border, lineWidth: 1))
+                    .frame(width: radius * 2, height: radius * 2)
+                    .position(center)
+                Path { path in
+                    path.move(to: CGPoint(x: center.x - radius, y: center.y))
+                    path.addLine(to: CGPoint(x: center.x + radius, y: center.y))
+                    path.move(to: CGPoint(x: center.x, y: center.y - radius))
+                    path.addLine(to: CGPoint(x: center.x, y: center.y + radius))
+                }
+                .stroke(BeatBeamPalette.border.opacity(0.72), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                Path { path in
+                    path.move(to: center)
+                    let endpoint = rayEndpoint(center: center, radius: radius * 0.82)
+                    path.addLine(to: endpoint)
+                }
+                .stroke(BeatBeamPalette.brandCyan, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                Circle().fill(BeatBeamPalette.brandCyan).frame(width: 18, height: 18).position(rayEndpoint(center: center, radius: radius * 0.82))
+                Text(axis == .pan ? "AUDIENCE" : "UP")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .position(x: center.x, y: center.y - radius - 8)
+                Text(axis == .pan ? "REAR" : "DOWN")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .position(x: center.x, y: center.y + radius + 8)
+                Text(axis == .pan ? "LEFT" : "HORIZON BACK")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .position(x: center.x - radius - (axis == .pan ? 16 : 38), y: center.y)
+                Text(axis == .pan ? "RIGHT" : "HORIZON FRONT")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .position(x: center.x + radius + (axis == .pan ? 18 : 42), y: center.y)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0).onChanged { value in
+                    let dx = value.location.x - center.x
+                    let dy = value.location.y - center.y
+                    if axis == .pan {
+                        var angle = atan2(dx, -dy) * 180 / .pi
+                        if angle < 0 { angle += 360 }
+                        degrees = angle
+                    } else {
+                        var angle = atan2(-dy, dx) * 180 / .pi
+                        if angle <= -180 { angle += 360 }
+                        degrees = angle
+                    }
+                }
+            )
+        }
+    }
+
+    private func rayEndpoint(center: CGPoint, radius: CGFloat) -> CGPoint {
+        let radians: Double
+        if axis == .pan {
+            radians = degrees * .pi / 180
+            return CGPoint(x: center.x + sin(radians) * radius, y: center.y - cos(radians) * radius)
+        }
+        radians = degrees * .pi / 180
+        return CGPoint(x: center.x + cos(radians) * radius, y: center.y - sin(radians) * radius)
+    }
+}
+
 struct StageProjectionDeckView: View {
     @EnvironmentObject private var model: AppModel
     @AppStorage("mapProjectionShowTop") private var showTop = true
@@ -8430,17 +11873,21 @@ struct StageProjectionDeckView: View {
     @AppStorage("mapProjectionShowSide") private var showSide = true
     @AppStorage(mapProjectionShow3DDefaultsKey) private var show3D = true
     @AppStorage(mapProjection2DZoomDefaultsKey) private var projection2DZoom = 1.0
+    @State private var primaryProjection: StageProjection = .top
+    @State private var primaryShows3D = false
 
     let showControls: Bool
     let topInteractive: Bool
     let showSelection: Bool
     let showAnchorLabels: Bool
     var selectionMode: ProjectionSelectionMode = .none
+    var singlePrimaryView = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if showControls {
-                HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
                     ForEach(StageProjection.allCases) { projection in
                         Button(action: { toggle(projection) }) {
                             HStack(spacing: 6) {
@@ -8470,14 +11917,17 @@ struct StageProjectionDeckView: View {
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 7)
-                        .background(show3D ? BeatBeamPalette.triggerActive.opacity(0.22) : BeatBeamPalette.raisedBackground)
+                        .background((singlePrimaryView ? primaryShows3D : show3D) ? BeatBeamPalette.triggerActive.opacity(0.22) : BeatBeamPalette.raisedBackground)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(show3D ? BeatBeamPalette.triggerActive.opacity(0.78) : BeatBeamPalette.border, lineWidth: 1)
+                                .stroke((singlePrimaryView ? primaryShows3D : show3D) ? BeatBeamPalette.triggerActive.opacity(0.78) : BeatBeamPalette.border, lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .buttonStyle(.plain)
+                    }
+
+                    HStack(spacing: 8) {
 
                     if showTop {
                         Text("Top \(model.topProjectionRotationDegrees)°")
@@ -8523,7 +11973,7 @@ struct StageProjectionDeckView: View {
                             .foregroundStyle(.secondary)
 
                         Button {
-                            projection2DZoom = clampedProjection2DZoom(projection2DZoom - 0.10)
+                            projection2DZoom = clampedProjection2DZoom(projection2DZoom - 0.25)
                         } label: {
                             Image(systemName: "minus")
                         }
@@ -8535,20 +11985,55 @@ struct StageProjectionDeckView: View {
                             .frame(minWidth: 66)
 
                         Button {
+                            model.resetMetricStageMapView()
                             projection2DZoom = 1.0
                         } label: {
-                            Text("Reset")
+                            Text("Reset View")
                         }
                         .buttonStyle(.bordered)
 
                         Button {
-                            projection2DZoom = clampedProjection2DZoom(projection2DZoom + 0.10)
+                            projection2DZoom = clampedProjection2DZoom(projection2DZoom + 0.25)
                         } label: {
                             Image(systemName: "plus")
                         }
                         .buttonStyle(.bordered)
+
+                        Menu("Zoom") {
+                            ForEach([0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0], id: \.self) { zoom in
+                                Button("\(Int(zoom * 100))%") {
+                                    projection2DZoom = zoom
+                                }
+                            }
+                        }
+                        .menuStyle(.borderlessButton)
                     }
-                    Spacer()
+
+                    Button {
+                        model.fixtureSnapEnabled.toggle()
+                    } label: {
+                        Label(
+                            model.fixtureSnapEnabled ? "SNAP ON" : "SNAP OFF",
+                            systemImage: model.fixtureSnapEnabled ? "square.grid.4x3.fill" : "circle.dashed"
+                        )
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(model.fixtureSnapEnabled ? BeatBeamPalette.triggerActive.opacity(0.28) : BeatBeamPalette.raisedBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(model.fixtureSnapEnabled ? BeatBeamPalette.triggerActive.opacity(0.88) : BeatBeamPalette.border, lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Fixture drag snap")
+                    .help("Fixture position drag snap: \(model.fixtureSnapEnabled ? "0.25 m" : "off")")
+
+                    }
+
+                    HStack(spacing: 8) {
+                    Spacer(minLength: 0)
                         if model.isEditingProjectionLayout {
                             if let selectedEditor = model.slotEditors.first(where: { $0.id == model.selectedSlotID }) {
                                 let yaw = Int(model.projectionYawDegrees(for: selectedEditor.id).rounded())
@@ -8592,6 +12077,22 @@ struct StageProjectionDeckView: View {
                                         Label("Pitch +90°", systemImage: "arrow.up")
                                     }
                                     .buttonStyle(.bordered)
+
+                                    if model.isFixtureCalibrationMode {
+                                        Button {
+                                            model.rotateSelectedProjectionRoll(by: -90)
+                                        } label: {
+                                            Label("Up -90°", systemImage: "arrow.clockwise")
+                                        }
+                                        .buttonStyle(.bordered)
+
+                                        Button {
+                                            model.rotateSelectedProjectionRoll(by: 90)
+                                        } label: {
+                                            Label("Up +90°", systemImage: "arrow.counterclockwise")
+                                        }
+                                        .buttonStyle(.bordered)
+                                    }
                                 } else if isWallWashEditor {
                                     Button {
                                         model.rotateSelectedProjectionRoll(by: -90)
@@ -8659,13 +12160,25 @@ struct StageProjectionDeckView: View {
                             model.applyProjectionLayoutEditing()
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(model.calibrationSaveInFlight)
                     } else {
+                        Button("Calibrate Fixture") {
+                            model.startFixtureCalibration()
+                        }
+                        .buttonStyle(.borderedProminent)
                         Button("Edit") {
                             model.startProjectionLayoutEditing()
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                     }
+                    }
+                    .padding(.horizontal, 1)
+                    .padding(.vertical, 2)
                 }
+            }
+
+            if model.isFixtureCalibrationMode {
+                calibrationProjectionGuide
             }
 
             let projections = activeProjections
@@ -8690,7 +12203,61 @@ struct StageProjectionDeckView: View {
         }
     }
 
+    /// Keep the viewport scale as an explicit input to every 2D canvas. The
+    /// metric projection helpers read the same persisted value, but passing it
+    /// through the view tree invalidates an already-visible canvas as soon as
+    /// a zoom control changes.
+    private var viewportZoom: Double {
+        clampedProjection2DZoom(projection2DZoom)
+    }
+
+    private var viewportRenderKey: MetricStageMapViewportRenderKey {
+        MetricStageMapViewportRenderKey(
+            zoom: viewportZoom,
+            cameraRevision: model.metricStageMapViewportRevision
+        )
+    }
+
+    private var calibrationProjectionGuide: some View {
+        HStack(spacing: 10) {
+            calibrationProjectionGuideItem(
+                color: BeatBeamPalette.brandAmber,
+                title: "TOP VIEW",
+                detail: "Forward → Back"
+            )
+            calibrationProjectionGuideItem(
+                color: BeatBeamPalette.brandMagenta,
+                title: "FRONT / BACK / SIDE",
+                detail: "Up → Down"
+            )
+            Text("One axis per view")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(BeatBeamPalette.mutedBackground.opacity(0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func calibrationProjectionGuideItem(color: Color, title: String, detail: String) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text(title)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(color)
+            Text(detail)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+
     private var activeProjections: [StageProjection] {
+        if singlePrimaryView {
+            return primaryShows3D ? [] : [primaryProjection]
+        }
         let selected = StageProjection.allCases.filter(isActive)
         if selected.isEmpty {
             return show3D ? [] : [.top]
@@ -8699,10 +12266,13 @@ struct StageProjectionDeckView: View {
     }
 
     private var visiblePanelCount: Int {
-        activeProjections.count + (show3D ? 1 : 0)
+        activeProjections.count + ((singlePrimaryView ? primaryShows3D : show3D) ? 1 : 0)
     }
 
     private func isActive(_ projection: StageProjection) -> Bool {
+        if singlePrimaryView {
+            return !primaryShows3D && primaryProjection == projection
+        }
         switch projection {
         case .top:
             return showTop
@@ -8716,6 +12286,13 @@ struct StageProjectionDeckView: View {
     }
 
     private func setActive(_ projection: StageProjection, _ value: Bool) {
+        if singlePrimaryView {
+            if value {
+                primaryProjection = projection
+                primaryShows3D = false
+            }
+            return
+        }
         switch projection {
         case .top:
             showTop = value
@@ -8729,6 +12306,11 @@ struct StageProjectionDeckView: View {
     }
 
     private func toggle(_ projection: StageProjection) {
+        if singlePrimaryView {
+            primaryProjection = projection
+            primaryShows3D = false
+            return
+        }
         if isActive(projection) && activeProjections.count == 1 && !show3D {
             return
         }
@@ -8736,6 +12318,10 @@ struct StageProjectionDeckView: View {
     }
 
     private func toggle3DVisibility() {
+        if singlePrimaryView {
+            primaryShows3D.toggle()
+            return
+        }
         if show3D && activeProjections.isEmpty {
             showTop = true
             show3D = false
@@ -8764,7 +12350,7 @@ struct StageProjectionDeckView: View {
     private func singleVisiblePanel(for projections: [StageProjection]) -> some View {
         if let projection = projections.first {
             projectionPanel(for: projection)
-        } else if show3D {
+        } else if primaryShows3D || show3D {
             threeDPreviewPanel
         }
     }
@@ -8785,7 +12371,9 @@ struct StageProjectionDeckView: View {
         StagePreviewPanel(
             title: projection.title,
             subtitle: projection.subtitle,
-            projection: projection
+            projection: projection,
+            viewportRenderKey: viewportRenderKey,
+            showsWorldBackdrop: projection != .top
         ) {
             switch projection {
             case .top:
@@ -8797,7 +12385,8 @@ struct StageProjectionDeckView: View {
                     showDiagnostics: false,
                     projection: .top,
                     editMode: model.isEditingProjectionLayout,
-                    selectionMode: selectionMode
+                    selectionMode: selectionMode,
+                    viewportRenderKey: viewportRenderKey
                 )
                 .aspectRatio(stageMapAspectRatio, contentMode: .fit)
             case .front:
@@ -8805,7 +12394,8 @@ struct StageProjectionDeckView: View {
                     showDiagnostics: false,
                     projection: .front,
                     editMode: model.isEditingProjectionLayout,
-                    selectionMode: selectionMode
+                    selectionMode: selectionMode,
+                    viewportRenderKey: viewportRenderKey
                 )
                     .aspectRatio(stageMapAspectRatio, contentMode: .fit)
             case .back:
@@ -8813,14 +12403,16 @@ struct StageProjectionDeckView: View {
                     showDiagnostics: false,
                     projection: .back,
                     editMode: model.isEditingProjectionLayout,
-                    selectionMode: selectionMode
+                    selectionMode: selectionMode,
+                    viewportRenderKey: viewportRenderKey
                 )
                     .aspectRatio(stageMapAspectRatio, contentMode: .fit)
             case .side:
                 StageSideCanvas(
                     showDiagnostics: false,
                     editMode: model.isEditingProjectionLayout,
-                    selectionMode: selectionMode
+                    selectionMode: selectionMode,
+                    viewportRenderKey: viewportRenderKey
                 )
                     .aspectRatio(stageMapAspectRatio, contentMode: .fit)
             }
@@ -8834,6 +12426,39 @@ enum ProjectionSelectionMode {
     case preview
 }
 
+/// Narrow interaction-only state. `StageMapCanvas` deliberately does not
+/// observe its published translation, so a pointer update invalidates only the
+/// lightweight transform wrapper—not the TimelineView/world construction.
+private final class StageMapPanInteractionState: ObservableObject {
+    @Published var translationPx: CGSize = .zero
+}
+
+private struct StageMapPanTranslationLayer<Content: View>: View {
+    @ObservedObject var interaction: StageMapPanInteractionState
+    let content: Content
+
+    init(interaction: StageMapPanInteractionState, @ViewBuilder content: () -> Content) {
+        self.interaction = interaction
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            // A single outer transform keeps active panning in screen space.
+            // Do not force an offscreen group: Metal/beam content can flicker
+            // when repeatedly rasterized into a transient layer while dragging.
+            .transformEffect(
+                CGAffineTransform(
+                    translationX: interaction.translationPx.width,
+                    y: interaction.translationPx.height
+                )
+            )
+            .transaction { transaction in
+                transaction.animation = nil
+            }
+    }
+}
+
 struct StageMapCanvas: View {
     @EnvironmentObject private var model: AppModel
     var showAnchorLabels: Bool = true
@@ -8844,20 +12469,34 @@ struct StageMapCanvas: View {
     var projection: StageProjection = .top
     var editMode: Bool = false
     var selectionMode: ProjectionSelectionMode = .none
+    let viewportRenderKey: MetricStageMapViewportRenderKey
+    @State private var backgroundPanStart: SlotWorldPosition?
+    // Keep the reference in State rather than StateObject: this canvas must
+    // not subscribe to `translationPx`; only StageMapPanTranslationLayer does.
+    @State private var panInteraction = StageMapPanInteractionState()
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !(hasAnimatedStrobe || model.previewPulseTestMode != "OFF"))) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !(hasAnimatedStrobe || hasActiveVenuePreviewTest || model.previewPulseTestMode != "OFF" || model.smokePreviewIntensity() > 0))) { timeline in
             GeometryReader { geometry in
                 ZStack {
-                    if showBackdrop {
-                        StageMapBackdrop()
-                    }
+                    StageMapPanTranslationLayer(interaction: panInteraction) {
+                        // The grid and all projected world content are one
+                        // composited layer during active panning.
+                        ProjectionPanelBackdrop(projection: projection, viewportRenderKey: viewportRenderKey)
 
-                    if showAnchorLabels {
-                        ForEach(StageAnchor.allCases) { anchor in
-                            StageAnchorMarker(anchor: anchor)
-                                .position(worldProjectedAbsolutePoint(anchor.defaultWorldPosition, projection: .top, size: geometry.size))
+                        if showBackdrop {
+                            StageMapBackdrop()
                         }
+
+                        if interactive || editMode {
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .gesture(backgroundPanGesture(canvasSize: geometry.size))
+                        }
+
+                    if projection == .top, let venueSpace = model.venueSpace {
+                        VenueSpaceOverlay(space: venueSpace, size: geometry.size)
+                            .allowsHitTesting(false)
                     }
 
                     ForEach(model.slotEditors) { editor in
@@ -8877,6 +12516,7 @@ struct StageMapCanvas: View {
                                 mountPitchDegrees: worldOrigin.pitchDegrees,
                                 preview: preview,
                                 stageMotion: stageMotion,
+                                venueTargetPreview: model.venueTargetPreviewVisual(for: editor.id),
                                 beamKind: beamKind,
                                 wallWashEmitters: beamKind == .wallWash
                                     ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: previewTime)
@@ -8905,14 +12545,20 @@ struct StageMapCanvas: View {
                         )
                     }
 
+                    ManualSmokePlumeOverlay(projection: projection, size: geometry.size, time: timeline.date)
+
                     if editMode {
                         EditModeBanner()
                             .padding(12)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
+                    }
                 }
             }
         }
+        // Rebuild only for an authoritative zoom/camera change, never for an
+        // active pointer sample. The latter is the outer compositor offset.
+        .id(viewportRenderKey)
     }
 
     private func beamKind(for editor: SlotEditor) -> StageFixtureBeam.BeamKind {
@@ -8930,8 +12576,39 @@ struct StageMapCanvas: View {
         model.presentedSlotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
     }
 
+    private var hasActiveVenuePreviewTest: Bool {
+        !model.previewVenueTargetSlotIDs.isEmpty
+    }
+
     private func absolutePoint(_ normalized: CGPoint, in size: CGSize) -> CGPoint {
         CGPoint(x: size.width * normalized.x, y: size.height * normalized.y)
+    }
+
+    private func backgroundPanGesture(canvasSize: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 4)
+            .onChanged { value in
+                if backgroundPanStart == nil {
+                    backgroundPanStart = projectionViewportCenter(for: projection)
+                }
+                guard backgroundPanStart != nil else { return }
+                panInteraction.translationPx = value.translation
+            }
+            .onEnded { value in
+                guard let start = backgroundPanStart else { return }
+                // Commit and clear in the same non-animated transaction, so
+                // the canonical reprojection occupies the exact translated
+                // screen position without a release jump.
+                withTransaction(Transaction(animation: nil)) {
+                    model.commitProjectionViewportPan(
+                        projection: projection,
+                        startCenter: start,
+                        translation: value.translation,
+                        canvasSize: canvasSize
+                    )
+                    panInteraction.translationPx = .zero
+                    backgroundPanStart = nil
+                }
+            }
     }
 
     private func isSelected(_ slotID: String) -> Bool {
@@ -8947,15 +12624,196 @@ struct StageMapCanvas: View {
     }
 }
 
+struct VenueSpaceOverlay: View {
+    @EnvironmentObject private var model: AppModel
+    let space: VenueSpaceState
+    let size: CGSize
+
+    var body: some View {
+        ZStack {
+            Path { path in
+                path.move(to: absoluteWorld(x: StageWorld.minX, y: 0))
+                path.addLine(to: absoluteWorld(x: StageWorld.maxX, y: 0))
+                path.move(to: absoluteWorld(x: 0, y: StageWorld.minY))
+                path.addLine(to: absoluteWorld(x: 0, y: StageWorld.maxY))
+            }
+            .stroke(BeatBeamPalette.brandAmber.opacity(0.16), style: StrokeStyle(lineWidth: 1, dash: [4, 5]))
+
+            venueLabel("LEFT", position: absoluteWorld(x: StageWorld.minX + 70, y: 0))
+            venueLabel("RIGHT", position: absoluteWorld(x: StageWorld.maxX - 70, y: 0))
+            venueLabel("AUDIENCE", position: absoluteWorld(x: 0, y: StageWorld.maxY - 60))
+            venueLabel("DJ / REAR", position: absoluteWorld(x: 0, y: StageWorld.minY + 45))
+
+            VStack(spacing: 2) {
+                Circle()
+                    .fill(BeatBeamPalette.brandAmber.opacity(0.85))
+                    .frame(width: 6, height: 6)
+                Text("DJ")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(BeatBeamPalette.brandAmber.opacity(0.82))
+            }
+            .position(absoluteWorld(x: 0, y: 0))
+
+            ForEach(space.targets) { target in
+                if let physical = target.physicalPointM {
+                    VenueTargetMarker(
+                        label: targetLabel(target.id),
+                        isSelected: target.id == model.selectedVenueTarget
+                    )
+                    .position(absolute(physical))
+                }
+            }
+
+            if !previewTargetActive,
+               let fixturePoint = selectedFixtureWorldPoint,
+               let target = space.targets.first(where: { $0.id == model.selectedVenueTarget })?.physicalPointM {
+                Path { path in
+                    path.move(to: fixturePoint)
+                    path.addLine(to: absolute(target))
+                }
+                .stroke(
+                    BeatBeamPalette.brandCyan.opacity(0.88),
+                    style: StrokeStyle(lineWidth: 2, dash: [7, 4])
+                )
+                ZStack {
+                    Circle()
+                        .fill(Color.black.opacity(0.76))
+                        .frame(width: 24, height: 24)
+                    Circle()
+                        .stroke(BeatBeamPalette.brandAmber, lineWidth: 2)
+                        .frame(width: 20, height: 20)
+                    Text("F")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(BeatBeamPalette.brandAmber)
+                }
+                .position(fixturePoint)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("DJ-centric venue axes and audience targets")
+    }
+
+    private func absolute(_ point: VenuePhysicalPointState) -> CGPoint {
+        let world = SlotWorldPosition(
+            x: point.x * 100,
+            y: point.y * 100,
+            z: point.z * 100
+        )
+        let normalized = worldProjectedPoint(world, projection: .top)
+        return CGPoint(x: size.width * normalized.x, y: size.height * normalized.y)
+    }
+
+    private func absoluteWorld(x: Double, y: Double) -> CGPoint {
+        let normalized = worldProjectedPoint(SlotWorldPosition(x: x, y: y, z: 0), projection: .top)
+        return CGPoint(x: size.width * normalized.x, y: size.height * normalized.y)
+    }
+
+    private func targetLabel(_ id: String) -> String {
+        let parts = id.replacingOccurrences(of: "AUDIENCE_", with: "").split(separator: "_")
+        guard parts.count == 2 else { return id }
+        return String(parts[0].prefix(1)) + String(parts[1].prefix(1))
+    }
+
+    private var selectedFixtureWorldPoint: CGPoint? {
+        guard !model.selectedSlotID.isEmpty else { return nil }
+        let world = model.worldPosition(for: model.selectedSlotID)
+        return worldProjectedAbsolutePoint(world, projection: .top, size: size)
+    }
+
+    private var previewTargetActive: Bool {
+        !model.previewVenueTargetSlotIDs.isEmpty
+    }
+
+    private func venueLabel(_ text: String, position: CGPoint) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .foregroundStyle(BeatBeamPalette.brandAmber.opacity(0.74))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 3)
+            .background(Color.black.opacity(0.32))
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .position(position)
+    }
+}
+
+struct VenueTargetMarker: View {
+    let label: String
+    var isSelected = false
+
+    var body: some View {
+        VStack(spacing: 2) {
+            ZStack {
+                Circle()
+                    .stroke(isSelected ? BeatBeamPalette.brandAmber : BeatBeamPalette.brandCyan.opacity(0.62), lineWidth: isSelected ? 2 : 1)
+                    .frame(width: isSelected ? 22 : 16, height: isSelected ? 22 : 16)
+                Circle()
+                    .fill((isSelected ? BeatBeamPalette.brandAmber : BeatBeamPalette.brandCyan).opacity(0.82))
+                    .frame(width: 4, height: 4)
+                Rectangle()
+                    .fill(BeatBeamPalette.brandCyan.opacity(0.48))
+                    .frame(width: 22, height: 1)
+                Rectangle()
+                    .fill(BeatBeamPalette.brandCyan.opacity(0.48))
+                    .frame(width: 1, height: 22)
+            }
+            Text(label)
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .foregroundStyle((isSelected ? BeatBeamPalette.brandAmber : BeatBeamPalette.brandCyan).opacity(0.82))
+        }
+    }
+}
+
+/// A preview-only plume. Its anchor and intensity come from the final backend
+/// smoke authority; the short local decay is presentation only and never DMX.
+struct ManualSmokePlumeOverlay: View {
+    @EnvironmentObject private var model: AppModel
+    let projection: StageProjection
+    let size: CGSize
+    let time: Date
+
+    var body: some View {
+        let intensity = model.smokePreviewIntensity(at: time)
+        if intensity > 0.001, let smoke = model.manualSmoke {
+            ForEach(smoke.fixtureSlotIds, id: \.self) { slotID in
+                let origin = worldProjectedAbsolutePoint(model.worldPosition(for: slotID), projection: projection, size: size)
+                SmokePlume(intensity: intensity, projection: projection)
+                    .position(origin)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+}
+
+private struct SmokePlume: View {
+    let intensity: Double
+    let projection: StageProjection
+
+    private var rise: CGFloat {
+        projection == .top ? 0 : -34
+    }
+
+    var body: some View {
+        ZStack {
+            Circle().fill(Color.white.opacity(0.12 + intensity * 0.16)).frame(width: 32 + 45 * intensity, height: 32 + 45 * intensity).offset(x: -10, y: rise - 11)
+            Circle().fill(BeatBeamPalette.brandCyan.opacity(0.12 + intensity * 0.14)).frame(width: 25 + 34 * intensity, height: 25 + 34 * intensity).offset(x: 13, y: rise - 24)
+            Circle().fill(Color.white.opacity(0.10 + intensity * 0.12)).frame(width: 18 + 26 * intensity, height: 18 + 26 * intensity).offset(x: 1, y: rise - 43)
+        }
+        .blur(radius: 4 + 7 * intensity)
+        .opacity(0.35 + intensity * 0.65)
+    }
+}
+
 struct StageFrontCanvas: View {
     @EnvironmentObject private var model: AppModel
     var showDiagnostics: Bool = false
     var projection: StageProjection = .front
     var editMode: Bool = false
     var selectionMode: ProjectionSelectionMode = .none
+    let viewportRenderKey: MetricStageMapViewportRenderKey
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !(hasAnimatedStrobe || model.previewPulseTestMode != "OFF"))) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !(hasAnimatedStrobe || hasActiveVenuePreviewTest || model.previewPulseTestMode != "OFF" || model.smokePreviewIntensity() > 0))) { timeline in
             GeometryReader { geometry in
                 ZStack {
                     ForEach(model.slotEditors) { editor in
@@ -8975,6 +12833,7 @@ struct StageFrontCanvas: View {
                                 mountPitchDegrees: worldOrigin.pitchDegrees,
                                 preview: preview,
                                 stageMotion: stageMotion,
+                                venueTargetPreview: model.venueTargetPreviewVisual(for: editor.id),
                                 beamKind: beamKind,
                                 wallWashEmitters: beamKind == .wallWash
                                     ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: previewTime)
@@ -9003,6 +12862,8 @@ struct StageFrontCanvas: View {
                         )
                     }
 
+                    ManualSmokePlumeOverlay(projection: projection, size: geometry.size, time: timeline.date)
+
                     if editMode {
                         EditModeBanner()
                             .padding(12)
@@ -9011,6 +12872,7 @@ struct StageFrontCanvas: View {
                 }
             }
         }
+        .id(viewportRenderKey)
     }
 
     private func beamKind(for editor: SlotEditor) -> StageFixtureBeam.BeamKind {
@@ -9026,6 +12888,11 @@ struct StageFrontCanvas: View {
 
     private var hasAnimatedStrobe: Bool {
         model.presentedSlotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
+    }
+
+    private var hasActiveVenuePreviewTest: Bool {
+        model.previewVenueTargetSlotID != nil
+            && model.previewVenueTargetResolution?.status == "RESOLVED"
     }
 
     private func absolutePoint(_ normalized: CGPoint, in size: CGSize) -> CGPoint {
@@ -9049,9 +12916,10 @@ struct StageSideCanvas: View {
     var showDiagnostics: Bool = false
     var editMode: Bool = false
     var selectionMode: ProjectionSelectionMode = .none
+    let viewportRenderKey: MetricStageMapViewportRenderKey
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !(hasAnimatedStrobe || model.previewPulseTestMode != "OFF"))) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !(hasAnimatedStrobe || hasActiveVenuePreviewTest || model.previewPulseTestMode != "OFF" || model.smokePreviewIntensity() > 0))) { timeline in
             GeometryReader { geometry in
                 ZStack {
                     ForEach(model.slotEditors) { editor in
@@ -9071,6 +12939,7 @@ struct StageSideCanvas: View {
                                 mountPitchDegrees: worldOrigin.pitchDegrees,
                                 preview: preview,
                                 stageMotion: stageMotion,
+                                venueTargetPreview: model.venueTargetPreviewVisual(for: editor.id),
                                 beamKind: beamKind,
                                 wallWashEmitters: beamKind == .wallWash
                                     ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: previewTime)
@@ -9099,6 +12968,8 @@ struct StageSideCanvas: View {
                         )
                     }
 
+                    ManualSmokePlumeOverlay(projection: .side, size: geometry.size, time: timeline.date)
+
                     if editMode {
                         EditModeBanner()
                             .padding(12)
@@ -9107,6 +12978,7 @@ struct StageSideCanvas: View {
                 }
             }
         }
+        .id(viewportRenderKey)
     }
 
     private func beamKind(for editor: SlotEditor) -> StageFixtureBeam.BeamKind {
@@ -9122,6 +12994,11 @@ struct StageSideCanvas: View {
 
     private var hasAnimatedStrobe: Bool {
         model.presentedSlotPreviews.values.contains { $0.enabled && $0.strobeActive && $0.strobe > 0 }
+    }
+
+    private var hasActiveVenuePreviewTest: Bool {
+        model.previewVenueTargetSlotID != nil
+            && model.previewVenueTargetResolution?.status == "RESOLVED"
     }
 
     private func absolutePoint(_ normalized: CGPoint, in size: CGSize) -> CGPoint {
@@ -9305,21 +13182,6 @@ struct StageSideBackdrop: View {
     }
 }
 
-struct StageAnchorMarker: View {
-    let anchor: StageAnchor
-
-    var body: some View {
-        Text(anchor.title)
-            .font(.system(size: 12, weight: .bold, design: .monospaced))
-            .foregroundStyle(Color.white.opacity(0.92))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(Color.black.opacity(0.18))
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .offset(y: -36)
-    }
-}
-
 struct StageFixtureNode: View {
     @EnvironmentObject private var model: AppModel
     let editor: SlotEditor
@@ -9427,11 +13289,51 @@ struct StageFixtureNode: View {
                 )
                 .offset(y: fixtureSize * 0.92)
             }
+
+            fixtureMapLabel
         }
     }
 
-    private var shortLabel: String {
-        editor.label.replacingOccurrences(of: "Moving Head", with: "MH")
+    @ViewBuilder
+    private var fixtureMapLabel: some View {
+        Text(isSelected ? editor.label : compactFixtureMapLabel)
+            .font(.system(
+                size: isSelected ? 11 : 8.5,
+                weight: isSelected ? .bold : .semibold,
+                design: .monospaced
+            ))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.56))
+            .padding(.horizontal, isSelected ? 6 : 0)
+            .padding(.vertical, isSelected ? 3 : 0)
+            .background {
+                if isSelected {
+                    Color.black.opacity(0.58)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                }
+            }
+            // This is a screen-space label attached to the live fixture node,
+            // never a hit target. The node keeps priority for edit dragging.
+            .allowsHitTesting(false)
+            .offset(y: fixtureLabelOffset)
+    }
+
+    private var compactFixtureMapLabel: String {
+        let label = editor.label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = label.lowercased()
+        let trailingNumber = label.split(separator: " ").last.flatMap { token in
+            Int(token).map(String.init)
+        } ?? ""
+        if lower.contains("moving head") { return "MH\(trailingNumber)" }
+        if lower.contains("bee") { return "BEE\(trailingNumber)" }
+        if lower.contains("wall wash") || lower.contains("wallwash") { return "WASH\(trailingNumber)" }
+        if lower.contains("par") { return "PAR\(trailingNumber)" }
+        return label.count > 10 ? String(label.prefix(10)) + "…" : label
+    }
+
+    private var fixtureLabelOffset: CGFloat {
+        isWallWash ? wallWashMetrics.envelope * 0.56 + 8 : fixtureSize * 0.78 + 8
     }
 
     private var isWallWash: Bool {
@@ -9463,17 +13365,22 @@ struct StageFixtureNode: View {
         case .side:
             thickness = 20
         }
-        let length = max(thickness * 1.45, rawLength)
+        // The bar's position and orientation are world-projected, while its
+        // visible body stays a usable screen-space marker. Otherwise a 400%
+        // camera zoom would create a four-times larger hit target.
+        let length = boundedScreenSpaceFixtureMarkerExtent(
+            rawLength,
+            minimum: max(34, thickness * 1.45),
+            maximum: 96
+        )
         let angle = atan2(endPoint.y - startPoint.y, endPoint.x - startPoint.x)
         let envelope = hypot(length, thickness) + 22
-        let labelVisible = length >= 92
         let ledDiameter = min(thickness * 0.56, max(4.2, length / 18.0))
         return WallWashNodeMetrics(
             size: CGSize(width: length, height: thickness),
             angleRadians: angle,
             envelope: envelope,
-            ledDiameter: ledDiameter,
-            labelVisible: labelVisible
+            ledDiameter: ledDiameter
         )
     }
 
@@ -9521,10 +13428,6 @@ struct StageFixtureNode: View {
             )
             .rotationEffect(.degrees(-90))
             .frame(width: fixtureSize + 10, height: fixtureSize + 10)
-
-        Text(shortLabel)
-            .font(.system(size: 11, weight: .bold, design: .monospaced))
-            .foregroundStyle(Color.white)
 
         RoundedRectangle(cornerRadius: 3, style: .continuous)
             .fill(Color.white.opacity(0.10))
@@ -9613,10 +13516,6 @@ struct StageFixtureNode: View {
             .rotationEffect(.degrees(-90))
             .frame(width: fixtureSize + 12, height: fixtureSize + 12)
 
-        Text(shortLabel)
-            .font(.system(size: 10, weight: .bold, design: .monospaced))
-            .foregroundStyle(Color.white)
-            .offset(y: fixtureSize * 0.48)
     }
 
     private var displayColor: Color {
@@ -9697,17 +13596,6 @@ struct StageFixtureNode: View {
                 }
                 .frame(width: size.width, height: size.height)
 
-                if metrics.labelVisible {
-                    Text("WASH")
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .foregroundStyle(Color.white.opacity(0.74))
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                        .background(Color.black.opacity(0.28))
-                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                        .offset(y: size.height * 0.90)
-                }
-
                 if strobeHighlighted {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(BeatBeamPalette.triggerActive.opacity(0.82), lineWidth: 1.5)
@@ -9733,8 +13621,15 @@ struct StageFixtureNode: View {
         let angleRadians: CGFloat
         let envelope: CGFloat
         let ledDiameter: CGFloat
-        let labelVisible: Bool
     }
+}
+
+private func boundedScreenSpaceFixtureMarkerExtent(
+    _ proposed: CGFloat,
+    minimum: CGFloat,
+    maximum: CGFloat
+) -> CGFloat {
+    min(maximum, max(minimum, proposed))
 }
 
 private let beePatternAssetBaseNames: [String: String] = [
@@ -10149,6 +14044,7 @@ struct ProjectionFixtureNode: View {
     let canvasSize: CGSize
 
     @State private var dragStartNormalized: CGPoint?
+    @State private var dragSnapEnabled: Bool?
 
     var body: some View {
         let worldOrigin = model.worldPosition(for: editor.id)
@@ -10168,12 +14064,16 @@ struct ProjectionFixtureNode: View {
         .position(absoluteOrigin)
 
         ZStack {
-            ProjectionOrientationArrow(
-                start: absoluteOrigin,
-                end: orientationArrowTarget(for: worldOrigin),
-                color: orientationArrowColor,
-                highlighted: isSelected || editMode
-            )
+            if calibrationHighlighted {
+                calibrationAxisArrow(for: worldOrigin)
+            } else if projection == .top {
+                ProjectionOrientationArrow(
+                    start: absoluteOrigin,
+                    end: orientationArrowTarget(for: worldOrigin),
+                    color: orientationArrowColor,
+                    highlighted: isSelected || editMode
+                )
+            }
 
             if editMode {
                 node.highPriorityGesture(dragGesture)
@@ -10189,16 +14089,25 @@ struct ProjectionFixtureNode: View {
                 let base = dragStartNormalized ?? normalizedOrigin
                 if dragStartNormalized == nil {
                     dragStartNormalized = normalizedOrigin
+                    // Capture once so changing SNAP cannot make an active drag
+                    // jump between quantized and continuous coordinates.
+                    dragSnapEnabled = model.fixtureSnapEnabled
                     model.selectSlot(editor.id)
                 }
                 let next = CGPoint(
                     x: base.x + (value.translation.width / max(1, canvasSize.width)),
                     y: base.y + (value.translation.height / max(1, canvasSize.height))
                 )
-                model.updateProjectionPoint(for: editor.id, projection: projection, point: next)
+                model.updateProjectionPoint(
+                    for: editor.id,
+                    projection: projection,
+                    point: next,
+                    snapEnabled: dragSnapEnabled
+                )
             }
             .onEnded { _ in
                 dragStartNormalized = nil
+                dragSnapEnabled = nil
             }
     }
 
@@ -10219,7 +14128,49 @@ struct ProjectionFixtureNode: View {
     }
 
     private func orientationArrowTarget(for worldOrigin: SlotWorldPosition) -> CGPoint {
+        if calibrationHighlighted {
+            return calibrationAxisTarget(venueOrientationBasis(for: worldOrigin).forward, worldOrigin: worldOrigin)
+        }
         let endpoint = worldOrientationEndpoint(worldOrigin, distance: 45)
+        return worldProjectedAbsoluteBeamPoint(endpoint, projection: projection, size: canvasSize)
+    }
+
+    private var calibrationHighlighted: Bool {
+        model.isFixtureCalibrationMode && model.selectedSlotID == editor.id && (editor.supportsPan || editor.supportsTilt)
+    }
+
+    @ViewBuilder
+    private func calibrationAxisArrow(for worldOrigin: SlotWorldPosition) -> some View {
+        switch projection {
+        case .top:
+            ProjectionOrientationArrow(
+                start: absoluteOrigin,
+                end: calibrationAxisTarget(venueOrientationBasis(for: worldOrigin).forward, worldOrigin: worldOrigin),
+                color: BeatBeamPalette.brandAmber,
+                highlighted: true,
+                label: "FORWARD"
+            )
+        case .front, .back, .side:
+            ProjectionOrientationArrow(
+                start: absoluteOrigin,
+                end: calibrationAxisTarget(venueOrientationBasis(for: worldOrigin).up, worldOrigin: worldOrigin),
+                color: BeatBeamPalette.brandMagenta,
+                highlighted: true,
+                label: "UP"
+            )
+        }
+    }
+
+    private func calibrationAxisTarget(_ vector: VenueVectorState, worldOrigin: SlotWorldPosition) -> CGPoint {
+        let distance = 70.0
+        let endpoint = SlotWorldPosition(
+            x: worldOrigin.x + vector.x * distance,
+            y: worldOrigin.y + vector.y * distance,
+            z: worldOrigin.z + vector.z * distance,
+            yawDegrees: worldOrigin.yawDegrees,
+            pitchDegrees: worldOrigin.pitchDegrees,
+            rollDegrees: worldOrigin.rollDegrees
+        )
         return worldProjectedAbsoluteBeamPoint(endpoint, projection: projection, size: canvasSize)
     }
 
@@ -10236,23 +14187,24 @@ struct ProjectionOrientationArrow: View {
     let end: CGPoint
     let color: Color
     let highlighted: Bool
+    var label: String? = nil
 
     var body: some View {
         let dx = end.x - start.x
         let dy = end.y - start.y
         let length = hypot(dx, dy)
         let angle = atan2(dy, dx)
-        let displayLength = max(14, min(34, length))
+        let displayLength = highlighted ? max(32, min(62, length)) : max(14, min(34, length))
         let opacity = highlighted ? 0.92 : 0.42
+        let tip = endPoint(from: start, angle: angle, length: displayLength)
 
         ZStack {
             Path { path in
                 path.move(to: start)
-                path.addLine(to: endPoint(from: start, angle: angle, length: displayLength))
+                path.addLine(to: tip)
             }
             .stroke(color.opacity(opacity), style: StrokeStyle(lineWidth: highlighted ? 2.2 : 1.4, lineCap: .round))
 
-            let tip = endPoint(from: start, angle: angle, length: displayLength)
             Path { path in
                 path.move(to: tip)
                 path.addLine(to: endPoint(from: tip, angle: angle + .pi * 0.78, length: 6))
@@ -10260,6 +14212,18 @@ struct ProjectionOrientationArrow: View {
                 path.addLine(to: endPoint(from: tip, angle: angle - .pi * 0.78, length: 6))
             }
             .stroke(color.opacity(opacity), style: StrokeStyle(lineWidth: highlighted ? 2.1 : 1.2, lineCap: .round))
+
+            if let label {
+                Text(label)
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(color)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 3)
+                    .background(Color.black.opacity(0.78))
+                    .overlay(Capsule().stroke(color.opacity(0.92), lineWidth: 1))
+                    .clipShape(Capsule())
+                    .position(labelPosition(from: start, to: tip))
+            }
         }
         .blendMode(.screen)
     }
@@ -10268,6 +14232,13 @@ struct ProjectionOrientationArrow: View {
         CGPoint(
             x: origin.x + cos(angle) * length,
             y: origin.y + sin(angle) * length
+        )
+    }
+
+    private func labelPosition(from start: CGPoint, to tip: CGPoint) -> CGPoint {
+        CGPoint(
+            x: start.x + (tip.x - start.x) * 0.66,
+            y: start.y + (tip.y - start.y) * 0.66 - 13
         )
     }
 }
@@ -10482,7 +14453,7 @@ struct MapPreviewWindowView: View {
                 }
 
                 StageProjectionDeckView(
-                    showControls: false,
+                    showControls: true,
                     topInteractive: false,
                     showSelection: true,
                     showAnchorLabels: false,
@@ -10522,6 +14493,7 @@ struct StageFixtureBeam: View {
     let mountPitchDegrees: Double
     let preview: SlotPreview
     let stageMotion: StageMotionState?
+    let venueTargetPreview: VenueTargetPreviewVisual?
     let beamKind: BeamKind
     let wallWashEmitters: [WallWashEmitterPreview]
     let color: Color
@@ -10574,7 +14546,7 @@ struct StageFixtureBeam: View {
                     .blendMode(.screen)
             }
 
-            if lagDistance > 10 {
+            if venueTargetPreview == nil, lagDistance > 10 {
                 Circle()
                     .stroke(activeColor.opacity(0.55), style: StrokeStyle(lineWidth: 2, dash: [4, 4]))
                     .frame(width: 18, height: 18)
@@ -10963,8 +14935,41 @@ struct StageFixtureBeam: View {
     }
 
     private func currentBeamTarget(from state: StageMotionState?) -> CGPoint {
-        guard let state else {
-            return projectedBeamTarget(
+        let normalTarget: CGPoint
+        if let direction = state?.worldDirection {
+            // `rendered_motion.world_direction` has already passed through
+            // final-frame decoding, profile inversion and fixture Forward/Up
+            // calibration in the backend.  Do not reapply yaw or panFlip.
+            let distance = StageWorld.movingHeadBeamDistanceCm
+            let endpoint = SlotWorldPosition(
+                x: worldOrigin.x + direction.x * distance,
+                y: worldOrigin.y + direction.y * distance,
+                z: worldOrigin.z + direction.z * distance,
+                yawDegrees: worldOrigin.yawDegrees,
+                pitchDegrees: worldOrigin.pitchDegrees,
+                rollDegrees: worldOrigin.rollDegrees,
+                panFlip: worldOrigin.panFlip,
+                tiltFlip: worldOrigin.tiltFlip
+            )
+            normalTarget = worldProjectedAbsoluteBeamPoint(endpoint, projection: projection, size: size)
+        } else if let state {
+            normalTarget = projectedBeamTarget(
+                origin: origin,
+                worldOrigin: worldOrigin,
+                mountYawDegrees: mountYawDegrees,
+                mountPitchDegrees: mountPitchDegrees,
+                pose: StageBeamPose(
+                    panDegrees: state.currentPanDegrees,
+                    tiltDegrees: state.currentTiltDegrees
+                ),
+                panRange: state.panRange,
+                tiltRange: state.tiltRange,
+                beamKind: beamKind,
+                size: size,
+                projection: projection
+            )
+        } else {
+            normalTarget = projectedBeamTarget(
                 origin: origin,
                 worldOrigin: worldOrigin,
                 mountYawDegrees: mountYawDegrees,
@@ -10975,24 +14980,36 @@ struct StageFixtureBeam: View {
                 projection: projection
             )
         }
-        return projectedBeamTarget(
-            origin: origin,
-            worldOrigin: worldOrigin,
-            mountYawDegrees: mountYawDegrees,
-            mountPitchDegrees: mountPitchDegrees,
-            pose: StageBeamPose(
-                panDegrees: state.currentPanDegrees,
-                tiltDegrees: state.currentTiltDegrees
-            ),
-            panRange: state.panRange,
-            tiltRange: state.tiltRange,
-            beamKind: beamKind,
-            size: size,
-            projection: projection
+        // Final rendered physical projection outranks composer/target intent.
+        guard state?.worldDirection == nil, let venueTargetPreview else { return normalTarget }
+        let target = worldProjectedAbsoluteBeamPoint(
+            venueTargetPreview.endpoint,
+            projection: projection,
+            size: size
+        )
+        let start = worldProjectedAbsoluteBeamPoint(
+            venueTargetPreview.startEndpoint,
+            projection: projection,
+            size: size
+        )
+        let progress = CGFloat(venueTargetPreview.easedProgress)
+        return CGPoint(
+            x: start.x + (target.x - start.x) * progress,
+            y: start.y + (target.y - start.y) * progress
         )
     }
 
     private func targetBeamTarget(from state: StageMotionState?) -> CGPoint {
+        if state?.worldDirection != nil {
+            return currentBeamTarget(from: state)
+        }
+        if let venueTargetPreview {
+            return worldProjectedAbsoluteBeamPoint(
+                venueTargetPreview.endpoint,
+                projection: projection,
+                size: size
+            )
+        }
         guard let state else {
             return currentBeamTarget(from: nil)
         }
@@ -11014,6 +15031,7 @@ struct StageFixtureBeam: View {
     }
 
     private func trailBeamTargets(from state: StageMotionState?) -> [CGPoint] {
+        if venueTargetPreview != nil { return [] }
         guard let state, preview.motionActive, beamKind == .movingHead else { return [] }
         let history = state.trail.dropLast().suffix(3)
         return history.map { pose in
@@ -11267,6 +15285,7 @@ final class Stage3DSceneController: ObservableObject {
             let world = model.worldPosition(for: editor.id)
             let preview = model.presentedSlotPreviews[editor.id]
             let stageMotion = model.presentedStageMotionStates[editor.id]
+            let venueTargetPreview = model.venueTargetPreviewVisual(for: editor.id)
             let wallWashEmitters = stageBeamKindFor3D(editor) == .wallWash
                 ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: animationTime)
                 : []
@@ -11277,6 +15296,7 @@ final class Stage3DSceneController: ObservableObject {
                 world: world,
                 preview: preview,
                 stageMotion: stageMotion,
+                venueTargetPreview: venueTargetPreview,
                 wallWashEmitters: wallWashEmitters,
                 animationTime: animationTime,
                 isPrimarySelected: isPrimarySelected,
@@ -11385,26 +15405,28 @@ final class Stage3DSceneController: ObservableObject {
         )
         scene.rootNode.addChildNode(centerLine)
 
-        for value in stride(from: StageWorld.minX, through: StageWorld.maxX, by: StageWorld.gridStepCm) {
+        for value in stride(from: StageWorld.minX, through: StageWorld.maxX, by: StageWorld.minorGridStepCm) {
             let x = CGFloat(value / 100.0)
+            let isMajor = abs(value.remainder(dividingBy: StageWorld.majorGridStepCm)) < 0.001
             let line = makeSceneSegmentNode(
                 from: SCNVector3(x, 0.002, 0.0),
                 to: SCNVector3(x, 0.002, CGFloat(-StageWorld.maxY / 100.0)),
                 radius: 0.004,
                 color: NSColor(calibratedWhite: 0.34, alpha: 1.0),
-                opacity: value == 0 ? 0.26 : 0.12
+                opacity: value == 0 ? 0.26 : isMajor ? 0.16 : 0.07
             )
             scene.rootNode.addChildNode(line)
         }
 
-        for value in stride(from: StageWorld.minY, through: StageWorld.maxY, by: StageWorld.gridStepCm) {
+        for value in stride(from: StageWorld.minY, through: StageWorld.maxY, by: StageWorld.minorGridStepCm) {
             let z = CGFloat(-value / 100.0)
+            let isMajor = abs(value.remainder(dividingBy: StageWorld.majorGridStepCm)) < 0.001
             let line = makeSceneSegmentNode(
                 from: SCNVector3(CGFloat(StageWorld.minX / 100.0), 0.002, z),
                 to: SCNVector3(CGFloat(StageWorld.maxX / 100.0), 0.002, z),
                 radius: 0.004,
                 color: NSColor(calibratedWhite: 0.34, alpha: 1.0),
-                opacity: value == 0 ? 0.20 : 0.12
+                opacity: value == 0 ? 0.20 : isMajor ? 0.16 : 0.07
             )
             scene.rootNode.addChildNode(line)
         }
@@ -11415,6 +15437,7 @@ final class Stage3DSceneController: ObservableObject {
         world: SlotWorldPosition,
         preview: SlotPreview?,
         stageMotion: StageMotionState?,
+        venueTargetPreview: VenueTargetPreviewVisual?,
         wallWashEmitters: [WallWashEmitterPreview],
         animationTime: TimeInterval,
         isPrimarySelected: Bool,
@@ -11454,6 +15477,7 @@ final class Stage3DSceneController: ObservableObject {
                 world: world,
                 preview: preview,
                 stageMotion: stageMotion,
+                venueTargetPreview: venueTargetPreview,
                 wallWashEmitters: wallWashEmitters,
                 beamKind: beamKind,
                 animationTime: animationTime,
@@ -11524,6 +15548,7 @@ final class Stage3DSceneController: ObservableObject {
         world: SlotWorldPosition,
         preview: SlotPreview,
         stageMotion: StageMotionState?,
+        venueTargetPreview: VenueTargetPreviewVisual?,
         wallWashEmitters: [WallWashEmitterPreview],
         beamKind: StageFixtureBeam.BeamKind,
         animationTime: TimeInterval,
@@ -11550,7 +15575,9 @@ final class Stage3DSceneController: ObservableObject {
             )
         }
 
-        let endpoint = beamWorldEndpoint(
+        let normalEndpoint = stageMotion?.worldDirection.map {
+            worldEndpoint(from: world, direction: $0, distance: StageWorld.movingHeadBeamDistanceCm)
+        } ?? beamWorldEndpoint(
             worldOrigin: world,
             mountYawDegrees: world.yawDegrees,
             mountPitchDegrees: world.pitchDegrees,
@@ -11558,6 +15585,10 @@ final class Stage3DSceneController: ObservableObject {
             panRange: panRange,
             tiltRange: tiltRange,
             beamKind: beamKind
+        )
+        let endpoint = interpolatedVenueTargetEndpoint(
+            normalEndpoint,
+            preview: stageMotion?.worldDirection == nil ? venueTargetPreview : nil
         )
 
         // Keep fixture geometry visible through its body node, but never add a
@@ -13554,6 +17585,7 @@ private final class StageMetalPreviewRenderer: NSObject, MTKViewDelegate {
             let world = model.worldPosition(for: editor.id)
             let preview = model.presentedSlotPreviews[editor.id]
             let stageMotion = model.presentedStageMotionStates[editor.id]
+            let venueTargetPreview = model.venueTargetPreviewVisual(for: editor.id)
             let beamKind = stageBeamKindFor3D(editor)
             let wallWashEmitters = beamKind == .wallWash
                 ? wallWashEmitterPreviews(editor: editor, model: model, preview: preview, animationTime: time)
@@ -13600,7 +17632,9 @@ private final class StageMetalPreviewRenderer: NSObject, MTKViewDelegate {
                 )
             }
 
-            let endpoint = beamWorldEndpoint(
+            let normalEndpoint = stageMotion?.worldDirection.map {
+                worldEndpoint(from: world, direction: $0, distance: StageWorld.movingHeadBeamDistanceCm)
+            } ?? beamWorldEndpoint(
                 worldOrigin: world,
                 mountYawDegrees: world.yawDegrees,
                 mountPitchDegrees: world.pitchDegrees,
@@ -13608,6 +17642,10 @@ private final class StageMetalPreviewRenderer: NSObject, MTKViewDelegate {
                 panRange: panRange,
                 tiltRange: tiltRange,
                 beamKind: beamKind
+            )
+            let endpoint = interpolatedVenueTargetEndpoint(
+                normalEndpoint,
+                preview: stageMotion?.worldDirection == nil ? venueTargetPreview : nil
             )
 
             let start = simdStageVector(for: world)
@@ -13785,22 +17823,24 @@ private final class StageMetalPreviewRenderer: NSObject, MTKViewDelegate {
             to: &vertices
         )
 
-        for value in stride(from: StageWorld.minX, through: StageWorld.maxX, by: StageWorld.gridStepCm) {
+        for value in stride(from: StageWorld.minX, through: StageWorld.maxX, by: StageWorld.minorGridStepCm) {
             let x = Float(value / 100.0)
+            let isMajor = abs(value.remainder(dividingBy: StageWorld.majorGridStepCm)) < 0.001
             appendLine(
                 from: SIMD3<Float>(x, 0.002, maxZ),
                 to: SIMD3<Float>(x, 0.002, minZ),
-                color: SIMD4<Float>(0.42, 0.46, 0.54, value == 0 ? 0.28 : 0.14),
+                color: SIMD4<Float>(0.42, 0.46, 0.54, value == 0 ? 0.28 : isMajor ? 0.17 : 0.07),
                 to: &vertices
             )
         }
 
-        for value in stride(from: StageWorld.minY, through: StageWorld.maxY, by: StageWorld.gridStepCm) {
+        for value in stride(from: StageWorld.minY, through: StageWorld.maxY, by: StageWorld.minorGridStepCm) {
             let z = Float(-value / 100.0)
+            let isMajor = abs(value.remainder(dividingBy: StageWorld.majorGridStepCm)) < 0.001
             appendLine(
                 from: SIMD3<Float>(minX, 0.002, z),
                 to: SIMD3<Float>(maxX, 0.002, z),
-                color: SIMD4<Float>(0.42, 0.46, 0.54, value == 0 ? 0.24 : 0.14),
+                color: SIMD4<Float>(0.42, 0.46, 0.54, value == 0 ? 0.24 : isMajor ? 0.17 : 0.07),
                 to: &vertices
             )
         }
@@ -14999,12 +19039,16 @@ struct StagePreviewPanel<Content: View>: View {
     let title: String
     let subtitle: String
     let projection: StageProjection
+    let viewportRenderKey: MetricStageMapViewportRenderKey
+    var showsWorldBackdrop = true
     let content: Content
 
-    init(title: String, subtitle: String, projection: StageProjection, @ViewBuilder content: () -> Content) {
+    init(title: String, subtitle: String, projection: StageProjection, viewportRenderKey: MetricStageMapViewportRenderKey, showsWorldBackdrop: Bool = true, @ViewBuilder content: () -> Content) {
         self.title = title
         self.subtitle = subtitle
         self.projection = projection
+        self.viewportRenderKey = viewportRenderKey
+        self.showsWorldBackdrop = showsWorldBackdrop
         self.content = content()
     }
 
@@ -15018,11 +19062,16 @@ struct StagePreviewPanel<Content: View>: View {
                     .foregroundStyle(.secondary)
             }
 
-            ZStack {
-                ProjectionPanelBackdrop(projection: projection)
-                content
-                    .padding(16)
-            }
+            content
+                // The grid and every world-space projection now share this exact
+                // padded canvas. Keeping the backdrop outside this frame was a
+                // subtle second fit rectangle that made visual zoom ambiguous.
+                .padding(16)
+                .background {
+                    if showsWorldBackdrop {
+                        ProjectionPanelBackdrop(projection: projection, viewportRenderKey: viewportRenderKey)
+                    }
+                }
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -15035,6 +19084,7 @@ struct StagePreviewPanel<Content: View>: View {
 
 struct ProjectionPanelBackdrop: View {
     let projection: StageProjection
+    let viewportRenderKey: MetricStageMapViewportRenderKey
 
     var body: some View {
         GeometryReader { geometry in
@@ -15056,6 +19106,7 @@ struct ProjectionPanelBackdrop: View {
                 ProjectionAxisOverlay(projection: projection)
             }
         }
+        .id(viewportRenderKey)
     }
 }
 
@@ -15064,42 +19115,51 @@ struct ProjectionWorldGrid: View {
 
     var body: some View {
         GeometryReader { geometry in
-            Path { path in
-                for value in stride(from: StageWorld.minX, through: StageWorld.maxX, by: StageWorld.gridStepCm) where projection != .side {
-                    let normalized = projection == .back
-                        ? 1.0 - scalarNormalized(value, lower: StageWorld.minX, upper: StageWorld.maxX)
-                        : scalarNormalized(value, lower: StageWorld.minX, upper: StageWorld.maxX)
-                    let start = projectionViewportTransform(CGPoint(x: normalized, y: 0))
-                    let end = projectionViewportTransform(CGPoint(x: normalized, y: 1))
-                    path.move(to: CGPoint(x: geometry.size.width * start.x, y: geometry.size.height * start.y))
-                    path.addLine(to: CGPoint(x: geometry.size.width * end.x, y: geometry.size.height * end.y))
-                }
-                for value in stride(from: StageWorld.minY, through: StageWorld.maxY, by: StageWorld.gridStepCm) {
-                    if projection == .top || projection == .side {
-                        let normalized = scalarNormalized(value, lower: StageWorld.minY, upper: StageWorld.maxY)
-                        if projection == .side {
-                            let start = projectionViewportTransform(CGPoint(x: normalized, y: 0))
-                            let end = projectionViewportTransform(CGPoint(x: normalized, y: 1))
-                            path.move(to: CGPoint(x: geometry.size.width * start.x, y: geometry.size.height * start.y))
-                            path.addLine(to: CGPoint(x: geometry.size.width * end.x, y: geometry.size.height * end.y))
-                        } else {
-                            let start = projectionViewportTransform(CGPoint(x: 0, y: normalized))
-                            let end = projectionViewportTransform(CGPoint(x: 1, y: normalized))
-                            path.move(to: CGPoint(x: geometry.size.width * start.x, y: geometry.size.height * start.y))
-                            path.addLine(to: CGPoint(x: geometry.size.width * end.x, y: geometry.size.height * end.y))
-                        }
-                    }
-                }
-                for value in stride(from: StageWorld.minZ, through: StageWorld.maxZ, by: StageWorld.gridStepCm) where projection != .top {
-                    let normalized = 1.0 - scalarNormalized(value, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-                    let start = projectionViewportTransform(CGPoint(x: 0, y: normalized))
-                    let end = projectionViewportTransform(CGPoint(x: 1, y: normalized))
-                    path.move(to: CGPoint(x: geometry.size.width * start.x, y: geometry.size.height * start.y))
-                    path.addLine(to: CGPoint(x: geometry.size.width * end.x, y: geometry.size.height * end.y))
-                }
+            ZStack(alignment: .bottomTrailing) {
+                gridPath(step: StageWorld.minorGridStepCm, size: geometry.size)
+                    .stroke(Color.white.opacity(0.035), lineWidth: 0.7)
+                gridPath(step: StageWorld.majorGridStepCm, size: geometry.size)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1.1)
+                Text("1 m grid · 0.25 m minor")
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.42))
+                    .padding(7)
             }
-            .stroke(Color.white.opacity(0.05), lineWidth: 1)
         }
+    }
+
+    private func gridPath(step: Double, size: CGSize) -> Path {
+        var path = Path()
+        func add(_ start: SlotWorldPosition, _ end: SlotWorldPosition) {
+            let a = worldProjectedAbsolutePoint(start, projection: projection, size: size)
+            let b = worldProjectedAbsolutePoint(end, projection: projection, size: size)
+            path.move(to: a)
+            path.addLine(to: b)
+        }
+        switch projection {
+        case .top:
+            for x in stride(from: StageWorld.minX, through: StageWorld.maxX, by: step) {
+                add(SlotWorldPosition(x: x, y: StageWorld.minY, z: 0), SlotWorldPosition(x: x, y: StageWorld.maxY, z: 0))
+            }
+            for y in stride(from: StageWorld.minY, through: StageWorld.maxY, by: step) {
+                add(SlotWorldPosition(x: StageWorld.minX, y: y, z: 0), SlotWorldPosition(x: StageWorld.maxX, y: y, z: 0))
+            }
+        case .front, .back:
+            for x in stride(from: StageWorld.minX, through: StageWorld.maxX, by: step) {
+                add(SlotWorldPosition(x: x, y: 0, z: StageWorld.minZ), SlotWorldPosition(x: x, y: 0, z: StageWorld.maxZ))
+            }
+            for z in stride(from: StageWorld.minZ, through: StageWorld.maxZ, by: step) {
+                add(SlotWorldPosition(x: StageWorld.minX, y: 0, z: z), SlotWorldPosition(x: StageWorld.maxX, y: 0, z: z))
+            }
+        case .side:
+            for y in stride(from: StageWorld.minY, through: StageWorld.maxY, by: step) {
+                add(SlotWorldPosition(x: 0, y: y, z: StageWorld.minZ), SlotWorldPosition(x: 0, y: y, z: StageWorld.maxZ))
+            }
+            for z in stride(from: StageWorld.minZ, through: StageWorld.maxZ, by: step) {
+                add(SlotWorldPosition(x: 0, y: StageWorld.minY, z: z), SlotWorldPosition(x: 0, y: StageWorld.maxY, z: z))
+            }
+        }
+        return path
     }
 }
 
@@ -15149,11 +19209,11 @@ struct ProjectionAxisOverlay: View {
             case 1:
                 return "Front"
             case 2:
-                return "X+"
+                return "X-"
             case 3:
                 return "Back"
             default:
-                return "X-"
+                return "X+"
             }
         case .front:
             return frontProjectionMirrored ? "X+" : "X-"
@@ -15171,11 +19231,11 @@ struct ProjectionAxisOverlay: View {
             case 1:
                 return "Back"
             case 2:
-                return "X-"
+                return "X+"
             case 3:
                 return "Front"
             default:
-                return "X+"
+                return "X-"
             }
         case .front:
             return frontProjectionMirrored ? "X-" : "X+"
@@ -15191,11 +19251,11 @@ struct ProjectionAxisOverlay: View {
         case .top:
             switch normalizedQuarterTurns(topProjectionRotationQuarterTurns) {
             case 1:
-                return "X-"
+                return "X+"
             case 2:
                 return "Front"
             case 3:
-                return "X+"
+                return "X-"
             default:
                 return "Back"
             }
@@ -15209,11 +19269,11 @@ struct ProjectionAxisOverlay: View {
         case .top:
             switch normalizedQuarterTurns(topProjectionRotationQuarterTurns) {
             case 1:
-                return "X+"
+                return "X-"
             case 2:
                 return "Back"
             case 3:
-                return "X-"
+                return "X+"
             default:
                 return "Front"
             }
@@ -15751,66 +19811,24 @@ struct ProjectionReferenceLines: View {
             ZStack {
                 switch projection {
                 case .top:
-                    let topX = projectionViewportTransform(
-                        CGPoint(
-                            x: scalarNormalized(0, lower: StageWorld.minX, upper: StageWorld.maxX),
-                            y: 0
-                        )
-                    )
-                    let topXEnd = projectionViewportTransform(
-                        CGPoint(
-                            x: scalarNormalized(0, lower: StageWorld.minX, upper: StageWorld.maxX),
-                            y: 1
-                        )
-                    )
-                    referenceLine(
-                        from: CGPoint(x: geometry.size.width * topX.x, y: geometry.size.height * topX.y),
-                        to: CGPoint(x: geometry.size.width * topXEnd.x, y: geometry.size.height * topXEnd.y)
-                    )
-
-                    let topY = projectionViewportTransform(
-                        CGPoint(
-                            x: 0,
-                            y: scalarNormalized(0, lower: StageWorld.minY, upper: StageWorld.maxY)
-                        )
-                    )
-                    let topYEnd = projectionViewportTransform(
-                        CGPoint(
-                            x: 1,
-                            y: scalarNormalized(0, lower: StageWorld.minY, upper: StageWorld.maxY)
-                        )
-                    )
-                    referenceLine(
-                        from: CGPoint(x: geometry.size.width * topY.x, y: geometry.size.height * topY.y),
-                        to: CGPoint(x: geometry.size.width * topYEnd.x, y: geometry.size.height * topYEnd.y)
-                    )
+                    worldLine(SlotWorldPosition(x: 0, y: StageWorld.minY, z: 0), SlotWorldPosition(x: 0, y: StageWorld.maxY, z: 0), size: geometry.size)
+                    worldLine(SlotWorldPosition(x: StageWorld.minX, y: 0, z: 0), SlotWorldPosition(x: StageWorld.maxX, y: 0, z: 0), size: geometry.size)
                 case .front, .back:
-                    let centerTop = projectionViewportTransform(CGPoint(x: 0.5, y: 0))
-                    let centerBottom = projectionViewportTransform(CGPoint(x: 0.5, y: 1))
-                    referenceLine(
-                        from: CGPoint(x: geometry.size.width * centerTop.x, y: geometry.size.height * centerTop.y),
-                        to: CGPoint(x: geometry.size.width * centerBottom.x, y: geometry.size.height * centerBottom.y)
-                    )
+                    worldLine(SlotWorldPosition(x: 0, y: 0, z: StageWorld.minZ), SlotWorldPosition(x: 0, y: 0, z: StageWorld.maxZ), size: geometry.size)
+                    worldLine(SlotWorldPosition(x: StageWorld.minX, y: 0, z: 0), SlotWorldPosition(x: StageWorld.maxX, y: 0, z: 0), size: geometry.size)
                 case .side:
-                    let sideStart = projectionViewportTransform(
-                        CGPoint(
-                            x: 0,
-                            y: 1.0 - scalarNormalized(0, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-                        )
-                    )
-                    let sideEnd = projectionViewportTransform(
-                        CGPoint(
-                            x: 1,
-                            y: 1.0 - scalarNormalized(0, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-                        )
-                    )
-                    referenceLine(
-                        from: CGPoint(x: geometry.size.width * sideStart.x, y: geometry.size.height * sideStart.y),
-                        to: CGPoint(x: geometry.size.width * sideEnd.x, y: geometry.size.height * sideEnd.y)
-                    )
+                    worldLine(SlotWorldPosition(x: 0, y: StageWorld.minY, z: 0), SlotWorldPosition(x: 0, y: StageWorld.maxY, z: 0), size: geometry.size)
+                    worldLine(SlotWorldPosition(x: 0, y: 0, z: StageWorld.minZ), SlotWorldPosition(x: 0, y: 0, z: StageWorld.maxZ), size: geometry.size)
                 }
             }
         }
+    }
+
+    private func worldLine(_ start: SlotWorldPosition, _ end: SlotWorldPosition, size: CGSize) -> some View {
+        referenceLine(
+            from: worldProjectedAbsolutePoint(start, projection: projection, size: size),
+            to: worldProjectedAbsolutePoint(end, projection: projection, size: size)
+        )
     }
 
     private func referenceLine(from: CGPoint, to: CGPoint) -> some View {
@@ -15828,69 +19846,11 @@ struct ProjectionReferenceLines: View {
 private func worldProjectedPoint(_ world: SlotWorldPosition, projection: StageProjection) -> CGPoint {
     let frontMirrored = UserDefaults.standard.bool(forKey: frontProjectionMirrorDefaultsKey)
     let topRotation = UserDefaults.standard.integer(forKey: topProjectionRotationDefaultsKey)
-    let rawPoint: CGPoint
-    switch projection {
-    case .top:
-        rawPoint = rotatedTopProjectionPoint(
-            CGPoint(
-                x: scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
-                y: scalarNormalized(world.y, lower: StageWorld.minY, upper: StageWorld.maxY)
-            ),
-            quarterTurns: topRotation
-        )
-    case .front:
-        rawPoint = CGPoint(
-            x: frontMirrored
-                ? 1.0 - scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX)
-                : scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
-            y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-        )
-    case .back:
-        rawPoint = CGPoint(
-            x: 1.0 - scalarNormalized(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
-            y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-        )
-    case .side:
-        rawPoint = CGPoint(
-            x: scalarNormalized(world.y, lower: StageWorld.minY, upper: StageWorld.maxY),
-            y: 1.0 - scalarNormalized(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-        )
-    }
-    return projectionViewportTransform(rawPoint)
+    return metricWorldProjectedPoint(world, projection: projection, frontMirrored: frontMirrored, topQuarterTurns: topRotation)
 }
 
 private func worldProjectedBeamPoint(_ world: SlotWorldPosition, projection: StageProjection) -> CGPoint {
-    let frontMirrored = UserDefaults.standard.bool(forKey: frontProjectionMirrorDefaultsKey)
-    let topRotation = UserDefaults.standard.integer(forKey: topProjectionRotationDefaultsKey)
-    let rawPoint: CGPoint
-    switch projection {
-    case .top:
-        rawPoint = rotatedTopProjectionPoint(
-            CGPoint(
-                x: scalarProjected(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
-                y: scalarProjected(world.y, lower: StageWorld.minY, upper: StageWorld.maxY)
-            ),
-            quarterTurns: topRotation
-        )
-    case .front:
-        rawPoint = CGPoint(
-            x: frontMirrored
-                ? 1.0 - scalarProjected(world.x, lower: StageWorld.minX, upper: StageWorld.maxX)
-                : scalarProjected(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
-            y: 1.0 - scalarProjected(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-        )
-    case .back:
-        rawPoint = CGPoint(
-            x: 1.0 - scalarProjected(world.x, lower: StageWorld.minX, upper: StageWorld.maxX),
-            y: 1.0 - scalarProjected(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-        )
-    case .side:
-        rawPoint = CGPoint(
-            x: scalarProjected(world.y, lower: StageWorld.minY, upper: StageWorld.maxY),
-            y: 1.0 - scalarProjected(world.z, lower: StageWorld.minZ, upper: StageWorld.maxZ)
-        )
-    }
-    return projectionViewportTransform(rawPoint)
+    worldProjectedPoint(world, projection: projection)
 }
 
 private func worldProjectedAbsolutePoint(_ world: SlotWorldPosition, projection: StageProjection, size: CGSize) -> CGPoint {
@@ -15913,6 +19873,93 @@ private func worldOrientationEndpoint(_ worldOrigin: SlotWorldPosition, distance
         pitchDegrees: worldOrigin.pitchDegrees,
         rollDegrees: worldOrigin.rollDegrees
     )
+}
+
+private struct FixtureVenueBasis {
+    let forward: VenueVectorState
+    let up: VenueVectorState
+    let right: VenueVectorState
+}
+
+private func venueVectorTuple(_ vector: VenueVectorState) -> (x: Double, y: Double, z: Double) {
+    (vector.x, vector.y, vector.z)
+}
+
+private func venueVectorLength(_ vector: (x: Double, y: Double, z: Double)) -> Double {
+    sqrt(vector.x * vector.x + vector.y * vector.y + vector.z * vector.z)
+}
+
+private func venueVectorNormalized(_ vector: (x: Double, y: Double, z: Double)) -> (x: Double, y: Double, z: Double) {
+    let length = max(0.0000001, venueVectorLength(vector))
+    return (vector.x / length, vector.y / length, vector.z / length)
+}
+
+private func venueVectorDot(
+    _ left: (x: Double, y: Double, z: Double),
+    _ right: (x: Double, y: Double, z: Double)
+) -> Double {
+    left.x * right.x + left.y * right.y + left.z * right.z
+}
+
+private func venueVectorCross(
+    _ left: (x: Double, y: Double, z: Double),
+    _ right: (x: Double, y: Double, z: Double)
+) -> (x: Double, y: Double, z: Double) {
+    (
+        left.y * right.z - left.z * right.y,
+        left.z * right.x - left.x * right.z,
+        left.x * right.y - left.y * right.x
+    )
+}
+
+private func venueVectorRotated(
+    _ vector: (x: Double, y: Double, z: Double),
+    around rawAxis: (x: Double, y: Double, z: Double),
+    radians: Double
+) -> (x: Double, y: Double, z: Double) {
+    let axis = venueVectorNormalized(rawAxis)
+    let cosine = cos(radians)
+    let sine = sin(radians)
+    let cross = venueVectorCross(axis, vector)
+    let dot = venueVectorDot(axis, vector)
+    return (
+        vector.x * cosine + cross.x * sine + axis.x * dot * (1 - cosine),
+        vector.y * cosine + cross.y * sine + axis.y * dot * (1 - cosine),
+        vector.z * cosine + cross.z * sine + axis.z * dot * (1 - cosine)
+    )
+}
+
+/// Build the same right-handed fixture frame sent to the backend.  Local
+/// Forward starts toward Audience (+Y), local Up at physical +Z and Right is
+/// always derived as Forward × Up.
+private func venueOrientationBasis(for world: SlotWorldPosition) -> FixtureVenueBasis {
+    var forward = (x: 0.0, y: 1.0, z: 0.0)
+    var up = (x: 0.0, y: 0.0, z: 1.0)
+    up = venueVectorRotated(up, around: forward, radians: world.rollDegrees * .pi / 180.0)
+    var right = venueVectorNormalized(venueVectorCross(forward, up))
+    let pitch = world.pitchDegrees * .pi / 180.0
+    forward = venueVectorRotated(forward, around: right, radians: pitch)
+    up = venueVectorRotated(up, around: right, radians: pitch)
+    let yaw = -world.yawDegrees * .pi / 180.0
+    let globalUp = (x: 0.0, y: 0.0, z: 1.0)
+    forward = venueVectorNormalized(venueVectorRotated(forward, around: globalUp, radians: yaw))
+    up = venueVectorNormalized(venueVectorRotated(up, around: globalUp, radians: yaw))
+    right = venueVectorNormalized(venueVectorCross(forward, up))
+    up = venueVectorNormalized(venueVectorCross(right, forward))
+    return FixtureVenueBasis(
+        forward: VenueVectorState(x: forward.x, y: forward.y, z: forward.z),
+        up: VenueVectorState(x: up.x, y: up.y, z: up.z),
+        right: VenueVectorState(x: right.x, y: right.y, z: right.z)
+    )
+}
+
+private func venueNormalizedCoordinate(_ value: Double, negativeExtent: Double, positiveExtent: Double) -> Double {
+    let extent = value < 0 ? max(1, negativeExtent) : max(1, positiveExtent)
+    return min(1, max(-1, value / extent))
+}
+
+private func venueWorldCoordinate(_ value: Double, negativeExtent: Double, positiveExtent: Double) -> Double {
+    value * (value < 0 ? max(1, negativeExtent) : max(1, positiveExtent))
 }
 
 private func wallWashBarWorldEndpoints(_ worldOrigin: SlotWorldPosition, halfLength: Double) -> (start: SlotWorldPosition, end: SlotWorldPosition) {
@@ -15990,6 +20037,24 @@ private func projectedBeamTarget(origin: CGPoint, worldOrigin: SlotWorldPosition
     )
 }
 
+private func interpolatedVenueTargetEndpoint(
+    _ normalEndpoint: SlotWorldPosition,
+    preview: VenueTargetPreviewVisual?
+) -> SlotWorldPosition {
+    guard let preview else { return normalEndpoint }
+    let progress = preview.easedProgress
+    return SlotWorldPosition(
+        x: preview.startEndpoint.x + (preview.endpoint.x - preview.startEndpoint.x) * progress,
+        y: preview.startEndpoint.y + (preview.endpoint.y - preview.startEndpoint.y) * progress,
+        z: preview.startEndpoint.z + (preview.endpoint.z - preview.startEndpoint.z) * progress,
+        yawDegrees: normalEndpoint.yawDegrees,
+        pitchDegrees: normalEndpoint.pitchDegrees,
+        rollDegrees: normalEndpoint.rollDegrees,
+        panFlip: normalEndpoint.panFlip,
+        tiltFlip: normalEndpoint.tiltFlip
+    )
+}
+
 private func projectedBeamTarget(origin: CGPoint, worldOrigin: SlotWorldPosition, mountYawDegrees: Double, mountPitchDegrees: Double, pose: StageBeamPose, panRange: Double, tiltRange: Double, beamKind: StageFixtureBeam.BeamKind, size: CGSize, projection: StageProjection) -> CGPoint {
     let endpoint = beamWorldEndpoint(
         worldOrigin: worldOrigin,
@@ -16001,6 +20066,19 @@ private func projectedBeamTarget(origin: CGPoint, worldOrigin: SlotWorldPosition
         beamKind: beamKind
     )
     return worldProjectedAbsoluteBeamPoint(endpoint, projection: projection, size: size)
+}
+
+private func worldEndpoint(from origin: SlotWorldPosition, direction: VenueVectorState, distance: Double) -> SlotWorldPosition {
+    SlotWorldPosition(
+        x: origin.x + direction.x * distance,
+        y: origin.y + direction.y * distance,
+        z: origin.z + direction.z * distance,
+        yawDegrees: origin.yawDegrees,
+        pitchDegrees: origin.pitchDegrees,
+        rollDegrees: origin.rollDegrees,
+        panFlip: origin.panFlip,
+        tiltFlip: origin.tiltFlip
+    )
 }
 
 private func beamWorldEndpoint(worldOrigin: SlotWorldPosition, mountYawDegrees: Double, mountPitchDegrees: Double, pose: StageBeamPose, panRange: Double, tiltRange: Double, beamKind: StageFixtureBeam.BeamKind) -> SlotWorldPosition {
