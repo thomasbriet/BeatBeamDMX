@@ -23722,6 +23722,19 @@ class AppHandler(BaseHTTPRequestHandler):
                 query[key] = value
         return parsed.path, query
 
+    def request_origin_is_same_site(self):
+        """Loopback trust may not double as a browser cross-origin bypass.
+
+        The native app and the iPad remote send no ``Origin``; any page that a
+        browser loads from another site does, and that page must never be able
+        to drive the show through the operator's own loopback session.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        host = (self.headers.get("Host") or "").strip()
+        return bool(host) and urlparse(origin).netloc == host
+
     def is_authorized_remote_request(self, query):
         client_ip = self.client_address[0] if self.client_address else ""
         if is_loopback_client(client_ip):
@@ -23736,7 +23749,7 @@ class AppHandler(BaseHTTPRequestHandler):
             or self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
             or query.get("token")
         )
-        return str(provided or "").strip() == expected
+        return secrets.compare_digest(str(provided or "").strip(), expected)
 
     def remote_request_token(self):
         return (
@@ -23872,6 +23885,9 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path, query = self.request_context()
+        if not self.request_origin_is_same_site():
+            self.send_json({"error": "cross-origin request rejected"}, status=403)
+            return
         if path == "/api/remote-v2/pair":
             try:
                 self.pair_remote_v2(self.read_json())
