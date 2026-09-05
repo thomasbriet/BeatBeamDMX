@@ -952,6 +952,35 @@ class PreviewOnlyAuthoritativeShowFrameTests(unittest.TestCase):
                 self.assertEqual(channels[component]["final_dmx_value"], desired[("red", "green", "blue").index(component)])
             self.assertEqual(channels["dimmer"]["current_value"], channels["dimmer"]["final_dmx_value"])
 
+    def test_new_track_handoff_keeps_the_previous_dynamic_composer_effect_for_two_seconds(self):
+        transport = PreviewTransport()
+        controller = DmxController(transport, ProductionAuthorityBridge())
+        controller.config = controller._clean_full_config(controller.default_config())
+        controller.config["auto_show"].update({"enabled": True, "preview_rme_mode": "DYNAMIC_COMPOSER"})
+        controller.config["production_show_mode"] = "DYNAMIC_COMPOSER_ENABLED"
+        controller.render_active = True
+
+        with patch("beatbeam_app.time.monotonic", return_value=100.0):
+            self.tick(controller)
+        before = controller.state()["production_show_selector"]
+        transport.state["track_path"] = "/Music/Preview/Next Track.flac"
+        transport.state["_playback_generation"] = 2
+        with patch("beatbeam_app.time.monotonic", return_value=100.2):
+            self.tick(controller)
+        held = controller.state()["production_show_selector"]
+        with patch("beatbeam_app.time.monotonic", return_value=102.01):
+            self.tick(controller)
+        expired = controller.state()["production_show_selector"]
+
+        self.assertEqual("dynamic_composer", before["production_show_source"])
+        self.assertEqual("dynamic_composer", held["production_show_source"])
+        self.assertTrue(held["handoff_effect_hold"])
+        self.assertEqual("handoff_effect_hold", held["fallback_reason"])
+        self.assertEqual("/Music/Preview/Track.flac", held["handoff_effect_hold_from_track_path"])
+        self.assertEqual("existing_autoshow", expired["production_show_source"])
+        self.assertFalse(expired["handoff_effect_hold"])
+        self.assertEqual("track_mismatch", expired["fallback_reason"])
+
     def test_new_controller_restart_defaults_to_persisted_baseline_mode(self):
         first, _ = self.controller()
         second, _ = self.controller()

@@ -2,6 +2,7 @@
 import argparse
 import atexit
 import colorsys
+import copy
 import hashlib
 import json
 import math
@@ -2310,6 +2311,7 @@ DEFAULT_VIRTUALDJ_PLAYBACK_STATE_PATH = (
 )
 SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION = 2
 SONG_ANALYZER_STRUCTURE_LEGACY_SCHEMA_VERSION = 1
+SONG_ANALYZER_ACTIVE_TRACK_SCHEMA_VERSION = 1
 SONG_ANALYZER_RICH_ANALYSIS_MODEL = "SongAnalyzerRichAnalysis"
 SONG_ANALYZER_ENERGY_SCALE = "segment-normalized-rms-z-score"
 # The source energy is a normalized-RMS z-score, not absolute loudness. Its
@@ -2319,6 +2321,10 @@ SONG_ANALYZER_MAX_ENERGY_MODIFIER = 0.08
 DEFAULT_SONG_ANALYZER_STRUCTURE_PATH = Path(
     os.environ.get("BEATBEAM_SONG_ANALYZER_STRUCTURE_PATH")
     or (Path.home() / "Library/Application Support/MusicAnalyzer/beatbeam-structure-plan.json")
+)
+DEFAULT_SONG_ANALYZER_ACTIVE_TRACK_PATH = Path(
+    os.environ.get("BEATBEAM_SONG_ANALYZER_ACTIVE_TRACK_PATH")
+    or (DEFAULT_SONG_ANALYZER_STRUCTURE_PATH.parent / "beatbeam-active-track.json")
 )
 DEFAULT_SONG_ANALYZER_BRIDGE_SOCKET_PATH = Path(
     os.environ.get("BEATBEAM_SONG_ANALYZER_BRIDGE_SOCKET_PATH")
@@ -2595,14 +2601,29 @@ class SongAnalyzerStructureHandoff:
     by developer diagnostics, while the existing transport remains authoritative.
     """
 
-    def __init__(self, path=DEFAULT_SONG_ANALYZER_STRUCTURE_PATH, check_interval_seconds=1.0):
+    def __init__(self, path=DEFAULT_SONG_ANALYZER_STRUCTURE_PATH, check_interval_seconds=5.0,
+                 active_track_path=None):
         self.path = Path(path)
+        self.active_track_path = Path(active_track_path) if active_track_path is not None else (
+            DEFAULT_SONG_ANALYZER_ACTIVE_TRACK_PATH if self.path == DEFAULT_SONG_ANALYZER_STRUCTURE_PATH
+            else self.path.with_name("beatbeam-active-track.json")
+        )
         self.check_interval_seconds = max(0.0, float(check_interval_seconds))
         self._lock = threading.RLock()
+        self._preloader_stop = threading.Event()
+        self._preloader_thread = None
+        self._background_preloader_started = False
         self._last_check = 0.0
         self._signature = object()
+        self._active_track_signature = object()
+        self._active_track_last_check = 0.0
+        self._active_track_check_interval_seconds = 0.05
         self._tracks = {}
         self._active_track = None
+        self._legacy_active_track = None
+        self._active_track_source = "none"
+        self._active_track_load_status = "missing"
+        self._active_track_load_error = None
         self._schema_version = None
         self._load_status = "missing"
         self._load_error = None
@@ -2614,7 +2635,81 @@ class SongAnalyzerStructureHandoff:
             "parse_failures": 0,
             "schema_failures": 0,
             "track_switches": 0,
+            "active_track_loads": 0,
+            "active_track_parse_failures": 0,
         }
+
+    def start_preloader(self, poll_seconds=0.25):
+        """Keep atomic handoff parsing off the render-critical projection lock."""
+        with self._lock:
+            if self._preloader_thread is not None and self._preloader_thread.is_alive():
+                return
+            self._background_preloader_started = True
+            self._preloader_stop.clear()
+            thread = threading.Thread(
+                target=self._preload_loop,
+                args=(max(0.05, float(poll_seconds)),),
+                name="song-analyzer-structure-preloader",
+                daemon=True,
+            )
+            self._preloader_thread = thread
+        thread.start()
+
+    def stop_preloader(self):
+        with self._lock:
+            self._background_preloader_started = False
+            thread = self._preloader_thread
+            self._preloader_thread = None
+            self._preloader_stop.set()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def _preload_loop(self, poll_seconds):
+        while not self._preloader_stop.is_set():
+            self._preload_once()
+            with self._lock:
+                self._refresh_active_track()
+            self._preloader_stop.wait(poll_seconds)
+
+    def _preload_once(self):
+        """Parse one atomically published handoff without holding the projection lock."""
+        signature = self._file_signature()
+        with self._lock:
+            if signature == self._signature:
+                return False
+        schema = tracks = legacy_active = None
+        load_status, load_error = "ready", None
+        if signature is None:
+            load_status = "missing"
+        elif isinstance(signature, tuple) and signature[0] == "error":
+            load_status, load_error = "unreadable", signature[1]
+        else:
+            try:
+                with self.path.open("r", encoding="utf-8") as handle:
+                    schema, tracks, legacy_active = self._parse_document(json.load(handle))
+            except RuntimeError as exc:
+                load_status, load_error = "unsupported_schema", str(exc)
+            except Exception as exc:
+                load_status, load_error = "invalid", type(exc).__name__
+        with self._lock:
+            if signature == self._signature:
+                return False
+            self._signature = signature
+            self._tracks = tracks or {}
+            self._legacy_active_track = legacy_active
+            if self._active_track_load_status == "missing":
+                self._active_track = legacy_active
+                self._active_track_source = "legacy_index" if legacy_active is not None else "none"
+            self._schema_version = schema
+            self._load_status = load_status
+            self._load_error = load_error
+            if signature is not None:
+                self._metrics["structure_loads"] += 1
+                if load_status == "unsupported_schema":
+                    self._metrics["schema_failures"] += 1
+                elif load_status in {"unreadable", "invalid"}:
+                    self._metrics["parse_failures"] += 1
+            return True
 
     @staticmethod
     def _number(value, name, minimum=None):
@@ -2799,6 +2894,31 @@ class SongAnalyzerStructureHandoff:
             and by_offset[1].normalized_rms == context.post_boundary_normalized_rms \
             and by_offset[-1].relative_energy == context.late_origin_relative_energy \
             and by_offset[1].relative_energy == context.early_destination_relative_energy
+
+    @classmethod
+    def _parse_active_track(cls, active_raw):
+        if active_raw is None:
+            return None
+        if not isinstance(active_raw, dict):
+            raise ValueError("active_track is invalid")
+        active_path = cls._optional_text(active_raw.get("canonical_path"), "active_track.canonical_path")
+        deck = active_raw.get("deck")
+        status = active_raw.get("status")
+        generation = active_raw.get("generation", 0)
+        activated_at = active_raw.get("activated_at_unix_milliseconds")
+        if not active_path or canonical_song_analyzer_track_path(active_path) != active_path \
+                or isinstance(deck, bool) or not isinstance(deck, int) or deck < 1 \
+                or status not in {"ready", "pending", "unavailable"} \
+                or isinstance(generation, bool) or not isinstance(generation, int) or generation < 0 \
+                or activated_at is not None and (isinstance(activated_at, bool) or not isinstance(activated_at, int) or activated_at < 0):
+            raise ValueError("active_track is invalid")
+        return SongAnalyzerActiveTrack(active_path, deck, status, generation, activated_at)
+
+    @classmethod
+    def _parse_active_track_document(cls, raw):
+        if not isinstance(raw, dict) or raw.get("schema_version") != SONG_ANALYZER_ACTIVE_TRACK_SCHEMA_VERSION:
+            raise RuntimeError("unsupported_active_track_schema")
+        return cls._parse_active_track(raw.get("active_track"))
 
     @classmethod
     def _parse_document(cls, raw):
@@ -3075,24 +3195,7 @@ class SongAnalyzerStructureHandoff:
                 tuple(segments), rich_model, rich_energy_scale, rich_segments, rich_events, semantic_sections, shadow_sections,
                 shadow_event_evidence, rich_musical_events,
             )
-        active_raw = raw.get("active_track")
-        active = None
-        if active_raw is not None:
-            if not isinstance(active_raw, dict):
-                raise ValueError("active_track is invalid")
-            active_path = cls._optional_text(active_raw.get("canonical_path"), "active_track.canonical_path")
-            deck = active_raw.get("deck")
-            status = active_raw.get("status")
-            generation = active_raw.get("generation", 0)
-            activated_at = active_raw.get("activated_at_unix_milliseconds")
-            if not active_path or canonical_song_analyzer_track_path(active_path) != active_path \
-                    or isinstance(deck, bool) or not isinstance(deck, int) or deck < 1 \
-                    or status not in {"ready", "pending", "unavailable"} \
-                    or isinstance(generation, bool) or not isinstance(generation, int) or generation < 0 \
-                    or activated_at is not None and (isinstance(activated_at, bool) or not isinstance(activated_at, int) or activated_at < 0):
-                raise ValueError("active_track is invalid")
-            active = SongAnalyzerActiveTrack(active_path, deck, status, generation, activated_at)
-        return schema, tracks, active
+        return schema, tracks, cls._parse_active_track(raw.get("active_track"))
 
     def _file_signature(self):
         try:
@@ -3102,6 +3205,59 @@ class SongAnalyzerStructureHandoff:
             return None
         except OSError as exc:
             return ("error", type(exc).__name__)
+
+    def _active_track_file_signature(self):
+        try:
+            stat = self.active_track_path.stat()
+            return stat.st_mtime_ns, stat.st_size
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            return ("error", type(exc).__name__)
+
+    def _refresh_active_track(self, force=False):
+        """Consume only the tiny live-state sidecar; never reload the track index."""
+        now = time.monotonic()
+        if not force and now - self._active_track_last_check < self._active_track_check_interval_seconds:
+            return False
+        self._active_track_last_check = now
+        signature = self._active_track_file_signature()
+        if signature == self._active_track_signature:
+            return False
+        self._active_track_signature = signature
+        self._active_track_load_error = None
+        if signature is None:
+            self._active_track_load_status = "missing"
+            self._active_track = self._legacy_active_track
+            self._active_track_source = "legacy_index" if self._legacy_active_track is not None else "none"
+            return True
+        if isinstance(signature, tuple) and signature[0] == "error":
+            self._active_track_load_status = "unreadable"
+            self._active_track_load_error = signature[1]
+            self._active_track = None
+            self._active_track_source = "none"
+            self._metrics["active_track_parse_failures"] += 1
+            return True
+        try:
+            with self.active_track_path.open("r", encoding="utf-8") as handle:
+                active = self._parse_active_track_document(json.load(handle))
+            self._active_track = active
+            self._active_track_source = "sidecar"
+            self._active_track_load_status = "ready"
+            self._metrics["active_track_loads"] += 1
+        except RuntimeError as exc:
+            self._active_track = None
+            self._active_track_source = "none"
+            self._active_track_load_status = "unsupported_schema"
+            self._active_track_load_error = str(exc)
+            self._metrics["active_track_parse_failures"] += 1
+        except Exception as exc:
+            self._active_track = None
+            self._active_track_source = "none"
+            self._active_track_load_status = "invalid"
+            self._active_track_load_error = type(exc).__name__
+            self._metrics["active_track_parse_failures"] += 1
+        return True
 
     def _refresh(self, force=False):
         now = time.monotonic()
@@ -3114,7 +3270,10 @@ class SongAnalyzerStructureHandoff:
             return
         self._signature = signature
         self._tracks = {}
-        self._active_track = None
+        self._legacy_active_track = None
+        if self._active_track_load_status == "missing":
+            self._active_track = None
+            self._active_track_source = "none"
         self._schema_version = None
         self._load_error = None
         if signature is None:
@@ -3128,10 +3287,13 @@ class SongAnalyzerStructureHandoff:
         self._metrics["structure_loads"] += 1
         try:
             with self.path.open("r", encoding="utf-8") as handle:
-                schema, tracks, active = self._parse_document(json.load(handle))
+                schema, tracks, legacy_active = self._parse_document(json.load(handle))
             self._schema_version = schema
             self._tracks = tracks
-            self._active_track = active
+            self._legacy_active_track = legacy_active
+            if self._active_track_load_status == "missing":
+                self._active_track = legacy_active
+                self._active_track_source = "legacy_index" if legacy_active is not None else "none"
             self._load_status = "ready"
         except RuntimeError as exc:
             self._load_status = "unsupported_schema"
@@ -3191,7 +3353,8 @@ class SongAnalyzerStructureHandoff:
     def catalog(self):
         """Return only current, read-only analysis identities for the simulator."""
         with self._lock:
-            self._refresh()
+            if not self._background_preloader_started:
+                self._refresh()
             result = []
             for path, track in sorted(self._tracks.items()):
                 if track.availability != "current" or not track.segments:
@@ -3216,18 +3379,27 @@ class SongAnalyzerStructureHandoff:
         # Serialize refresh/projection so a reload cannot expose a half-updated
         # in-memory index to a DMX frame.
         with self._lock:
+            self._refresh_active_track()
             state = dict(playback or {})
             source = state.get("_active_playback_source")
             raw_path = state.get("track_path")
             canonical_path = canonical_song_analyzer_track_path(raw_path)
-            track_changed = canonical_path != self._last_track_path
+            # A transient unavailable render snapshot has no track path.  It
+            # must remain fail-closed for this projection, but must not erase
+            # the last proven track identity and turn its recovery into a
+            # false handoff reload.
+            track_changed = canonical_path is not None and canonical_path != self._last_track_path
             if track_changed:
                 self._last_track_path = canonical_path
                 self._metrics["track_switches"] += 1
-            self._refresh(force=track_changed)
+            if not self._background_preloader_started:
+                self._refresh(force=track_changed)
             result = {
                 "source": "song_analyzer" if source in {"virtualdj", "simulator"} else "none",
                 "contract_path": str(self.path),
+                "active_track_contract_status": self._active_track_load_status,
+                "active_track_contract_error": self._active_track_load_error,
+                "active_track_source": self._active_track_source,
                 "schema_version": self._schema_version,
                 "load_status": self._load_status,
                 "load_error": self._load_error,
@@ -3276,8 +3448,16 @@ class SongAnalyzerStructureHandoff:
                     canonical_path = active.canonical_path
                     result["canonical_track_path"] = canonical_path
                 elif active.canonical_path != canonical_path:
-                    result["track_match"] = "not_active"
-                    return result
+                    # A ready inactive-deck prewarm is already an exact entry
+                    # in the atomically parsed index. Once VirtualDJ itself
+                    # switches authority to that path, it is safe to use only
+                    # that exact current entry while active_track catches up.
+                    # Never substitute the previous active structure and never
+                    # accept stale, missing, or absent prepared entries.
+                    prepared = self._tracks.get(canonical_path)
+                    if prepared is None or prepared.availability != "current":
+                        result["track_match"] = "not_active"
+                        return result
             elif not canonical_path:
                 return result
             track = self._tracks.get(canonical_path)
@@ -7462,6 +7642,11 @@ STRUCTURE_BEHAVIOR_SOURCES = {
     "legacy",
     "song_analyzer",
 }
+# A brief bridge handoff may publish the new authoritative transport path a
+# frame before its exact SongAnalyzer structure is visible. Keep only the last
+# selected *effect bucket* across that gap; never reuse the old track's
+# structure, and fail closed once this bounded grace period expires.
+SONG_ANALYZER_HANDOFF_EFFECT_HOLD_SECONDS = 2.0
 
 # This is deliberately an explicit contract, rather than another loose
 # startswith check in the renderer. It mirrors every currently exported native
@@ -7509,6 +7694,8 @@ class EffectiveBehaviorContext:
     mapped_behavior_bucket: Optional[str]
     song_analyzer_label: Optional[str]
     projection: Optional[dict]
+    handoff_effect_hold: bool = False
+    handoff_effect_hold_remaining_seconds: Optional[float] = None
 
     def as_dict(self):
         return {
@@ -7520,6 +7707,8 @@ class EffectiveBehaviorContext:
             "mapped_behavior_bucket": self.mapped_behavior_bucket,
             "song_analyzer_label": self.song_analyzer_label,
             "projection": self.projection,
+            "handoff_effect_hold": self.handoff_effect_hold,
+            "handoff_effect_hold_remaining_seconds": self.handoff_effect_hold_remaining_seconds,
         }
 
 
@@ -7528,13 +7717,36 @@ class StructureBehaviorBridge:
 
     def __init__(self, handoff):
         self.handoff = handoff
+        self._last_song_analyzer_effect = None
 
-    def resolve(self, selected_source, transport_state, include_shadow=False):
+    def _handoff_or_legacy_fallback(self, selected_source, legacy_phrase, fallback_reason,
+                                    projection, authoritative_track_path, now):
+        previous = self._last_song_analyzer_effect
+        if (
+            selected_source == "song_analyzer"
+            and previous is not None
+            and authoritative_track_path
+            and authoritative_track_path != previous["track_path"]
+            and 0.0 <= now - previous["selected_at"] <= SONG_ANALYZER_HANDOFF_EFFECT_HOLD_SECONDS
+        ):
+            remaining = max(0.0, SONG_ANALYZER_HANDOFF_EFFECT_HOLD_SECONDS - (now - previous["selected_at"]))
+            return EffectiveBehaviorContext(
+                selected_source, "song_analyzer", True, "handoff_effect_hold", legacy_phrase,
+                previous["bucket"], previous["label"], projection, True, remaining,
+            ).as_dict()
+        return EffectiveBehaviorContext(
+            selected_source, "legacy", False,
+            "legacy_selected" if selected_source == "legacy" else fallback_reason,
+            legacy_phrase, None, None, projection,
+        ).as_dict()
+
+    def resolve(self, selected_source, transport_state, include_shadow=False, now=None):
         selected_source = str(selected_source or "legacy").strip().lower()
         if selected_source not in STRUCTURE_BEHAVIOR_SOURCES:
             selected_source = "legacy"
 
         state = dict(transport_state or {})
+        now = time.monotonic() if now is None else float(now)
         legacy_phrase = state.get("phrase_current")
         if selected_source == "legacy" and not include_shadow:
             return EffectiveBehaviorContext(
@@ -7562,25 +7774,19 @@ class StructureBehaviorBridge:
                 "unreadable": "structure_unreadable",
                 "missing": "structure_missing",
             }.get(load_status, "track_not_exact")
-            return EffectiveBehaviorContext(
-                selected_source, "legacy", False,
-                "legacy_selected" if selected_source == "legacy" else fallback_reason,
-                legacy_phrase, None, None, projection,
-            ).as_dict()
+            return self._handoff_or_legacy_fallback(
+                selected_source, legacy_phrase, fallback_reason, projection, track_path, now,
+            )
         if projection.get("availability") != "available_current":
-            return EffectiveBehaviorContext(
-                selected_source, "legacy", False,
-                "legacy_selected" if selected_source == "legacy" else "structure_not_current",
-                legacy_phrase, None, None, projection,
-            ).as_dict()
+            return self._handoff_or_legacy_fallback(
+                selected_source, legacy_phrase, "structure_not_current", projection, track_path, now,
+            )
         if projection.get("projection_status") not in {"in_segment", "in_final_segment"}:
             projection_status = projection.get("projection_status")
             fallback_reason = "no_playback_position" if projection_status == "position_unavailable" else "no_current_segment"
-            return EffectiveBehaviorContext(
-                selected_source, "legacy", False,
-                "legacy_selected" if selected_source == "legacy" else fallback_reason,
-                legacy_phrase, None, None, projection,
-            ).as_dict()
+            return self._handoff_or_legacy_fallback(
+                selected_source, legacy_phrase, fallback_reason, projection, track_path, now,
+            )
         if projection.get("canonical_track_path") != track_path:
             return EffectiveBehaviorContext(
                 selected_source, "legacy", False,
@@ -7597,7 +7803,7 @@ class StructureBehaviorBridge:
                 legacy_phrase, None, label, projection,
             ).as_dict()
 
-        return EffectiveBehaviorContext(
+        context = EffectiveBehaviorContext(
             selected_source,
             "legacy" if selected_source == "legacy" else "song_analyzer",
             True,
@@ -7607,6 +7813,14 @@ class StructureBehaviorBridge:
             label,
             projection,
         ).as_dict()
+        if selected_source == "song_analyzer":
+            self._last_song_analyzer_effect = {
+                "track_path": track_path,
+                "bucket": bucket,
+                "label": label,
+                "selected_at": now,
+            }
+        return context
 
 
 @dataclass(frozen=True)
@@ -13816,6 +14030,7 @@ class DmxController:
         self.last_track_plan_prewarm_at = 0.0
         self.last_playback_generation = None
         self.last_structure_behavior_source = None
+        self._last_dynamic_composer_handoff_effect = None
         self.playback_runtime_resets = 0
         self.active_virtualdj_beat_pulse = None
         self.active_virtualdj_beat_pulse_preview = None
@@ -19931,6 +20146,19 @@ class DmxController:
             renderer_healthy=bool(self.render_active and self.renderer_error is None),
             safety_context={"blackout_active": config.get("blackout_active") is True},
         )
+        now = time.monotonic()
+        if decision.get("production_show_source") == "dynamic_composer":
+            track_path = canonical_song_analyzer_track_path((osc or {}).get("track_path"))
+            if track_path:
+                self._last_dynamic_composer_handoff_effect = {
+                    "auto_show": copy.deepcopy(selected),
+                    "track_path": track_path,
+                    "selected_at": now,
+                }
+        else:
+            held = self._dynamic_composer_handoff_effect_hold(decision, osc, now)
+            if held is not None:
+                selected, decision = held
         if decision.get("production_mode") == "DYNAMIC_COMPOSER_SHADOW":
             observation = self.production_show_shadow_observation
             observation["frames"] += 1
@@ -19947,6 +20175,41 @@ class DmxController:
                 reasons = observation["ineligible_reasons"]
                 reasons[reason] = reasons.get(reason, 0) + 1
         return selected, candidate, decision
+
+    def _dynamic_composer_handoff_effect_hold(self, decision, osc, now):
+        """Retain one prior rendered effect across a bounded new-track handoff only."""
+        previous = self._last_dynamic_composer_handoff_effect
+        track_path = canonical_song_analyzer_track_path((osc or {}).get("track_path"))
+        if (
+            previous is None
+            or not track_path
+            or track_path == previous["track_path"]
+            or decision.get("fallback_reason") not in {
+                "track_mismatch", "deck_mismatch", "handoff_not_current", "transport_not_advancing",
+            }
+        ):
+            return None
+        elapsed = now - previous["selected_at"]
+        if elapsed < 0.0 or elapsed > SONG_ANALYZER_HANDOFF_EFFECT_HOLD_SECONDS:
+            return None
+        remaining = max(0.0, SONG_ANALYZER_HANDOFF_EFFECT_HOLD_SECONDS - elapsed)
+        held_auto_show = copy.deepcopy(previous["auto_show"])
+        held_auto_show["dynamic_composer_handoff_effect_hold"] = True
+        held_auto_show["dynamic_composer_handoff_effect_hold_remaining_seconds"] = remaining
+        held_auto_show["dynamic_composer_handoff_effect_hold_from_track_path"] = previous["track_path"]
+        held_decision = {
+            **decision,
+            "production_source": "dynamic_composer",
+            "production_show_source": "dynamic_composer",
+            "composer_active": True,
+            "dynamic_composer_active": True,
+            "fallback_active": False,
+            "fallback_reason": "handoff_effect_hold",
+            "handoff_effect_hold": True,
+            "handoff_effect_hold_remaining_seconds": remaining,
+            "handoff_effect_hold_from_track_path": previous["track_path"],
+        }
+        return held_auto_show, held_decision
 
     def _render_selected_production_values(
         self, now, config, osc, baseline_auto_show, selected_auto_show, decision
@@ -24157,6 +24420,7 @@ def shutdown():
     if USB_REMOTE_BRIDGE is not None:
         USB_REMOTE_BRIDGE.stop()
         USB_REMOTE_BRIDGE = None
+    SONG_ANALYZER_STRUCTURE.stop_preloader()
     DMX.shutdown()
     TRANSPORT.stop()
 
@@ -24364,6 +24628,7 @@ def main():
     SERVER_PORT = int(args.port)
     REMOTE_ACCESS_CONFIG = load_remote_access_config()
     OSC.port = args.osc_port
+    SONG_ANALYZER_STRUCTURE.start_preloader()
     TRANSPORT.start()
     DMX.start_show_engine()
     global USB_REMOTE_BRIDGE

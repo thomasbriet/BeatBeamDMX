@@ -120,6 +120,41 @@ class SongAnalyzerStructureBehaviorTests(unittest.TestCase):
             self.bridge_with_fixture().resolve("song_analyzer", playback(source="legacy"))["fallback_reason"],
         )
 
+    def test_new_track_handoff_holds_only_the_last_effect_bucket_briefly(self):
+        bridge = self.bridge_with_fixture()
+        previous = bridge.resolve("song_analyzer", playback(), now=100.0)
+        held = bridge.resolve(
+            "song_analyzer", playback(track="/Music/Prepared But Not Visible.flac"), now=100.25,
+        )
+        expired = bridge.resolve(
+            "song_analyzer", playback(track="/Music/Prepared But Not Visible.flac"), now=102.01,
+        )
+
+        self.assertEqual("song_analyzer", previous["effective_source"])
+        self.assertTrue(held["handoff_effect_hold"])
+        self.assertEqual("handoff_effect_hold", held["fallback_reason"])
+        self.assertEqual("song_analyzer", held["effective_source"])
+        self.assertEqual(previous["mapped_behavior_bucket"], held["mapped_behavior_bucket"])
+        self.assertEqual(previous["song_analyzer_label"], held["song_analyzer_label"])
+        self.assertEqual("/Music/Prepared But Not Visible.flac", held["projection"]["canonical_track_path"])
+        self.assertEqual("none", held["projection"]["track_match"])
+        self.assertFalse(expired["handoff_effect_hold"])
+        self.assertEqual("legacy", expired["effective_source"])
+        self.assertEqual("track_not_exact", expired["fallback_reason"])
+
+    def test_same_track_invalid_structure_never_uses_the_handoff_effect_hold(self):
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        bridge = self.bridge_with_fixture(payload)
+        bridge.resolve("song_analyzer", playback(), now=100.0)
+        payload["tracks"][0]["availability"] = "stale"
+        bridge.handoff.path.write_text(json.dumps(payload), encoding="utf-8")
+
+        fallback = bridge.resolve("song_analyzer", playback(), now=100.2)
+
+        self.assertFalse(fallback["handoff_effect_hold"])
+        self.assertEqual("legacy", fallback["effective_source"])
+        self.assertEqual("structure_not_current", fallback["fallback_reason"])
+
     def test_unsupported_schema_and_missing_current_segment_fail_closed(self):
         unsupported = json.loads(FIXTURE.read_text(encoding="utf-8"))
         unsupported["schema_version"] = 99

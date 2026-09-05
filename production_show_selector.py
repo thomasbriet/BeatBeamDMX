@@ -139,6 +139,8 @@ def select_production_show_source(
         "dynamic_composer_active": active,
         "fallback_active": not active,
         "fallback_reason": fallback_reason,
+        "handoff_effect_hold": False,
+        "handoff_effect_hold_remaining_seconds": None,
         "manual_override_active": manual,
         "blackout_active": safety_context.get("blackout_active") is True,
         "continuous_state_valid": _valid_continuous_state(

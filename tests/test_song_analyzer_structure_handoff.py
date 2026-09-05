@@ -19,6 +19,175 @@ def playback(path, seconds, source="virtualdj"):
 
 
 class SongAnalyzerStructureHandoffTests(unittest.TestCase):
+    def test_default_refresh_interval_bounds_live_handoff_reloads(self):
+        handoff = SongAnalyzerStructureHandoff(FIXTURE)
+
+        self.assertEqual(5.0, handoff.check_interval_seconds)
+
+    def test_transient_unavailable_snapshot_does_not_invalidate_stable_track_cache(self):
+        handoff = SongAnalyzerStructureHandoff(FIXTURE, check_interval_seconds=60)
+
+        stable = handoff.project(playback(TRACK, 2))
+        unavailable = handoff.project({
+            "_active_playback_source": "virtualdj",
+            "track_path": None,
+            "time_seconds": None,
+            "playback_state": {
+                "availability": "unavailable",
+                "transport_state": "unknown",
+                "last_discontinuity": "source_unavailable",
+            },
+        })
+        recovered = handoff.project(playback(TRACK, 2))
+
+        self.assertEqual(1, stable["metrics"]["structure_loads"])
+        self.assertEqual(1, stable["metrics"]["track_switches"])
+        self.assertIsNone(unavailable["canonical_track_path"])
+        self.assertEqual(1, unavailable["metrics"]["structure_loads"])
+        self.assertEqual(1, unavailable["metrics"]["track_switches"])
+        self.assertEqual(1, recovered["metrics"]["structure_loads"])
+        self.assertEqual(1, recovered["metrics"]["track_switches"])
+
+    def test_same_track_transport_noise_respects_refresh_interval(self):
+        handoff = SongAnalyzerStructureHandoff(FIXTURE, check_interval_seconds=60)
+
+        initial = handoff.project(playback(TRACK, 2))
+        changed_transport = handoff.project({
+            "_active_playback_source": "virtualdj",
+            "track_path": TRACK,
+            "time_seconds": 3,
+            "playback_state": {
+                "availability": "available",
+                "transport_state": "advancing",
+                "last_discontinuity": "position_jump_forward",
+            },
+        })
+
+        self.assertEqual(1, initial["metrics"]["structure_loads"])
+        self.assertEqual(1, changed_transport["metrics"]["structure_loads"])
+        self.assertEqual(1, changed_transport["metrics"]["track_switches"])
+
+    def test_genuine_track_path_change_reloads_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            alternate = json.loads(json.dumps(payload["tracks"][0]))
+            alternate["canonical_path"] = "/Music/Example/Second Track.flac"
+            payload["tracks"].append(alternate)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            handoff = SongAnalyzerStructureHandoff(path, check_interval_seconds=60)
+
+            first = handoff.project(playback(TRACK, 2))
+            path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            switched = handoff.project(playback(alternate["canonical_path"], 2))
+            repeated = handoff.project(playback(alternate["canonical_path"], 3))
+
+        self.assertEqual(1, first["metrics"]["structure_loads"])
+        self.assertEqual(2, switched["metrics"]["structure_loads"])
+        self.assertEqual(2, switched["metrics"]["track_switches"])
+        self.assertEqual(2, repeated["metrics"]["structure_loads"])
+        self.assertEqual(2, repeated["metrics"]["track_switches"])
+
+    def test_preloaded_exact_inactive_deck_track_swaps_without_waiting_for_active_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            prepared = json.loads(json.dumps(payload["tracks"][0]))
+            prepared["canonical_path"] = "/Music/Prepared Next.flac"
+            payload["tracks"].append(prepared)
+            payload["active_track"] = {
+                "canonical_path": TRACK, "deck": 1, "status": "ready", "generation": 10,
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            handoff = SongAnalyzerStructureHandoff(path, check_interval_seconds=60)
+
+            current = handoff.project(playback(TRACK, 2))
+            switched = handoff.project(playback(prepared["canonical_path"], 2))
+
+        self.assertEqual(TRACK, current["canonical_track_path"])
+        self.assertEqual("exact", current["track_match"])
+        self.assertEqual("exact", switched["track_match"])
+        self.assertEqual("available_current", switched["availability"])
+        self.assertEqual("Intro 1", switched["current"]["label"])
+        self.assertEqual(1, switched["metrics"]["structure_loads"])
+
+    def test_preloader_installs_next_track_before_authority_switch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            prepared = json.loads(json.dumps(payload["tracks"][0]))
+            prepared["canonical_path"] = "/Music/Prepared Next.flac"
+            payload["tracks"].append(prepared)
+            payload["active_track"] = {
+                "canonical_path": TRACK, "deck": 1, "status": "ready", "generation": 10,
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            handoff = SongAnalyzerStructureHandoff(path, check_interval_seconds=60)
+            self.assertTrue(handoff._preload_once())
+            current = handoff.project(playback(TRACK, 2))
+            payload["active_track"] = {
+                "canonical_path": prepared["canonical_path"], "deck": 2, "status": "ready", "generation": 11,
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            handoff._background_preloader_started = True
+            switched = handoff.project(playback(prepared["canonical_path"], 2))
+
+        self.assertEqual(TRACK, current["canonical_track_path"])
+        self.assertEqual("exact", current["track_match"])
+        self.assertEqual("exact", switched["track_match"])
+        self.assertEqual(1, switched["metrics"]["structure_loads"])
+
+    def test_active_sidecar_updates_without_reparsing_prepared_track_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            active_path = Path(directory) / "beatbeam-active-track.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            prepared = json.loads(json.dumps(payload["tracks"][0]))
+            prepared["canonical_path"] = "/Music/Prepared Next.flac"
+            payload["tracks"].append(prepared)
+            payload["active_track"] = {
+                "canonical_path": TRACK, "deck": 1, "status": "ready", "generation": 10,
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            handoff = SongAnalyzerStructureHandoff(path, check_interval_seconds=60, active_track_path=active_path)
+            self.assertTrue(handoff._preload_once())
+            active_path.write_text(json.dumps({
+                "schema_version": 1,
+                "active_track": {
+                    "canonical_path": prepared["canonical_path"], "deck": 2,
+                    "status": "ready", "generation": 11,
+                },
+            }), encoding="utf-8")
+            handoff._refresh_active_track(force=True)
+            before_switch = handoff.project(playback(TRACK, 2))
+            switched = handoff.project(playback(prepared["canonical_path"], 2))
+
+        self.assertEqual("sidecar", before_switch["active_track_source"])
+        self.assertEqual(TRACK, before_switch["canonical_track_path"])
+        self.assertEqual("exact", before_switch["track_match"])
+        self.assertEqual("exact", switched["track_match"])
+        self.assertEqual(1, switched["metrics"]["structure_loads"])
+
+    def test_pending_active_sidecar_fails_closed_without_using_prepared_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            active_path = Path(directory) / "beatbeam-active-track.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            active_path.write_text(json.dumps({
+                "schema_version": 1,
+                "active_track": {
+                    "canonical_path": TRACK, "deck": 1,
+                    "status": "pending", "generation": 11,
+                },
+            }), encoding="utf-8")
+            handoff = SongAnalyzerStructureHandoff(path, check_interval_seconds=60, active_track_path=active_path)
+            result = handoff.project(playback(TRACK, 2))
+
+        self.assertEqual("sidecar", result["active_track_source"])
+        self.assertEqual("pending", result["availability"])
+        self.assertEqual("active_not_ready", result["track_match"])
+
     def write_fixture(self, destination):
         destination.write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
 
@@ -424,7 +593,7 @@ class SongAnalyzerStructureHandoffTests(unittest.TestCase):
             self.assertEqual(11, state["active_track"]["generation"])
             self.assertEqual("Intro 1", state["current"]["label"])
 
-    def test_pending_or_other_active_track_cannot_project_previous_track_data(self):
+    def test_pending_or_other_active_track_never_projects_previous_track_data(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "handoff.json"
             payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
@@ -440,6 +609,7 @@ class SongAnalyzerStructureHandoffTests(unittest.TestCase):
 
             payload["active_track"]["canonical_path"] = "/Music/Other.flac"
             payload["active_track"]["status"] = "ready"
+            payload["tracks"][0]["availability"] = "missing"
             path.write_text(json.dumps(payload), encoding="utf-8")
             other = handoff.project(playback(TRACK, 2))
             self.assertEqual("not_active", other["track_match"])
