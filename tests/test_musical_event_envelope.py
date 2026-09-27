@@ -13,6 +13,10 @@ def projection(event_type="ARRIVAL", *, availability="available_current", status
     }]
     return {
         "track_match": "exact", "availability": availability, "projection_status": status,
+        "composer_readiness": {
+            "status": "ready", "version": "dynamic-composer-backbone-v1",
+            "reason": "ready", "missing_fields": [],
+        },
         "shadow_analysis": {"model": "SectionCharacterProfileShadow", "section_characters": [{
             "observation_id": "section-envelope", "start_seconds": 0.0, "end_seconds": 30.0,
             "relative_energy": .62, "energy_rise": .4, "recurrence_strength": .84,

@@ -601,12 +601,11 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
             config_path = Path(directory) / "transport.json"
             snapshot_path = Path(directory) / "virtualdj.json"
             fake_osc = SimpleNamespace(lock=threading.RLock(), decks={})
-            with patch("beatbeam_app.TRANSPORT_CONFIG_PATH", config_path):
-                first = TransportController(fake_osc)
-                first.update_developer_playback(
-                    {"source": "virtualdj", "snapshot_path": str(snapshot_path)}
-                )
-                reloaded = TransportController(fake_osc)
+            first = TransportController(fake_osc, config_path=config_path)
+            first.update_developer_playback(
+                {"source": "virtualdj", "snapshot_path": str(snapshot_path)}
+            )
+            reloaded = TransportController(fake_osc, config_path=config_path)
 
             self.assertEqual("virtualdj", reloaded.config["developer_playback_source"])
             self.assertEqual(str(snapshot_path), reloaded.config["developer_playback_state_path"])
@@ -615,13 +614,12 @@ class VirtualDjLiveSyncTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "transport.json"
             fake_osc = FakeLegacyPlaybackSource()
-            with patch("beatbeam_app.TRANSPORT_CONFIG_PATH", config_path):
-                first = TransportController(fake_osc)
-                first.update_config({
-                    "active_playback_source": "virtualdj",
-                    "structure_behavior_source": "song_analyzer",
-                })
-                reloaded = TransportController(fake_osc)
+            first = TransportController(fake_osc, config_path=config_path)
+            first.update_config({
+                "active_playback_source": "virtualdj",
+                "structure_behavior_source": "song_analyzer",
+            })
+            reloaded = TransportController(fake_osc, config_path=config_path)
 
             self.assertEqual("virtualdj", reloaded.config["active_playback_source"])
             self.assertEqual("song_analyzer", reloaded.structure_behavior_source())
@@ -783,10 +781,10 @@ def virtualdj_state(
 class ActivePlaybackSourceTests(unittest.TestCase):
     def make_transport(self, virtualdj=None):
         legacy = FakeLegacyPlaybackSource()
-        with tempfile.TemporaryDirectory() as directory:
-            config_path = Path(directory) / "transport.json"
-            with patch("beatbeam_app.TRANSPORT_CONFIG_PATH", config_path):
-                transport = TransportController(legacy)
+        test_config_directory = tempfile.TemporaryDirectory()
+        config_path = Path(test_config_directory.name) / "transport.json"
+        transport = TransportController(legacy, config_path=config_path)
+        self.addCleanup(test_config_directory.cleanup)
         transport.config = transport._clean_config(transport.default_config())
         transport._save_config = lambda _config: None
         transport.developer_playback = FakeDeveloperPlayback(
@@ -1311,10 +1309,8 @@ class VirtualDjBeatPulseTests(unittest.TestCase):
     def test_direct_dmx_pulse_attempts_to_restore_the_baseline_after_a_send_failure(self):
         state = pulse_state()
         transport = FakeDmxTransport(state)
-        with tempfile.TemporaryDirectory() as directory, patch(
-            "beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"
-        ):
-            controller = DmxController(transport)
+        with tempfile.TemporaryDirectory() as directory:
+            controller = DmxController(transport, config_path=Path(directory) / "config.json")
         controller.config = controller._clean_full_config(controller.default_config())
         output = FailFirstDmxOutput()
         controller.dmx = output
@@ -1346,10 +1342,8 @@ class VirtualDjBeatPulseTests(unittest.TestCase):
     def test_direct_dmx_pulse_uses_fixture_intensity_and_restores_the_previous_frame(self):
         state = pulse_state()
         transport = FakeDmxTransport(state)
-        with tempfile.TemporaryDirectory() as directory, patch(
-            "beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"
-        ):
-            controller = DmxController(transport)
+        with tempfile.TemporaryDirectory() as directory:
+            controller = DmxController(transport, config_path=Path(directory) / "config.json")
         controller.config = controller._clean_full_config(controller.default_config())
         output = FakeDmxOutput()
         controller.dmx = output
@@ -1384,10 +1378,8 @@ class VirtualDjBeatPulseTests(unittest.TestCase):
     def test_preview_pulse_uses_the_same_scheduler_without_sending_a_dmx_frame(self):
         state = pulse_state()
         transport = FakeDmxTransport(state)
-        with tempfile.TemporaryDirectory() as directory, patch(
-            "beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"
-        ):
-            controller = DmxController(transport)
+        with tempfile.TemporaryDirectory() as directory:
+            controller = DmxController(transport, config_path=Path(directory) / "config.json")
         controller.config = controller._clean_full_config(controller.default_config())
         output = FakeDmxOutput()
         controller.dmx = output

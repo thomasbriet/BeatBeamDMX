@@ -25,6 +25,10 @@ def projection(event_type=None, start=10.0, end=20.0, *, availability="available
     return {
         "track_match": "exact", "availability": availability, "projection_status": status,
         "canonical_track_path": "/Music/current.flac",
+        "composer_readiness": {
+            "status": "ready", "version": "dynamic-composer-backbone-v1",
+            "reason": "ready", "missing_fields": [],
+        },
         "shadow_analysis": {
             "model": "SectionCharacterProfileShadow",
             "section_characters": [{
@@ -269,6 +273,25 @@ class DynamicComposerTests(unittest.TestCase):
             self.assertIn(current["variation"]["repeat_classification"], {
                 "NEW_MATERIAL", "COMPONENT_VARIATION", "NEAR_REPEAT", "CAPABILITY_LIMITED",
             })
+
+    def test_wall_wash_motifs_rotate_when_recent_alternatives_exist(self):
+        history = CompositionHistory(capacity=6)
+        compositions = []
+        for index in range(6):
+            state = ContinuousMusicalState(
+                f"wash-rotation-{index}", index * 30, (index + 1) * 30,
+                .50, .62, .35, .20, .75,
+            )
+            compositions.append(compose_dynamic_preview(
+                base_show(), state, self.context(event_type=None),
+                composition_history=history,
+                lifecycle_context=("simulation", "wash-rotation-track", 1),
+            ))
+
+        wash_motifs = [item["composition_signature"]["wash"] for item in compositions]
+        self.assertGreaterEqual(len(set(wash_motifs)), 3)
+        for index, motif in enumerate(wash_motifs):
+            self.assertNotIn(motif, wash_motifs[max(0, index - 2):index])
 
     def test_track_identity_changes_opening_material_but_replay_is_stable(self):
         state = ContinuousMusicalState("same-section", 0, 30, .5, .72, .35, .2, .7)

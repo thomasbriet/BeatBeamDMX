@@ -25,9 +25,11 @@ class StructureSourceUiTests(unittest.TestCase):
         native = (ROOT / "native" / "BeatBeamDMXApp.swift").read_text(encoding="utf-8")
         live_show = (ROOT / "native" / "LiveShowUX.swift").read_text(encoding="utf-8")
         for title in ('case live = "Live Show"', 'case preview = "Stage Map"',
-                      'case autoShow = "Auto Show"', 'case manual = "Manual"',
-                      'case advanced = "Advanced"'):
+                      'case manual = "Manual"', 'case advanced = "Advanced"'):
             self.assertIn(title, native)
+        workspace_mode = native[native.index("private enum WorkspaceMode"):native.index("private enum UtilityPanel")]
+        self.assertNotIn('case autoShow = "Auto Show"', workspace_mode)
+        self.assertNotIn('case simulator = "Simulator"', workspace_mode)
         self.assertIn('LiveShowWorkspaceView()', native)
         self.assertIn('AdvancedOperationsWorkspaceView(', native)
         self.assertIn('DebugInspectorView()', live_show)

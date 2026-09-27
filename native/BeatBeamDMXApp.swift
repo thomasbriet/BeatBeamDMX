@@ -113,6 +113,14 @@ private let requiredBackendSchemaVersion = 4
 private let defaultBackendOscPort = beatBeamBackendOscPort
 private let stageMapInspectorWidthDefaultsKey = "BeatBeamDMX.stageMap.inspectorWidth"
 
+private func stageProjectionCanvasSize(in containerSize: CGSize, inset: CGFloat = 16) -> CGSize {
+    let aspect = stageMapAspectRatio
+    let availableWidth = max(1, containerSize.width - inset * 2)
+    let availableHeight = max(1, containerSize.height - inset * 2)
+    let width = min(availableWidth, availableHeight * aspect)
+    return CGSize(width: width, height: width / aspect)
+}
+
 private func defaultRekordboxBridgeScriptPath() -> String {
     let fallback = (URL(fileURLWithPath: NSHomeDirectory()) as URL)
         .appendingPathComponent("BPM Trigger/start_bridge.sh")
@@ -666,6 +674,8 @@ struct RemoteAccessState: Decodable {
 
 struct DmxState: Decodable {
     let connected: Bool
+    let masterDimmer: Double
+    let renderedFinalValues: [String: Int]?
     let port: String?
     let fps: Double
     let error: String?
@@ -681,6 +691,7 @@ struct DmxState: Decodable {
     let slotPreviews: [String: SlotPreview]
     let renderedMotion: [String: RenderedMotionState]
     let venueSpace: VenueSpaceState?
+    let venue: VenueState?
     let venueTargetTest: VenueTargetTestAuthorityState?
     let movementLab: MovementLabState?
     let conflicts: [ChannelConflict]
@@ -693,6 +704,8 @@ struct DmxState: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case connected
+        case masterDimmer
+        case renderedFinalValues
         case port
         case fps
         case error
@@ -708,6 +721,7 @@ struct DmxState: Decodable {
         case slotPreviews
         case renderedMotion
         case venueSpace
+        case venue
         case venueTargetTest
         case movementLab
         case conflicts
@@ -722,6 +736,8 @@ struct DmxState: Decodable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         connected = try container.decode(Bool.self, forKey: .connected)
+        masterDimmer = try container.decodeIfPresent(Double.self, forKey: .masterDimmer) ?? 1.0
+        renderedFinalValues = try container.decodeIfPresent([String: Int].self, forKey: .renderedFinalValues)
         port = try container.decodeIfPresent(String.self, forKey: .port)
         fps = try container.decode(Double.self, forKey: .fps)
         error = try container.decodeIfPresent(String.self, forKey: .error)
@@ -737,6 +753,7 @@ struct DmxState: Decodable {
         slotPreviews = try container.decodeIfPresent([String: SlotPreview].self, forKey: .slotPreviews) ?? [:]
         renderedMotion = try container.decodeIfPresent([String: RenderedMotionState].self, forKey: .renderedMotion) ?? [:]
         venueSpace = try container.decodeIfPresent(VenueSpaceState.self, forKey: .venueSpace)
+        venue = try container.decodeIfPresent(VenueState.self, forKey: .venue)
         venueTargetTest = try container.decodeIfPresent(VenueTargetTestAuthorityState.self, forKey: .venueTargetTest)
         movementLab = try container.decodeIfPresent(MovementLabState.self, forKey: .movementLab)
         conflicts = try container.decode([ChannelConflict].self, forKey: .conflicts)
@@ -768,6 +785,33 @@ struct ManualSmokeState: Decodable, Equatable {
     let outputPercent: Int
     let resolvedDmxValue: Int
     let fixtureSlotIds: [String]
+}
+
+struct VenueSummaryState: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let fixtureCount: Int
+    let active: Bool
+}
+
+struct VenueState: Decodable {
+    let schemaVersion: Int
+    let activeVenueID: String
+    let activeVenueName: String
+    let switchRequiresRearm: Bool
+    let storagePersisted: Bool
+    let venues: [VenueSummaryState]
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        // JSONDecoder.convertFromSnakeCase converts active_venue_id to
+        // activeVenueId, not the Swift ID-acronym spelling activeVenueID.
+        case activeVenueID = "activeVenueId"
+        case activeVenueName
+        case switchRequiresRearm
+        case storagePersisted
+        case venues
+    }
 }
 
 struct VenuePointState: Codable {
@@ -1093,6 +1137,7 @@ struct VenueFixtureCalibrationState: Decodable, Identifiable {
     let positionSource: String?
     let position: VenuePointState?
     let mountingHeightM: Double?
+    let mountingOrientation: String?
     let physicalForward: VenueVectorState?
     let physicalUp: VenueVectorState?
     let derivedRight: VenueVectorState?
@@ -1113,6 +1158,7 @@ struct VenueFixtureCalibrationState: Decodable, Identifiable {
         case positionSource
         case position
         case mountingHeightM
+        case mountingOrientation
         case physicalForward
         case physicalUp
         case derivedRight
@@ -1295,6 +1341,8 @@ struct SlotState: Decodable {
     let colorSource: String
     let oscStrobeEnabled: Bool
     let useFinePanTilt: Bool?
+    let mountingOrientation: String?
+    let wallWashZonesMirrored: Bool?
     let panInvert: Bool
     let tiltInvert: Bool
     let panOffsetDeg: Int
@@ -2821,10 +2869,16 @@ struct FixtureProfile: Decodable, Identifiable, Hashable {
     let modes: [FixtureMode]
     let panRange: Double?
     let tiltRange: Double?
+    let beamLayout: FixtureBeamLayout?
 
     var displayName: String {
         "\(manufacturer) \(model)"
     }
+}
+
+struct FixtureBeamLayout: Decodable, Hashable {
+    let type: String
+    let length: Int?
 }
 
 struct FixtureMode: Decodable, Hashable {
@@ -2853,19 +2907,23 @@ struct FixtureChannel: Decodable, Hashable {
     let offset: Int
     let name: String?
     let type: String
+    let component: String?
     let id: String?
     let control: String?
     let ranges: [FixtureChannelRange]?
     let defaultValue: Int?
+    let zone: Int?
 
     enum CodingKeys: String, CodingKey {
         case offset
         case name
         case type
+        case component
         case id
         case control
         case ranges
         case defaultValue = "default"
+        case zone
     }
 }
 
@@ -2897,6 +2955,12 @@ struct ConnectRequest: Encodable {
 }
 
 struct EmptyRequest: Encodable {}
+struct MasterDimmerUpdateRequest: Encodable { let masterDimmer: Double }
+
+struct VenueCreateRequest: Encodable { let name: String }
+struct VenueDuplicateRequest: Encodable { let sourceVenueID: String?; let name: String? }
+struct VenueRenameRequest: Encodable { let venueID: String; let name: String }
+struct VenueIDRequest: Encodable { let venueID: String }
 
 struct VirtualDjBeatPulsePreviewRequest: Encodable {
     let slotID: String
@@ -3172,6 +3236,8 @@ struct SlotUpdateBody: Encodable {
     let beatPulseEnabled: Bool
     let oscStrobeEnabled: Bool
     let useFinePanTilt: Bool
+    let mountingOrientation: String
+    let wallWashZonesMirrored: Bool
     let panInvert: Bool
     let tiltInvert: Bool
     let panOffsetDeg: Int
@@ -3237,6 +3303,8 @@ final class SlotEditor: ObservableObject, Identifiable {
     @Published var beatPulseEnabled = true
     @Published var oscStrobeEnabled = true
     @Published var useFinePanTilt = true
+    @Published var mountingOrientation = "NORMAL"
+    @Published var wallWashZonesMirrored = false
     @Published var colorSource = "manual"
     @Published var panInvert = false
     @Published var tiltInvert = false
@@ -3306,6 +3374,8 @@ final class SlotEditor: ObservableObject, Identifiable {
         beatPulseEnabled = slot.beatPulseEnabled
         oscStrobeEnabled = slot.oscStrobeEnabled
         useFinePanTilt = slot.useFinePanTilt ?? true
+        mountingOrientation = slot.mountingOrientation ?? "NORMAL"
+        wallWashZonesMirrored = slot.wallWashZonesMirrored ?? false
         colorSource = slot.colorSource
         panInvert = slot.panInvert
         tiltInvert = slot.tiltInvert
@@ -3515,6 +3585,8 @@ final class AppModel: ObservableObject {
     @Published var manualSmoke: ManualSmokeState?
     @Published private var manualSmokeReleasedAt: Date?
     @Published var venueSpace: VenueSpaceState?
+    @Published var venueState: VenueState?
+    @Published var venueActionInFlight = false
     @Published var fixtureCalibrations: [String: VenueFixtureCalibrationState] = [:]
     @Published var venueWidthMetersText = ""
     @Published var venueForwardDepthMetersText = ""
@@ -3817,6 +3889,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveUiState: LiveUiState?
     @Published private(set) var liveIntensityState: LiveIntensityState?
     @Published private(set) var physicalDmxConnected = false
+    @Published private(set) var masterDimmer = 1.0
+    @Published private(set) var masterDimmerUpdateInFlight = false
+    @Published private(set) var liveRenderedOutput: [LiveRenderedFixture] = []
+    @Published private(set) var liveRenderedOutputAvailable = false
     @Published private(set) var physicalDmxError: String?
     @Published private(set) var blackoutActive = false
     @Published private(set) var physicalOutputSource = "auto_show -> current_values"
@@ -4802,6 +4878,29 @@ final class AppModel: ObservableObject {
         isEditingProjectionLayout = true
     }
 
+    func setMasterDimmer(_ value: Double) {
+        guard value.isFinite, !masterDimmerUpdateInFlight else { return }
+        let bounded = min(max(value, 0), 1)
+        guard abs(bounded - masterDimmer) > 0.0001 else { return }
+        masterDimmerUpdateInFlight = true
+        Task {
+            do {
+                beginLocalMutationHold(seconds: 1.5)
+                let state: AppState = try await post(
+                    "/api/dmx/update",
+                    body: MasterDimmerUpdateRequest(masterDimmer: bounded),
+                    as: AppState.self
+                )
+                masterDimmerUpdateInFlight = false
+                apply(state, source: .action)
+                errorText = ""
+            } catch {
+                masterDimmerUpdateInFlight = false
+                errorText = "Masterdimmer instellen mislukt: \(error.localizedDescription)"
+            }
+        }
+    }
+
     func startFixtureCalibration() {
         guard
             !selectedSlotID.isEmpty,
@@ -5659,6 +5758,65 @@ final class AppModel: ObservableObject {
         previewVenueTargetStartTiltBySlot.removeAll()
     }
 
+    func createVenue(_ name: String) {
+        performVenueAction("/api/dmx/venue/create", body: VenueCreateRequest(name: name), failure: "Venue aanmaken mislukt")
+    }
+
+    func duplicateVenue(_ sourceVenueID: String, name: String?) {
+        performVenueAction(
+            "/api/dmx/venue/duplicate",
+            body: VenueDuplicateRequest(sourceVenueID: sourceVenueID, name: name),
+            failure: "Venue dupliceren mislukt"
+        )
+    }
+
+    func renameVenue(_ venueID: String, name: String) {
+        performVenueAction(
+            "/api/dmx/venue/rename",
+            body: VenueRenameRequest(venueID: venueID, name: name),
+            failure: "Venue hernoemen mislukt"
+        )
+    }
+
+    func deleteVenue(_ venueID: String) {
+        performVenueAction(
+            "/api/dmx/venue/delete", body: VenueIDRequest(venueID: venueID),
+            failure: "Venue verwijderen mislukt"
+        )
+    }
+
+    func switchVenue(_ venueID: String) {
+        guard venueID != venueState?.activeVenueID else { return }
+        performVenueAction(
+            "/api/dmx/venue/switch", body: VenueIDRequest(venueID: venueID),
+            failure: "Venue wisselen mislukt"
+        )
+    }
+
+    func rearmActiveVenue() {
+        performVenueAction(
+            "/api/dmx/venue/rearm", body: EmptyRequest(),
+            failure: "Venue-output opnieuw inschakelen mislukt"
+        )
+    }
+
+    private func performVenueAction<Body: Encodable>(_ path: String, body: Body, failure: String) {
+        guard !venueActionInFlight else { return }
+        venueActionInFlight = true
+        Task {
+            do {
+                beginLocalMutationHold(seconds: 1.5)
+                let state: AppState = try await post(path, body: body, as: AppState.self)
+                venueActionInFlight = false
+                apply(state, forceSelectionToActiveSlot: true, source: .action)
+                errorText = ""
+            } catch {
+                venueActionInFlight = false
+                errorText = "\(failure): \(error.localizedDescription)"
+            }
+        }
+    }
+
     func saveVenueGeometry() {
         guard !venueGeometrySaveInFlight else { return }
         let fields: [(String, String, Bool)] = [
@@ -5798,10 +5956,13 @@ final class AppModel: ObservableObject {
         return VenuePhysicalPointState(x: world.x / 100, y: world.y / 100, z: world.z / 100)
     }
 
-    func setFixturePositionMeters(for slotID: String, axis: String, value: Double) {
+    func setFixturePositionMeters(for slotID: String, axis: String, value: Double, snapEnabled: Bool = false) {
         guard isEditingProjectionLayout, value.isFinite else { return }
         var world = effectiveWorldPosition(for: slotID)
-        let centimeters = value * 100
+        let rawCentimeters = value * 100
+        let centimeters = snapEnabled
+            ? (rawCentimeters / StageWorld.dragSnapCm).rounded() * StageWorld.dragSnapCm
+            : rawCentimeters
         switch axis.lowercased() {
         case "x": world.x = min(max(centimeters, StageWorld.minX), StageWorld.maxX)
         case "y": world.y = min(max(centimeters, StageWorld.minY), StageWorld.maxY)
@@ -5843,6 +6004,58 @@ final class AppModel: ObservableObject {
         var world = effectiveWorldPosition(for: slotID)
         world.yawDegrees = snappedYawDegrees(world.yawDegrees + degrees)
         projectionLayoutDrafts[slotID] = world
+    }
+
+    func setProjectionYawDegrees(for slotID: String, to degrees: Double) {
+        guard isEditingProjectionLayout, degrees.isFinite else { return }
+        var world = effectiveWorldPosition(for: slotID)
+        let wrapped = degrees.truncatingRemainder(dividingBy: 360)
+        world.yawDegrees = wrapped < 0 ? wrapped + 360 : wrapped
+        projectionLayoutDrafts[slotID] = world
+    }
+
+    func setProjectionViewRotation(
+        for slotID: String,
+        projection: StageProjection,
+        startingFrom start: SlotWorldPosition,
+        deltaDegrees: Double
+    ) {
+        guard isEditingProjectionLayout, deltaDegrees.isFinite else { return }
+        var world = start
+        if projection == .top {
+            let yaw = (start.yawDegrees + deltaDegrees).truncatingRemainder(dividingBy: 360)
+            world.yawDegrees = yaw < 0 ? yaw + 360 : yaw
+            projectionLayoutDrafts[slotID] = world
+            return
+        }
+
+        // Rotate the complete fixture frame around the normal of this
+        // orthographic view, then encode it back as yaw/pitch/roll.
+        let frontMirrored = UserDefaults.standard.bool(forKey: frontProjectionMirrorDefaultsKey)
+        let axis: (x: Double, y: Double, z: Double)
+        switch projection {
+        case .top: axis = (0, 0, -1)
+        case .front: axis = (0, frontMirrored ? -1 : 1, 0)
+        case .back: axis = (0, -1, 0)
+        case .side: axis = (-1, 0, 0)
+        }
+        projectionLayoutDrafts[slotID] = rotatedFixtureWorldOrientation(start, around: axis, by: deltaDegrees)
+    }
+
+    func setProjectionWorldAxisRotation(
+        for slotID: String,
+        axisName: String,
+        startingFrom start: SlotWorldPosition,
+        deltaDegrees: Double
+    ) {
+        guard isEditingProjectionLayout, deltaDegrees.isFinite else { return }
+        let axis: (x: Double, y: Double, z: Double)
+        switch axisName {
+        case "Y": axis = (0, 1, 0)
+        case "Z": axis = (0, 0, -1)
+        default: return
+        }
+        projectionLayoutDrafts[slotID] = rotatedFixtureWorldOrientation(start, around: axis, by: deltaDegrees)
     }
 
     func rotateProjectionMountPitch(for slotID: String, by degrees: Double) {
@@ -6041,6 +6254,8 @@ final class AppModel: ObservableObject {
             beatPulseEnabled: editor.beatPulseEnabled,
             oscStrobeEnabled: editor.oscStrobeEnabled,
             useFinePanTilt: editor.useFinePanTilt,
+            mountingOrientation: editor.mountingOrientation,
+            wallWashZonesMirrored: editor.wallWashZonesMirrored,
             panInvert: editor.panInvert,
             tiltInvert: editor.tiltInvert,
             panOffsetDeg: editor.panOffsetDeg,
@@ -6415,6 +6630,90 @@ final class AppModel: ObservableObject {
     private func loadFixtures() async throws {
         let response: FixturesResponse = try await get("/api/fixtures", as: FixturesResponse.self)
         availableFixtures = response.fixtures.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+        refreshLiveRenderedOutput()
+    }
+
+    private func refreshLiveRenderedOutput() {
+        guard let dmx = latestLiveDmxState, let values = dmx.renderedFinalValues else {
+            liveRenderedOutput = []
+            liveRenderedOutputAvailable = false
+            return
+        }
+        liveRenderedOutputAvailable = true
+        liveRenderedOutput = dmx.slotOrder.compactMap { slotID in
+            guard let slot = dmx.slots[slotID], slot.enabled,
+                  let fixture = availableFixtures.first(where: { $0.id == slot.fixture }),
+                  let mode = fixture.modes.first(where: { $0.name == slot.mode }) else { return nil }
+
+            var channels: [String: Int] = ["dimmer": 0, "red": 0, "green": 0, "blue": 0, "white": 0, "strobe": 0]
+            var zoneColors: [Int: [String: Int]] = [:]
+            for channel in mode.channels ?? [] {
+                let absoluteChannel = slot.address + channel.offset - 1
+                let value = max(0, min(255, values[String(absoluteChannel)] ?? 0))
+                switch channel.type.lowercased() {
+                case "intensity": channels["dimmer"] = value
+                case "strobe": channels["strobe"] = value
+                case "color":
+                    let component = (channel.component ?? channel.name ?? "").lowercased()
+                    if ["red", "green", "blue", "white"].contains(component) {
+                        channels[component] = value
+                        if let zone = channel.zone {
+                            zoneColors[zone, default: [:]][component] = value
+                        }
+                    }
+                default: break
+                }
+            }
+            if dmx.slotCapabilities[slotID]?.dimmer != true {
+                channels["dimmer"] = max(channels["red"] ?? 0, channels["green"] ?? 0, channels["blue"] ?? 0, channels["white"] ?? 0)
+            }
+            let preview = dmx.slotPreviews[slotID]
+            let ledRows: [LiveRenderedLed]? = {
+                guard fixture.beamLayout?.type == "strip", fixture.beamLayout?.length == 24 else { return nil }
+                let orderedZones = zoneColors.keys.sorted()
+                return (0..<24).map { rowIndex in
+                    let zoneValues: [String: Int]
+                    if !orderedZones.isEmpty {
+                        let zoneIndex = min(orderedZones.count - 1, rowIndex * orderedZones.count / 24)
+                        zoneValues = zoneColors[orderedZones[zoneIndex]] ?? [:]
+                    } else {
+                        zoneValues = channels
+                    }
+                    let red = zoneValues["red"] ?? 0
+                    let green = zoneValues["green"] ?? 0
+                    let blue = zoneValues["blue"] ?? 0
+                    let renderedIntensity = preview?.effectiveIntensity
+                        ?? Double(max(red, green, blue, zoneValues["white"] ?? 0)) / 255.0
+                    // The final DMX zone RGB bytes already include dimmer
+                    // attenuation. In Rendered Output, intensity is shown by
+                    // the horizontal fill width, so restore the zone's vivid
+                    // color here instead of dimming both its color and width.
+                    let displayComponent: (Int) -> Int = { value in
+                        guard renderedIntensity > 0 else { return value }
+                        return max(0, min(255, Int((Double(value) / renderedIntensity).rounded())))
+                    }
+                    return LiveRenderedLed(
+                        index: rowIndex,
+                        red: displayComponent(red),
+                        green: displayComponent(green),
+                        blue: displayComponent(blue),
+                        intensity: renderedIntensity
+                    )
+                }
+            }()
+            return LiveRenderedFixture(
+                id: slotID,
+                label: slot.label,
+                dimmer: channels["dimmer"] ?? 0,
+                red: preview?.resolvedRed ?? channels["red"] ?? 0,
+                green: preview?.resolvedGreen ?? channels["green"] ?? 0,
+                blue: preview?.resolvedBlue ?? channels["blue"] ?? 0,
+                white: preview?.resolvedWhite ?? channels["white"] ?? 0,
+                strobe: channels["strobe"] ?? 0,
+                effectiveIntensity: preview?.effectiveIntensity ?? Double(channels["dimmer"] ?? 0) / 255.0,
+                ledRows: ledRows
+            )
+        }
     }
 
     private func refreshState(forceSelectionToActiveSlot: Bool = false) async throws {
@@ -6426,6 +6725,8 @@ final class AppModel: ObservableObject {
         case poll
         case action
     }
+
+    private var latestLiveDmxState: DmxState?
 
     private func apply(_ state: AppState, forceSelectionToActiveSlot: Bool = false, source: StateApplySource = .action) {
         if source == .poll, Date() < ignorePolledStateUntil {
@@ -6466,6 +6767,9 @@ final class AppModel: ObservableObject {
         transportStatusText = transportResolvedLabel(for: state.transport.resolvedMode)
         debugState = state.debug
         liveUiState = state.liveUi
+        masterDimmer = min(max(state.dmx.masterDimmer, 0), 1)
+        latestLiveDmxState = state.dmx
+        refreshLiveRenderedOutput()
         liveIntensityState = state.dmx.autoShow.liveIntensity
         physicalDmxConnected = state.dmx.connected
         physicalDmxError = state.dmx.error
@@ -6476,6 +6780,7 @@ final class AppModel: ObservableObject {
         reconcileManualSmoke(state.dmx.manualSmoke)
         renderedMotion = state.dmx.renderedMotion
         venueSpace = state.dmx.venueSpace
+        venueState = state.dmx.venue
         venueTargetTestState = state.dmx.venueTargetTest
         movementLabState = state.dmx.movementLab
         reconcileVenueTargetPresentation(state.dmx.venueTargetTest)
@@ -7613,36 +7918,13 @@ final class AppModel: ObservableObject {
     }
 
     private func seedBackendConfigIfNeeded(backendRoot: URL, supportDirectory: URL) throws {
-        let fileManager = FileManager.default
         let supportConfigURL = supportDirectory.appendingPathComponent("beatbeam_config.json")
         let candidateURLs = legacyConfigCandidateURLs(backendRoot: backendRoot)
-
-        let supportSlotCount = slotCount(at: supportConfigURL)
-        let bestLegacy = candidateURLs
-            .map { ($0, slotCount(at: $0)) }
-            .filter { $0.1 > 0 }
-            .max { lhs, rhs in lhs.1 < rhs.1 }
-
-        let shouldMigrate: Bool
-        if !fileManager.fileExists(atPath: supportConfigURL.path) {
-            shouldMigrate = true
-        } else if let bestLegacy, supportSlotCount <= 2, bestLegacy.1 > supportSlotCount {
-            shouldMigrate = true
-        } else {
-            shouldMigrate = false
-        }
-
-        guard shouldMigrate, let sourceURL = bestLegacy?.0 else { return }
-        let backupURL = supportDirectory.appendingPathComponent("beatbeam_config.backup.json")
-        if fileManager.fileExists(atPath: supportConfigURL.path) {
-            withExtendedLifetime(backupURL) {
-                try? fileManager.removeItem(at: backupURL)
-                try? fileManager.copyItem(at: supportConfigURL, to: backupURL)
-            }
-        }
-        try? fileManager.removeItem(at: supportConfigURL)
-        try fileManager.copyItem(at: sourceURL, to: supportConfigURL)
-        nativeLog("migrated config from \(sourceURL.path) to \(supportConfigURL.path)")
+        try BackendConfigBootstrap.seedIfNeeded(
+            authoritativeURL: supportConfigURL,
+            candidateURLs: candidateURLs,
+            log: nativeLog
+        )
     }
 
     private func legacyConfigCandidateURLs(backendRoot: URL) -> [URL] {
@@ -7664,15 +7946,6 @@ final class AppModel: ObservableObject {
             }
         }
         return candidates
-    }
-
-    private func slotCount(at url: URL) -> Int {
-        guard let data = try? Data(contentsOf: url),
-              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let slots = payload["slots"] as? [String: Any] else {
-            return 0
-        }
-        return slots.count
     }
 
     private func repoRootURL() -> URL {
@@ -7903,8 +8176,6 @@ struct ContentView: View {
     private enum WorkspaceMode: String, CaseIterable, Identifiable {
         case live = "Live Show"
         case preview = "Stage Map"
-        case autoShow = "Auto Show"
-        case simulator = "Simulator"
         case manual = "Manual"
         case advanced = "Advanced"
 
@@ -8112,18 +8383,6 @@ struct ContentView: View {
                 PreviewComposerWorkspaceView()
                     .padding(.trailing, 4)
                     .frame(maxHeight: .infinity, alignment: .topLeading)
-            } else if workspaceMode == .autoShow {
-                ScrollView {
-                    AutoShowWorkspaceView()
-                        .padding(.trailing, 4)
-                        .padding(.bottom, 32)
-                }
-            } else if workspaceMode == .simulator {
-                ScrollView {
-                    SimulatorWorkspaceView()
-                        .padding(.trailing, 4)
-                        .padding(.bottom, 32)
-                }
             } else if workspaceMode == .manual {
                 ScrollView {
                     LivePresetWorkspaceView()
@@ -10109,10 +10368,6 @@ struct AutoShowControlView: View {
         )
     }
 
-    private var previewPulseTestBinding: Binding<String> {
-        Binding(get: { model.previewPulseTestMode }, set: { model.setPreviewPulseTestMode($0) })
-    }
-
     private var audiencePanFocusBinding: Binding<Bool> {
         Binding(
             get: { model.autoShowAudiencePanFocusEnabled },
@@ -10302,14 +10557,6 @@ struct AutoShowControlView: View {
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
 
-                Picker("Pulse Test (Preview only)", selection: previewPulseTestBinding) {
-                    Text("Off").tag("OFF")
-                    Text("Every Beat").tag("EVERY_BEAT")
-                    Text("Half Time").tag("HALF_TIME")
-                    Text("Bar Accent").tag("BAR_ACCENT")
-                }
-                .pickerStyle(.segmented)
-
                 previewCompositionCard
 
                 HStack(alignment: .center, spacing: 12) {
@@ -10415,6 +10662,31 @@ struct AutoShowControlView: View {
                 Text(model.autoShowDetailText)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+struct PreviewPulseTestPanel: View {
+    @EnvironmentObject private var model: AppModel
+
+    private var selection: Binding<String> {
+        Binding(get: { model.previewPulseTestMode }, set: { model.setPreviewPulseTestMode($0) })
+    }
+
+    var body: some View {
+        PanelSurface(title: "Preview Pulse Test", compact: true) {
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Pulse Test (Preview only)", selection: selection) {
+                    Text("Off").tag("OFF")
+                    Text("Every Beat").tag("EVERY_BEAT")
+                    Text("Half Time").tag("HALF_TIME")
+                    Text("Bar Accent").tag("BAR_ACCENT")
+                }
+                .pickerStyle(.segmented)
+                Text("Developer preview test only. It does not change physical DMX authority.")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(BeatBeamPalette.secondaryText)
             }
         }
     }
@@ -10547,10 +10819,11 @@ struct MapWorkspaceView: View {
                     .frame(height: 1)
                     .id("stage-map-sidebar-top")
                 LazyVStack(spacing: 10) {
+                    VenueManagementPanel()
                     VenueGeometryPanel()
+                    WallWashZoneMirrorPanel()
                     FixtureVenueCalibrationPanel()
                     VenueTargetTestPanel()
-                    MovementLabPanel()
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .padding(.trailing, 2)
@@ -10883,6 +11156,126 @@ struct MovementLabPanel: View {
     }
 }
 
+struct VenueManagementPanel: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var selectedVenueID = ""
+    @State private var newVenueName = ""
+    @State private var renameVenueName = ""
+    @State private var showDeleteConfirmation = false
+
+    var body: some View {
+        PanelSurface(title: "Venue", compact: true) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Physical fixture layout only. Switching a connected DMX setup disarms output until explicitly re-armed.")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Picker("ACTIVE VENUE", selection: Binding(
+                    get: { model.venueState?.activeVenueID ?? "" },
+                    set: { model.switchVenue($0) }
+                )) {
+                    ForEach(model.venueState?.venues ?? []) { venue in
+                        Text("\(venue.name) • \(venue.fixtureCount) fixtures").tag(venue.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(model.venueActionInFlight)
+
+                if model.venueState?.switchRequiresRearm == true {
+                    HStack(spacing: 7) {
+                        Text("OUTPUT DISARMED")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(BeatBeamPalette.brandAmber)
+                        Spacer()
+                        Button("RE-ARM OUTPUT") { model.rearmActiveVenue() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(BeatBeamPalette.brandAmber)
+                            .disabled(model.venueActionInFlight)
+                    }
+                }
+
+                Divider()
+                Picker("MANAGE", selection: $selectedVenueID) {
+                    ForEach(model.venueState?.venues ?? []) { venue in
+                        Text(venue.name).tag(venue.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: selectedVenueID) { _, venueID in
+                    renameVenueName = managedVenue(venueID)?.name ?? ""
+                }
+                .onChange(of: model.venueState?.activeVenueID) { _, activeID in
+                    if selectedVenueID.isEmpty, let activeID {
+                        selectedVenueID = activeID
+                        renameVenueName = managedVenue(activeID)?.name ?? ""
+                    }
+                }
+
+                HStack(spacing: 6) {
+                    TextField("New venue", text: $newVenueName)
+                        .textFieldStyle(.roundedBorder)
+                    Button("NEW") {
+                        let name = newVenueName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !name.isEmpty else { return }
+                        model.createVenue(name)
+                        newVenueName = ""
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(newVenueName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.venueActionInFlight)
+                }
+                HStack(spacing: 6) {
+                    TextField("Venue name", text: $renameVenueName)
+                        .textFieldStyle(.roundedBorder)
+                    Button("RENAME") {
+                        guard !selectedVenueID.isEmpty else { return }
+                        model.renameVenue(selectedVenueID, name: renameVenueName)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(renameVenueName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.venueActionInFlight)
+                }
+                HStack(spacing: 6) {
+                    Button("DUPLICATE") {
+                        guard !selectedVenueID.isEmpty else { return }
+                        model.duplicateVenue(selectedVenueID, name: nil)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(selectedVenueID.isEmpty || model.venueActionInFlight)
+                    Spacer()
+                    Button("DELETE", role: .destructive) { showDeleteConfirmation = true }
+                        .buttonStyle(.bordered)
+                        .disabled(deleteDisabled || model.venueActionInFlight)
+                }
+            }
+            .confirmationDialog(
+                "Delete \(managedVenue(selectedVenueID)?.name ?? "Venue")?",
+                isPresented: $showDeleteConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete Venue", role: .destructive) {
+                    model.deleteVenue(selectedVenueID)
+                }
+            } message: {
+                Text("This removes the inactive physical venue profile. The active venue must be switched first.")
+            }
+            .onAppear {
+                if selectedVenueID.isEmpty, let activeID = model.venueState?.activeVenueID {
+                    selectedVenueID = activeID
+                    renameVenueName = managedVenue(activeID)?.name ?? ""
+                }
+            }
+        }
+    }
+
+    private func managedVenue(_ id: String) -> VenueSummaryState? {
+        model.venueState?.venues.first { $0.id == id }
+    }
+
+    private var deleteDisabled: Bool {
+        guard let state = model.venueState else { return true }
+        return selectedVenueID.isEmpty || selectedVenueID == state.activeVenueID || state.venues.count <= 1
+    }
+}
+
 struct VenueGeometryPanel: View {
     @EnvironmentObject private var model: AppModel
 
@@ -11019,6 +11412,38 @@ struct FixtureMapAssignmentPanel: View {
     }
 }
 
+struct WallWashZoneMirrorPanel: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        if let editor = selectedWallWash {
+            PanelSurface(title: "Wall Wash", compact: true) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Toggle(
+                        "Spiegel zonevolgorde",
+                        isOn: model.boolBinding(for: editor, \.wallWashZonesMirrored)
+                    )
+                    Text("Keert de zones om in Preview en DMX. De fysieke bundelrichting verandert niet.")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var selectedWallWash: SlotEditor? {
+        guard let editor = model.slotEditors.first(where: { $0.id == model.selectedSlotID }),
+              editor.fixtureID == "uking_zq06016",
+              !editor.supportsPan,
+              !editor.supportsTilt,
+              ["P001", "L001", "E001"].contains(editor.mode.uppercased()) else {
+            return nil
+        }
+        return editor
+    }
+}
+
 struct FixtureVenueCalibrationPanel: View {
     @EnvironmentObject private var model: AppModel
     @State private var showAimResetConfirmation = false
@@ -11061,6 +11486,21 @@ struct FixtureVenueCalibrationPanel: View {
                     calibrationLine("FORWARD", vectorText(basis.forward))
                     calibrationLine("UP", vectorText(basis.up))
                     calibrationLine("RIGHT (derived)", vectorText(basis.right))
+                    HStack(spacing: 8) {
+                        Text("MOUNTING ORIENTATION")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Picker(
+                            "Mounting orientation",
+                            selection: model.stringBinding(for: editor, \.mountingOrientation)
+                        ) {
+                            Text("Normal").tag("NORMAL")
+                            Text("Rotated 180°").tag("ROTATED_180")
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 240)
+                    }
                     if let capabilities = state?.capabilities {
                         calibrationLine(
                             "PAN / TILT",
@@ -12049,6 +12489,17 @@ struct StageProjectionDeckView: View {
                                 )
                                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
                                     .foregroundStyle(.secondary)
+                                TextField(
+                                    "Yaw°",
+                                    value: Binding(
+                                        get: { model.projectionYawDegrees(for: selectedEditor.id) },
+                                        set: { model.setProjectionYawDegrees(for: selectedEditor.id, to: $0) }
+                                    ),
+                                    format: .number.precision(.fractionLength(0...2))
+                                )
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 82)
+                                .accessibilityLabel("Yawhoek in graden")
                                 Button {
                                     model.rotateSelectedProjectionOrientation(by: -90)
                                 } label: {
@@ -12373,7 +12824,8 @@ struct StageProjectionDeckView: View {
             subtitle: projection.subtitle,
             projection: projection,
             viewportRenderKey: viewportRenderKey,
-            showsWorldBackdrop: projection != .top
+            showsWorldBackdrop: projection != .top,
+            allowsViewportPan: projection != .top
         ) {
             switch projection {
             case .top:
@@ -12460,6 +12912,7 @@ private struct StageMapPanTranslationLayer<Content: View>: View {
 }
 
 struct StageMapCanvas: View {
+    private let gestureCoordinateSpaceName = "BeatBeam.StageMapCanvas"
     @EnvironmentObject private var model: AppModel
     var showAnchorLabels: Bool = true
     var showBackdrop: Bool = true
@@ -12476,7 +12929,7 @@ struct StageMapCanvas: View {
     @State private var panInteraction = StageMapPanInteractionState()
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !(hasAnimatedStrobe || hasActiveVenuePreviewTest || model.previewPulseTestMode != "OFF" || model.smokePreviewIntensity() > 0))) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: editMode || !(hasAnimatedStrobe || hasActiveVenuePreviewTest || model.previewPulseTestMode != "OFF" || model.smokePreviewIntensity() > 0))) { timeline in
             GeometryReader { geometry in
                 ZStack {
                     StageMapPanTranslationLayer(interaction: panInteraction) {
@@ -12488,11 +12941,9 @@ struct StageMapCanvas: View {
                             StageMapBackdrop()
                         }
 
-                        if interactive || editMode {
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .gesture(backgroundPanGesture(canvasSize: geometry.size))
-                        }
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .gesture(backgroundPanGesture(canvasSize: geometry.size, coordinateSpaceName: gestureCoordinateSpaceName))
 
                     if projection == .top, let venueSpace = model.venueSpace {
                         VenueSpaceOverlay(space: venueSpace, size: geometry.size)
@@ -12541,7 +12992,8 @@ struct StageMapCanvas: View {
                             selectionMode: selectionMode,
                             normalizedOrigin: normalizedOrigin,
                             absoluteOrigin: origin,
-                            canvasSize: geometry.size
+                            canvasSize: geometry.size,
+                            gestureCoordinateSpaceName: gestureCoordinateSpaceName
                         )
                     }
 
@@ -12554,6 +13006,7 @@ struct StageMapCanvas: View {
                     }
                     }
                 }
+                .coordinateSpace(name: gestureCoordinateSpaceName)
             }
         }
         // Rebuild only for an authoritative zoom/camera change, never for an
@@ -12584,8 +13037,8 @@ struct StageMapCanvas: View {
         CGPoint(x: size.width * normalized.x, y: size.height * normalized.y)
     }
 
-    private func backgroundPanGesture(canvasSize: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 4)
+    private func backgroundPanGesture(canvasSize: CGSize, coordinateSpaceName: String) -> some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .named(coordinateSpaceName))
             .onChanged { value in
                 if backgroundPanStart == nil {
                     backgroundPanStart = projectionViewportCenter(for: projection)
@@ -12854,11 +13307,12 @@ struct StageFrontCanvas: View {
                             animationTime: previewTime,
                             projection: projection,
                             editMode: editMode,
-                            interactive: false,
+                            interactive: true,
                             selectionMode: selectionMode,
                             normalizedOrigin: normalizedOrigin,
                             absoluteOrigin: origin,
-                            canvasSize: geometry.size
+                            canvasSize: geometry.size,
+                            gestureCoordinateSpaceName: "BeatBeam.StageMapCanvas"
                         )
                     }
 
@@ -12870,6 +13324,7 @@ struct StageFrontCanvas: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
                 }
+                .coordinateSpace(name: "BeatBeam.StageMapCanvas")
             }
         }
         .id(viewportRenderKey)
@@ -12960,11 +13415,12 @@ struct StageSideCanvas: View {
                             animationTime: previewTime,
                             projection: .side,
                             editMode: editMode,
-                            interactive: false,
+                            interactive: true,
                             selectionMode: selectionMode,
                             normalizedOrigin: normalizedOrigin,
                             absoluteOrigin: origin,
-                            canvasSize: geometry.size
+                            canvasSize: geometry.size,
+                            gestureCoordinateSpaceName: "BeatBeam.StageMapCanvas"
                         )
                     }
 
@@ -12976,6 +13432,7 @@ struct StageSideCanvas: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
                 }
+                .coordinateSpace(name: "BeatBeam.StageMapCanvas")
             }
         }
         .id(viewportRenderKey)
@@ -14042,6 +14499,7 @@ struct ProjectionFixtureNode: View {
     let normalizedOrigin: CGPoint
     let absoluteOrigin: CGPoint
     let canvasSize: CGSize
+    let gestureCoordinateSpaceName: String
 
     @State private var dragStartNormalized: CGPoint?
     @State private var dragSnapEnabled: Bool?
@@ -14080,11 +14538,39 @@ struct ProjectionFixtureNode: View {
             } else {
                 node
             }
+
+            if editMode && isSelected {
+                StageMapAxisMoveGizmo(
+                    model: model,
+                    slotID: editor.id,
+                    axes: axisGizmoVectors(for: worldOrigin),
+                    diameter: 96,
+                    coordinateSpaceName: gestureCoordinateSpaceName
+                )
+                    .position(absoluteOrigin)
+                    .zIndex(11)
+            }
+
+            if editMode && isSelected {
+                StageMapRotationGizmo(
+                    model: model,
+                    slotID: editor.id,
+                    diameter: 96,
+                    rotationMode: .projection(projection),
+                    projection: projection,
+                    canvasSize: canvasSize,
+                    allowsPositionDrag: true,
+                    centerInCanvas: absoluteOrigin,
+                    coordinateSpaceName: gestureCoordinateSpaceName
+                )
+                .position(absoluteOrigin)
+                .zIndex(10)
+            }
         }
     }
 
     private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(gestureCoordinateSpaceName))
             .onChanged { value in
                 let base = dragStartNormalized ?? normalizedOrigin
                 if dragStartNormalized == nil {
@@ -14174,11 +14660,297 @@ struct ProjectionFixtureNode: View {
         return worldProjectedAbsoluteBeamPoint(endpoint, projection: projection, size: canvasSize)
     }
 
+    private func axisGizmoVectors(for worldOrigin: SlotWorldPosition) -> [StageMapAxisVector] {
+        let originPoint = worldProjectedAbsolutePoint(worldOrigin, projection: projection, size: canvasSize)
+        let axes: [(String, Double, Double, Double)] = [
+            ("X", 100, 0, 0),
+            ("Y", 0, 100, 0),
+            ("Z", 0, 0, 100),
+        ]
+        return axes.compactMap { axis, dx, dy, dz in
+            let endpoint = SlotWorldPosition(
+                x: worldOrigin.x + dx,
+                y: worldOrigin.y + dy,
+                z: worldOrigin.z + dz,
+                yawDegrees: worldOrigin.yawDegrees,
+                pitchDegrees: worldOrigin.pitchDegrees,
+                rollDegrees: worldOrigin.rollDegrees
+            )
+            let point = worldProjectedAbsolutePoint(endpoint, projection: projection, size: canvasSize)
+            let delta = CGPoint(x: point.x - originPoint.x, y: point.y - originPoint.y)
+            let length = hypot(delta.x, delta.y)
+            guard length > 0.5 else { return nil }
+            return StageMapAxisVector(axis: axis, screenVector: CGPoint(x: delta.x / length * 37, y: delta.y / length * 37), metersPerScreenVector: length / 37)
+        }
+    }
+
     private var orientationArrowColor: Color {
         if let preview, preview.enabled {
             return slotPreviewBaseColor(preview)
         }
         return Color.white.opacity(0.72)
+    }
+}
+
+private struct StageMapAxisVector: Identifiable {
+    let axis: String
+    let screenVector: CGPoint
+    var metersPerScreenVector: Double = 1
+    var id: String { axis }
+
+    var color: Color {
+        switch axis {
+        case "X": return .red
+        case "Y": return .green
+        default: return .blue
+        }
+    }
+}
+
+private struct StageMapAxisMoveGizmo: View {
+    @ObservedObject var model: AppModel
+    let slotID: String
+    let axes: [StageMapAxisVector]
+    let diameter: CGFloat
+    let coordinateSpaceName: String
+
+    var body: some View {
+        ZStack {
+            ForEach(axes) { axis in
+                StageMapAxisMoveArrow(model: model, slotID: slotID, axis: axis, diameter: diameter, coordinateSpaceName: coordinateSpaceName)
+            }
+        }
+        .frame(width: diameter, height: diameter)
+        .allowsHitTesting(!axes.isEmpty)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("XYZ position handles")
+    }
+}
+
+private struct StageMapAxisMoveArrow: View {
+    @ObservedObject var model: AppModel
+    let slotID: String
+    let axis: StageMapAxisVector
+    let diameter: CGFloat
+    let coordinateSpaceName: String
+    @State private var dragStartCoordinate: Double?
+    @State private var dragSnapEnabled: Bool?
+
+    var body: some View {
+        let center = CGPoint(x: diameter / 2, y: diameter / 2)
+        let vector = axis.screenVector
+        let length = hypot(vector.x, vector.y)
+        let angle = atan2(vector.y, vector.x)
+        let midpoint = CGPoint(x: center.x + vector.x / 2, y: center.y + vector.y / 2)
+        let endpoint = CGPoint(x: center.x + vector.x, y: center.y + vector.y)
+
+        ZStack {
+            Capsule()
+                .fill(axis.color.opacity(0.23))
+                .overlay(Capsule().stroke(axis.color, lineWidth: 1.5))
+                .frame(width: max(18, length - 8), height: 13)
+                .rotationEffect(.radians(angle))
+                .position(midpoint)
+                .gesture(axisDragGesture)
+                .help("Sleep om alleen langs de \(axis.axis)-as te verplaatsen")
+
+            Image(systemName: "arrowtriangle.right.fill")
+                .font(.system(size: 10, weight: .black))
+                .foregroundStyle(axis.color)
+                .rotationEffect(.radians(angle))
+                .position(endpoint)
+                .allowsHitTesting(false)
+
+            Text(axis.axis)
+                .font(.system(size: 9, weight: .heavy, design: .monospaced))
+                .foregroundStyle(axis.color)
+                .position(x: endpoint.x + cos(angle) * 9, y: endpoint.y + sin(angle) * 9)
+                .allowsHitTesting(false)
+        }
+        .frame(width: diameter, height: diameter)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Verplaats langs \(axis.axis)-as")
+    }
+
+    private var axisDragGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(coordinateSpaceName))
+            .onChanged { value in
+                if dragStartCoordinate == nil {
+                    let position = model.fixturePositionMeters(for: slotID)
+                    switch axis.axis {
+                    case "X": dragStartCoordinate = position.x
+                    case "Y": dragStartCoordinate = position.y
+                    default: dragStartCoordinate = position.z
+                    }
+                    dragSnapEnabled = model.fixtureSnapEnabled
+                }
+                guard let dragStartCoordinate else { return }
+                let vector = axis.screenVector
+                let denominator = vector.x * vector.x + vector.y * vector.y
+                guard denominator > 0 else { return }
+                let fraction = (value.translation.width * vector.x + value.translation.height * vector.y) / denominator
+                model.setFixturePositionMeters(
+                    for: slotID,
+                    axis: axis.axis,
+                    value: dragStartCoordinate + fraction * axis.metersPerScreenVector,
+                    snapEnabled: dragSnapEnabled ?? false
+                )
+            }
+            .onEnded { _ in
+                dragStartCoordinate = nil
+                dragSnapEnabled = nil
+            }
+    }
+}
+
+private enum StageMapRotationMode {
+    case projection(StageProjection)
+    case worldAxis(String)
+
+    var label: String {
+        switch self {
+        case .projection(let projection):
+            return projection.title.replacingOccurrences(of: " View", with: "").uppercased()
+        case .worldAxis(let axis):
+            return axis
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .projection: return BeatBeamPalette.brandAmber
+        case .worldAxis(let axis):
+            if axis == "Y" { return .green }
+            if axis == "Z" { return .blue }
+            return BeatBeamPalette.brandAmber
+        }
+    }
+}
+
+private struct StageMapRotationGizmo: View {
+    @ObservedObject var model: AppModel
+    let slotID: String
+    let diameter: CGFloat
+    let rotationMode: StageMapRotationMode
+    let projection: StageProjection
+    let canvasSize: CGSize
+    let allowsPositionDrag: Bool
+    let centerInCanvas: CGPoint
+    let coordinateSpaceName: String
+    @State private var dragStartWorld: SlotWorldPosition?
+    @State private var dragStartAngle: Double?
+    @State private var dragStartNormalizedPosition: CGPoint?
+    @State private var dragSnapEnabled: Bool?
+    @State private var dragStartCenterInCanvas: CGPoint?
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.white.opacity(0.20), style: StrokeStyle(lineWidth: 9, lineCap: .round))
+            Circle()
+                .stroke(rotationMode.color, style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
+            Capsule()
+                .fill(rotationMode.color)
+                .frame(width: 15, height: 9)
+                .offset(y: -diameter / 2)
+                .rotationEffect(.degrees(ringIndicatorRotationDegrees))
+            Text("ROT · \(rotationMode.label)")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 3)
+                .background(Color.black.opacity(0.76), in: Capsule())
+                .offset(y: diameter / 2 + 8)
+        }
+        .frame(width: diameter, height: diameter)
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .named(coordinateSpaceName))
+                .onChanged { value in
+                    let center = dragStartCenterInCanvas ?? centerInCanvas
+                    let startRadius = hypot(value.startLocation.x - center.x, value.startLocation.y - center.y)
+                    let rotationRadius = diameter / 2 - 7
+                    if dragStartWorld == nil && dragStartNormalizedPosition == nil {
+                        dragStartCenterInCanvas = centerInCanvas
+                        if startRadius >= rotationRadius {
+                            dragStartWorld = model.worldPosition(for: slotID)
+                            dragStartAngle = atan2(value.startLocation.y - center.y, value.startLocation.x - center.x)
+                        } else if allowsPositionDrag {
+                            dragStartNormalizedPosition = model.projectionPoint(for: slotID, projection: projection)
+                            dragSnapEnabled = model.fixtureSnapEnabled
+                        }
+                    }
+                    if let dragStartWorld, let dragStartAngle {
+                        let current = atan2(value.location.y - center.y, value.location.x - center.x)
+                        var delta = current - dragStartAngle
+                        if delta > .pi { delta -= 2 * .pi }
+                        if delta < -.pi { delta += 2 * .pi }
+                        switch rotationMode {
+                        case .projection(let projection):
+                            model.setProjectionViewRotation(
+                                for: slotID,
+                                projection: projection,
+                                startingFrom: dragStartWorld,
+                                deltaDegrees: delta * 180 / .pi
+                            )
+                        case .worldAxis(let axis):
+                            model.setProjectionWorldAxisRotation(
+                                for: slotID,
+                                axisName: axis,
+                                startingFrom: dragStartWorld,
+                                deltaDegrees: delta * 180 / .pi
+                            )
+                        }
+                    } else if let dragStartNormalizedPosition {
+                        let next = CGPoint(
+                            x: dragStartNormalizedPosition.x + value.translation.width / max(1, canvasSize.width),
+                            y: dragStartNormalizedPosition.y + value.translation.height / max(1, canvasSize.height)
+                        )
+                        model.updateProjectionPoint(
+                            for: slotID,
+                            projection: projection,
+                            point: next,
+                            snapEnabled: dragSnapEnabled
+                        )
+                    }
+                }
+                .onEnded { _ in
+                    dragStartWorld = nil
+                    dragStartAngle = nil
+                    dragStartNormalizedPosition = nil
+                    dragSnapEnabled = nil
+                    dragStartCenterInCanvas = nil
+                }
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Fixture rotation \(rotationMode.label)")
+        .accessibilityValue("Continuous rotation")
+        .help("Sleep aan de ring om de fixture zonder vaste stappen te draaien")
+    }
+
+    private var ringIndicatorRotationDegrees: Double {
+        let basis = venueOrientationBasis(for: model.worldPosition(for: slotID))
+        let forward = venueVectorTuple(basis.forward)
+        let up = venueVectorTuple(basis.up)
+        let frontMirrored = UserDefaults.standard.bool(forKey: frontProjectionMirrorDefaultsKey)
+        let forwardScreen: CGPoint
+        let upScreen: CGPoint
+        switch projection {
+        case .top:
+            forwardScreen = CGPoint(x: forward.x, y: -forward.y)
+            upScreen = CGPoint(x: up.x, y: -up.y)
+        case .front:
+            forwardScreen = CGPoint(x: frontMirrored ? -forward.x : forward.x, y: -forward.z)
+            upScreen = CGPoint(x: frontMirrored ? -up.x : up.x, y: -up.z)
+        case .back:
+            forwardScreen = CGPoint(x: -forward.x, y: -forward.z)
+            upScreen = CGPoint(x: -up.x, y: -up.z)
+        case .side:
+            forwardScreen = CGPoint(x: forward.y, y: -forward.z)
+            upScreen = CGPoint(x: up.y, y: -up.z)
+        }
+        let direction = hypot(forwardScreen.x, forwardScreen.y) > 0.000001 ? forwardScreen : upScreen
+        return atan2(direction.x, -direction.y) * 180 / .pi
     }
 }
 
@@ -17067,7 +17839,18 @@ private struct StageMetalUniforms {
     var viewProjection: simd_float4x4
 }
 
+private struct Stage3DGizmoAxisProjection: Equatable {
+    let axis: String
+    let normalizedScreenVector: CGPoint
+}
+
+private struct Stage3DGizmoProjection: Equatable {
+    let center: CGPoint
+    let axes: [Stage3DGizmoAxisProjection]
+}
+
 private struct StageMetalFixtureSnapshot {
+    var id: String
     var position: SIMD3<Float>
     var beamKind: StageFixtureBeam.BeamKind
     var isBeeEye: Bool
@@ -17153,6 +17936,7 @@ private struct StageMetalCameraState {
     }
 }
 
+@MainActor
 private final class StageMetalPreviewMTKView: MTKView {
     weak var interactionRenderer: StageMetalPreviewRenderer?
     private var dragMode: DragMode?
@@ -17161,6 +17945,8 @@ private final class StageMetalPreviewMTKView: MTKView {
     private enum DragMode {
         case orbit
         case pan
+        case rotateFixture
+        case ignore
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -17171,8 +17957,19 @@ private final class StageMetalPreviewMTKView: MTKView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        dragMode = event.modifierFlags.contains(.option) ? .pan : .orbit
         lastPoint = convert(event.locationInWindow, from: nil)
+        if event.modifierFlags.contains(.option) {
+            dragMode = .pan
+        } else if interactionRenderer?.beginFixtureRotation(
+            at: lastPoint,
+            viewSize: bounds.size
+        ) == true {
+            dragMode = .rotateFixture
+        } else if interactionRenderer?.isEditingFixtureLayout == true {
+            dragMode = .ignore
+        } else {
+            dragMode = .orbit
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -17182,6 +17979,13 @@ private final class StageMetalPreviewMTKView: MTKView {
         switch dragMode {
         case .pan:
             interactionRenderer?.pan(deltaX: deltaX, deltaY: deltaY)
+        case .rotateFixture:
+            interactionRenderer?.updateFixtureRotation(
+                at: CGPoint(x: point.x, y: bounds.height - point.y),
+                viewSize: bounds.size
+            )
+        case nil, .some(.ignore):
+            break
         default:
             interactionRenderer?.orbit(deltaX: deltaX, deltaY: deltaY)
         }
@@ -17189,6 +17993,7 @@ private final class StageMetalPreviewMTKView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        interactionRenderer?.endFixtureRotation()
         dragMode = nil
     }
 
@@ -17231,14 +18036,92 @@ private final class StageMetalPreviewRenderer: NSObject, MTKViewDelegate {
     private var beamDepthState: MTLDepthStencilState?
     private var beePatternMetalTextureCache: [String: MTLTexture] = [:]
     private var cameraState = StageMetalCameraState()
+    var onSelectedFixtureProjection: ((Stage3DGizmoProjection?) -> Void)?
+    private var lastSelectedFixtureProjection: Stage3DGizmoProjection?
+    private var fixtureRotationDragStart: (slotID: String, center: CGPoint, angle: Double, yaw: Double)?
+
+    @MainActor var isEditingFixtureLayout: Bool { model?.isEditingProjectionLayout == true }
 
     func attach(model: AppModel, preset: Stage3DCameraPreset) {
         self.model = model
         cameraState.applyPreset(preset)
     }
 
+    private static func projectedScreenPoint(
+        _ position: SIMD3<Float>,
+        using viewProjection: simd_float4x4
+    ) -> CGPoint? {
+        let clip = viewProjection * SIMD4<Float>(position.x, position.y, position.z, 1)
+        guard clip.w > 0.0001 else { return nil }
+        let x = CGFloat(clip.x / clip.w)
+        let y = CGFloat(clip.y / clip.w)
+        guard x >= -1.15, x <= 1.15, y >= -1.15, y <= 1.15 else { return nil }
+        return CGPoint(x: (x + 1) * 0.5, y: (1 - y) * 0.5)
+    }
+
+    private static func projectedAxisVector(
+        from position: SIMD3<Float>,
+        along axis: SIMD3<Float>,
+        using viewProjection: simd_float4x4
+    ) -> CGPoint? {
+        guard let start = projectedScreenPoint(position, using: viewProjection),
+              let end = projectedScreenPoint(position + axis, using: viewProjection) else { return nil }
+        let vector = CGPoint(x: end.x - start.x, y: end.y - start.y)
+        return hypot(vector.x, vector.y) > 0.00001 ? vector : nil
+    }
+
+    private static func projectionChanged(_ lhs: Stage3DGizmoProjection?, from rhs: Stage3DGizmoProjection?) -> Bool {
+        guard let lhs, let rhs else { return lhs != rhs }
+        guard lhs.center == rhs.center, lhs.axes.count == rhs.axes.count else { return true }
+        return zip(lhs.axes, rhs.axes).contains { left, right in
+            left.axis != right.axis || left.normalizedScreenVector != right.normalizedScreenVector
+        }
+    }
+
     func setCameraPreset(_ preset: Stage3DCameraPreset) {
         cameraState.applyPreset(preset)
+    }
+
+    @MainActor
+    func beginFixtureRotation(at point: CGPoint, viewSize: CGSize) -> Bool {
+        guard let model, model.isEditingProjectionLayout, !model.selectedSlotID.isEmpty,
+              viewSize.width > 0, viewSize.height > 0 else { return false }
+        let camera = cameraState.resolved()
+        let matrix = simdPerspectiveMatrix(
+            fovYRadians: 48 * .pi / 180,
+            aspect: Float(viewSize.width / viewSize.height),
+            near: 0.02,
+            far: 60
+        ) * simdLookAtMatrix(eye: camera.position, target: camera.target, up: camera.up)
+        let world = simdStageVector(for: model.worldPosition(for: model.selectedSlotID))
+        guard let normalizedCenter = Self.projectedScreenPoint(world, using: matrix) else { return false }
+        let center = CGPoint(x: normalizedCenter.x * viewSize.width, y: normalizedCenter.y * viewSize.height)
+        let topLeftPoint = CGPoint(x: point.x, y: viewSize.height - point.y)
+        let radius = hypot(topLeftPoint.x - center.x, topLeftPoint.y - center.y)
+        guard radius >= 41 else { return false }
+        let angle = atan2(topLeftPoint.y - center.y, topLeftPoint.x - center.x)
+        fixtureRotationDragStart = (
+            slotID: model.selectedSlotID,
+            center: center,
+            angle: angle,
+            yaw: model.projectionYawDegrees(for: model.selectedSlotID)
+        )
+        return true
+    }
+
+    @MainActor
+    func updateFixtureRotation(at point: CGPoint, viewSize: CGSize) {
+        guard let start = fixtureRotationDragStart, let model else { return }
+        let angle = atan2(point.y - start.center.y, point.x - start.center.x)
+        var delta = angle - start.angle
+        if delta > .pi { delta -= 2 * .pi }
+        if delta < -.pi { delta += 2 * .pi }
+        model.setProjectionYawDegrees(for: start.slotID, to: start.yaw + delta * 180 / .pi)
+    }
+
+    @MainActor
+    func endFixtureRotation() {
+        fixtureRotationDragStart = nil
     }
 
     func orbit(deltaX: Float, deltaY: Float) {
@@ -17279,14 +18162,39 @@ private final class StageMetalPreviewRenderer: NSObject, MTKViewDelegate {
 
         let snapshot = currentSnapshot()
         let camera = cameraState.resolved()
+        let viewProjection = simdPerspectiveMatrix(
+            fovYRadians: 48 * .pi / 180,
+            aspect: max(0.1, Float(view.drawableSize.width / max(view.drawableSize.height, 1))),
+            near: 0.02,
+            far: 60
+        ) * simdLookAtMatrix(eye: camera.position, target: camera.target, up: camera.up)
         let uniforms = StageMetalUniforms(
-            viewProjection: simdPerspectiveMatrix(
-                fovYRadians: 48 * .pi / 180,
-                aspect: max(0.1, Float(view.drawableSize.width / max(view.drawableSize.height, 1))),
-                near: 0.02,
-                far: 60
-            ) * simdLookAtMatrix(eye: camera.position, target: camera.target, up: camera.up)
+            viewProjection: viewProjection
         )
+        let selectedFixtureID = model?.selectedSlotID
+        let projectedSelection: Stage3DGizmoProjection?
+        if model?.isEditingProjectionLayout == true,
+           let selectedFixture = snapshot.fixtures.first(where: { $0.id == selectedFixtureID }),
+           let center = Self.projectedScreenPoint(selectedFixture.position, using: viewProjection) {
+            let axisDefinitions: [(String, SIMD3<Float>)] = [
+                ("X", SIMD3<Float>(1, 0, 0)),
+                ("Y", SIMD3<Float>(0, 0, -1)),
+                ("Z", SIMD3<Float>(0, 1, 0)),
+            ]
+            let axes = axisDefinitions.compactMap { axis, direction in
+                Self.projectedAxisVector(from: selectedFixture.position, along: direction, using: viewProjection)
+                    .map { Stage3DGizmoAxisProjection(axis: axis, normalizedScreenVector: $0) }
+            }
+            projectedSelection = Stage3DGizmoProjection(center: center, axes: axes)
+        } else {
+            projectedSelection = nil
+        }
+        if Self.projectionChanged(projectedSelection, from: lastSelectedFixtureProjection) {
+            lastSelectedFixtureProjection = projectedSelection
+            DispatchQueue.main.async { [weak self] in
+                self?.onSelectedFixtureProjection?(projectedSelection)
+            }
+        }
 
         var lineVertices: [StageMetalColorVertex] = []
         var solidVertices: [StageMetalColorVertex] = []
@@ -17597,6 +18505,7 @@ private final class StageMetalPreviewRenderer: NSObject, MTKViewDelegate {
 
             fixtures.append(
                 StageMetalFixtureSnapshot(
+                    id: editor.id,
                     position: fixturePosition,
                     beamKind: beamKind,
                     isBeeEye: isBeeEye,
@@ -18636,9 +19545,11 @@ private final class StageMetalPreviewRenderer: NSObject, MTKViewDelegate {
 private struct StageMetalPreviewRepresentable: NSViewRepresentable {
     @ObservedObject var model: AppModel
     let cameraPreset: Stage3DCameraPreset
+    @Binding var selectedFixtureGizmoProjection: Stage3DGizmoProjection?
 
     final class Coordinator {
         let renderer = StageMetalPreviewRenderer()
+        var selectionProjectionUpdate: ((Stage3DGizmoProjection?) -> Void)?
     }
 
     func makeCoordinator() -> Coordinator {
@@ -18650,6 +19561,9 @@ private struct StageMetalPreviewRepresentable: NSViewRepresentable {
         view.interactionRenderer = context.coordinator.renderer
         view.delegate = context.coordinator.renderer
         context.coordinator.renderer.attach(model: model, preset: cameraPreset)
+        context.coordinator.renderer.onSelectedFixtureProjection = { [weak coordinator = context.coordinator] projection in
+            coordinator?.selectionProjectionUpdate?(projection)
+        }
         return view
     }
 
@@ -18657,54 +19571,219 @@ private struct StageMetalPreviewRepresentable: NSViewRepresentable {
         nsView.interactionRenderer = context.coordinator.renderer
         context.coordinator.renderer.attach(model: model, preset: cameraPreset)
         context.coordinator.renderer.setCameraPreset(cameraPreset)
+        context.coordinator.selectionProjectionUpdate = { projection in
+            selectedFixtureGizmoProjection = projection
+        }
+    }
+}
+
+private struct Stage3DFreeMoveSurface: View {
+    @ObservedObject var model: AppModel
+    let slotID: String
+    let projection: Stage3DGizmoProjection
+    let viewportSize: CGSize
+    let coordinateSpaceName: String
+    @State private var startPosition: VenuePhysicalPointState?
+    @State private var firstAxis: Stage3DGizmoAxisProjection?
+    @State private var secondAxis: Stage3DGizmoAxisProjection?
+    @State private var startSnap: Bool?
+
+    var body: some View {
+        Circle()
+            .fill(Color.black.opacity(0.001))
+            .frame(width: 78, height: 78)
+            .contentShape(Circle())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .named(coordinateSpaceName))
+                    .onChanged { value in
+                        if startPosition == nil {
+                            let candidates = projection.axes.filter { axis in
+                                hypot(axis.normalizedScreenVector.x * viewportSize.width,
+                                      axis.normalizedScreenVector.y * viewportSize.height) > 0.001
+                            }
+                            var best: (Stage3DGizmoAxisProjection, Stage3DGizmoAxisProjection, Double)?
+                            for i in candidates.indices {
+                                for j in candidates.indices where j > i {
+                                    let a = candidates[i].normalizedScreenVector
+                                    let b = candidates[j].normalizedScreenVector
+                                    let det = (a.x * viewportSize.width) * (b.y * viewportSize.height)
+                                        - (b.x * viewportSize.width) * (a.y * viewportSize.height)
+                                    if abs(det) > (best?.2 ?? 0.001) { best = (candidates[i], candidates[j], abs(det)) }
+                                }
+                            }
+                            guard let best else { return }
+                            firstAxis = best.0
+                            secondAxis = best.1
+                            startPosition = model.fixturePositionMeters(for: slotID)
+                            startSnap = model.fixtureSnapEnabled
+                        }
+                        guard let startPosition, let firstAxis, let secondAxis else { return }
+                        let a = firstAxis.normalizedScreenVector
+                        let b = secondAxis.normalizedScreenVector
+                        let ax = a.x * viewportSize.width, ay = a.y * viewportSize.height
+                        let bx = b.x * viewportSize.width, by = b.y * viewportSize.height
+                        let determinant = ax * by - bx * ay
+                        guard abs(determinant) > 0.001 else { return }
+                        let dx = value.translation.width, dy = value.translation.height
+                        let firstDelta = (dx * by - bx * dy) / determinant
+                        let secondDelta = (ax * dy - dx * ay) / determinant
+                        model.setFixturePositionMeters(for: slotID, axis: firstAxis.axis,
+                            value: coordinate(firstAxis.axis, in: startPosition) + firstDelta, snapEnabled: startSnap ?? false)
+                        model.setFixturePositionMeters(for: slotID, axis: secondAxis.axis,
+                            value: coordinate(secondAxis.axis, in: startPosition) + secondDelta, snapEnabled: startSnap ?? false)
+                    }
+                    .onEnded { _ in
+                        startPosition = nil
+                        firstAxis = nil
+                        secondAxis = nil
+                        startSnap = nil
+                    }
+            )
+            .accessibilityLabel("Verplaats fixture in het zichtvlak")
+    }
+
+    private func coordinate(_ axis: String, in position: VenuePhysicalPointState) -> Double {
+        switch axis {
+        case "X": return position.x
+        case "Y": return position.y
+        default: return position.z
+        }
     }
 }
 
 struct Stage3DPreviewView: View {
+    private let gestureCoordinateSpaceName = "BeatBeam.Stage3DCanvas"
     @EnvironmentObject private var model: AppModel
     @State private var cameraPreset: Stage3DCameraPreset = .audience
+    @State private var selectedFixtureGizmoProjection: Stage3DGizmoProjection?
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            StageMetalPreviewRepresentable(
-                model: model,
-                cameraPreset: cameraPreset
-            )
+        GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                StageMetalPreviewRepresentable(
+                    model: model,
+                    cameraPreset: cameraPreset,
+                    selectedFixtureGizmoProjection: $selectedFixtureGizmoProjection
+                )
 
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    ForEach(Stage3DCameraPreset.allCases) { preset in
-                        Button {
-                            cameraPreset = preset
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: preset.iconName)
-                                    .font(.system(size: 11, weight: .semibold))
-                                Text(preset.title)
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        ForEach(Stage3DCameraPreset.allCases) { preset in
+                            Button {
+                                cameraPreset = preset
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: preset.iconName)
+                                        .font(.system(size: 11, weight: .semibold))
+                                    Text(preset.title)
+                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(cameraPreset == preset ? BeatBeamPalette.triggerActive.opacity(0.24) : Color.black.opacity(0.28))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(cameraPreset == preset ? BeatBeamPalette.triggerActive.opacity(0.80) : Color.white.opacity(0.10), lineWidth: 1)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                             }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
-                            .background(cameraPreset == preset ? BeatBeamPalette.triggerActive.opacity(0.24) : Color.black.opacity(0.28))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(cameraPreset == preset ? BeatBeamPalette.triggerActive.opacity(0.80) : Color.white.opacity(0.10), lineWidth: 1)
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
-                }
 
-                Text("Drag = orbit  •  scroll/pinch = zoom  •  right-drag = pan")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.72))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Color.black.opacity(0.26))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    Text(model.isEditingProjectionLayout
+                         ? "Center = move  •  Y/Z rings = rotate  •  Option-drag = orbit"
+                         : "Drag = orbit  •  scroll/pinch = zoom  •  right-drag = pan")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.72))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(Color.black.opacity(0.26))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .padding(10)
+
+                if model.isEditingProjectionLayout,
+                   !model.selectedSlotID.isEmpty,
+                   let projection = selectedFixtureGizmoProjection {
+                    StageMapRotationGizmo(
+                        model: model,
+                        slotID: model.selectedSlotID,
+                        diameter: 132,
+                        rotationMode: .worldAxis("Y"),
+                        projection: .top,
+                        canvasSize: geometry.size,
+                        allowsPositionDrag: false,
+                        centerInCanvas: CGPoint(
+                            x: projection.center.x * geometry.size.width,
+                            y: projection.center.y * geometry.size.height
+                        ),
+                        coordinateSpaceName: gestureCoordinateSpaceName
+                    )
+                        .position(
+                            x: projection.center.x * geometry.size.width,
+                            y: projection.center.y * geometry.size.height
+                        )
+                        .zIndex(10)
+                    StageMapRotationGizmo(
+                        model: model,
+                        slotID: model.selectedSlotID,
+                        diameter: 96,
+                        rotationMode: .worldAxis("Z"),
+                        projection: .top,
+                        canvasSize: geometry.size,
+                        allowsPositionDrag: false,
+                        centerInCanvas: CGPoint(
+                            x: projection.center.x * geometry.size.width,
+                            y: projection.center.y * geometry.size.height
+                        ),
+                        coordinateSpaceName: gestureCoordinateSpaceName
+                    )
+                        .position(
+                            x: projection.center.x * geometry.size.width,
+                            y: projection.center.y * geometry.size.height
+                        )
+                        .zIndex(10.1)
+                    Stage3DFreeMoveSurface(
+                        model: model,
+                        slotID: model.selectedSlotID,
+                        projection: projection,
+                        viewportSize: geometry.size,
+                        coordinateSpaceName: gestureCoordinateSpaceName
+                    )
+                    .position(
+                        x: projection.center.x * geometry.size.width,
+                        y: projection.center.y * geometry.size.height
+                    )
+                    .zIndex(10.5)
+                    StageMapAxisMoveGizmo(
+                        model: model,
+                        slotID: model.selectedSlotID,
+                        axes: projection.axes.map { axis in
+                            let vector = CGPoint(
+                                x: axis.normalizedScreenVector.x * geometry.size.width,
+                                y: axis.normalizedScreenVector.y * geometry.size.height
+                            )
+                            let length = hypot(vector.x, vector.y)
+                            return StageMapAxisVector(
+                                axis: axis.axis,
+                                screenVector: length > 0.0001
+                                    ? CGPoint(x: vector.x / length * 37, y: vector.y / length * 37)
+                                    : .zero,
+                                metersPerScreenVector: length > 0.0001 ? Double(length / 37) : 1
+                            )
+                        },
+                        diameter: 96,
+                        coordinateSpaceName: gestureCoordinateSpaceName
+                    )
+                    .position(
+                        x: projection.center.x * geometry.size.width,
+                        y: projection.center.y * geometry.size.height
+                    )
+                    .zIndex(11)
+                }
             }
-            .padding(10)
+            .coordinateSpace(name: gestureCoordinateSpaceName)
         }
     }
 }
@@ -19041,14 +20120,19 @@ struct StagePreviewPanel<Content: View>: View {
     let projection: StageProjection
     let viewportRenderKey: MetricStageMapViewportRenderKey
     var showsWorldBackdrop = true
+    var allowsViewportPan = false
     let content: Content
+    @EnvironmentObject private var model: AppModel
+    @State private var panInteraction = StageMapPanInteractionState()
+    @State private var panStartCenter: SlotWorldPosition?
 
-    init(title: String, subtitle: String, projection: StageProjection, viewportRenderKey: MetricStageMapViewportRenderKey, showsWorldBackdrop: Bool = true, @ViewBuilder content: () -> Content) {
+    init(title: String, subtitle: String, projection: StageProjection, viewportRenderKey: MetricStageMapViewportRenderKey, showsWorldBackdrop: Bool = true, allowsViewportPan: Bool = false, @ViewBuilder content: () -> Content) {
         self.title = title
         self.subtitle = subtitle
         self.projection = projection
         self.viewportRenderKey = viewportRenderKey
         self.showsWorldBackdrop = showsWorldBackdrop
+        self.allowsViewportPan = allowsViewportPan
         self.content = content()
     }
 
@@ -19062,16 +20146,42 @@ struct StagePreviewPanel<Content: View>: View {
                     .foregroundStyle(.secondary)
             }
 
-            content
-                // The grid and every world-space projection now share this exact
-                // padded canvas. Keeping the backdrop outside this frame was a
-                // subtle second fit rectangle that made visual zoom ambiguous.
-                .padding(16)
-                .background {
-                    if showsWorldBackdrop {
-                        ProjectionPanelBackdrop(projection: projection, viewportRenderKey: viewportRenderKey)
+            GeometryReader { geometry in
+                let canvasSize = stageProjectionCanvasSize(in: geometry.size)
+                ZStack {
+                    if allowsViewportPan {
+                        ZStack {
+                            if showsWorldBackdrop {
+                                ProjectionPanelBackdrop(projection: projection, viewportRenderKey: viewportRenderKey)
+                                    .frame(width: canvasSize.width, height: canvasSize.height)
+                            }
+                            Color.clear
+                                .frame(width: canvasSize.width, height: canvasSize.height)
+                                .contentShape(Rectangle())
+                                .gesture(viewportPanGesture(canvasSize: canvasSize))
+                            content
+                                .frame(width: canvasSize.width, height: canvasSize.height)
+                        }
+                        // Grid and projected fixtures share one exact 16:9
+                        // canvas and one transform. The camera commit uses
+                        // this child canvas size, not the padded panel size.
+                        .frame(width: canvasSize.width, height: canvasSize.height)
+                            .offset(panInteraction.translationPx)
+                    } else {
+                        content
+                            // The grid and every world-space projection share this exact
+                            // padded canvas; do not introduce a second fit rectangle.
+                            .padding(16)
+                            .background {
+                                if showsWorldBackdrop {
+                                    ProjectionPanelBackdrop(projection: projection, viewportRenderKey: viewportRenderKey)
+                                }
+                            }
                     }
                 }
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .coordinateSpace(name: "BeatBeam.StageViewportPan")
+            }
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -19079,6 +20189,29 @@ struct StagePreviewPanel<Content: View>: View {
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func viewportPanGesture(canvasSize: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .named("BeatBeam.StageViewportPan"))
+            .onChanged { value in
+                if panStartCenter == nil {
+                    panStartCenter = projectionViewportCenter(for: projection)
+                }
+                panInteraction.translationPx = value.translation
+            }
+            .onEnded { value in
+                guard let start = panStartCenter else { return }
+                withTransaction(Transaction(animation: nil)) {
+                    model.commitProjectionViewportPan(
+                        projection: projection,
+                        startCenter: start,
+                        translation: value.translation,
+                        canvasSize: canvasSize
+                    )
+                    panInteraction.translationPx = .zero
+                    panStartCenter = nil
+                }
+            }
     }
 }
 
@@ -19951,6 +21084,34 @@ private func venueOrientationBasis(for world: SlotWorldPosition) -> FixtureVenue
         up: VenueVectorState(x: up.x, y: up.y, z: up.z),
         right: VenueVectorState(x: right.x, y: right.y, z: right.z)
     )
+}
+
+private func rotatedFixtureWorldOrientation(
+    _ start: SlotWorldPosition,
+    around axis: (x: Double, y: Double, z: Double),
+    by deltaDegrees: Double
+) -> SlotWorldPosition {
+    var world = start
+    let radians = deltaDegrees * .pi / 180
+    let startBasis = venueOrientationBasis(for: start)
+    let forward = venueVectorNormalized(venueVectorRotated(
+        venueVectorTuple(startBasis.forward), around: axis, radians: radians
+    ))
+    let up = venueVectorNormalized(venueVectorRotated(
+        venueVectorTuple(startBasis.up), around: axis, radians: radians
+    ))
+    if hypot(forward.x, forward.y) > 0.000001 {
+        world.yawDegrees = atan2(forward.x, forward.y) * 180 / .pi
+    }
+    world.pitchDegrees = asin(min(1, max(-1, forward.z))) * 180 / .pi
+
+    var zeroRollWorld = world
+    zeroRollWorld.rollDegrees = 0
+    let zeroRollUp = venueVectorTuple(venueOrientationBasis(for: zeroRollWorld).up)
+    let sine = venueVectorDot(forward, venueVectorCross(zeroRollUp, up))
+    let cosine = min(1, max(-1, venueVectorDot(zeroRollUp, up)))
+    world.rollDegrees = atan2(sine, cosine) * 180 / .pi
+    return world
 }
 
 private func venueNormalizedCoordinate(_ value: Double, negativeExtent: Double, positiveExtent: Double) -> Double {

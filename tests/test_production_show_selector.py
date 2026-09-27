@@ -34,6 +34,10 @@ def projection():
     return {
         "track_match": "exact", "availability": "available_current", "projection_status": "in_segment",
         "canonical_track_path": PATH,
+        "composer_readiness": {
+            "status": "ready", "version": "dynamic-composer-backbone-v1",
+            "reason": "ready", "missing_fields": [],
+        },
         "active_track": {"canonical_path": PATH, "status": "ready", "generation": 7},
         "shadow_analysis": {"model": "SectionCharacterProfileShadow", "section_characters": [{
             "observation_id": "section-7", "start_seconds": 0.0, "end_seconds": 30.0,
@@ -62,6 +66,10 @@ def calling_projection(bar, event_type, start_seconds, origin, destination, cont
     return {
         "track_match": "exact", "availability": "available_current", "projection_status": "in_segment",
         "canonical_track_path": CALLING_PATH,
+        "composer_readiness": {
+            "status": "ready", "version": "dynamic-composer-backbone-v1",
+            "reason": "ready", "missing_fields": [],
+        },
         "active_track": {"canonical_path": CALLING_PATH, "status": "ready", "generation": 7},
         "shadow_analysis": {"model": "SectionCharacterProfileShadow", "section_characters": [{
             "observation_id": f"calling-bar-{bar}", "start_seconds": 0.0, "end_seconds": 400.0,
@@ -116,6 +124,23 @@ class ProductionShowSelectorTests(unittest.TestCase):
         selected, decision = self.select("future", base=base)
         self.assertIs(selected, base)
         self.assertEqual("mode_baseline", decision["fallback_reason"])
+
+    def test_analysis_current_but_composer_missing_uses_baseline_with_exact_reason(self):
+        source = projection()
+        source["composer_readiness"] = {
+            "status": "missing", "version": None,
+            "reason": "backbone_missing", "missing_fields": ["composer_backbone"],
+        }
+        context = preview_rme_context(source, 15.0, "DYNAMIC_COMPOSER")
+        state, reason = project_continuous_musical_state(source, 15.0)
+        dynamic = apply_dynamic_composer_preview(
+            baseline(), {**context, "continuous_state_reason": reason},
+            compose_dynamic_preview(baseline(), state, context))
+
+        selected, decision = self.select(dynamic=dynamic, source=source)
+
+        self.assertEqual(baseline(), selected)
+        self.assertEqual("composer_readiness_missing", decision["fallback_reason"])
 
     def test_shadow_computes_eligibility_but_never_selects_candidate(self):
         base, dynamic = baseline(), candidate()

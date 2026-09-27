@@ -1,10 +1,12 @@
 import threading
 import unittest
+from unittest.mock import patch
 
 from beatbeam_app import (
     AUTO_SHOW_MANUAL_PRESET_PALETTES,
     DmxController,
     MANUAL_COLOR_PRESETS,
+    wall_wash_dimmer_energy_response,
 )
 from dynamic_composer import DIMMER_ANIMATION_MOTIFS
 
@@ -57,6 +59,36 @@ class DynamicComposerV2RendererTests(unittest.TestCase):
                 value = self._brightness(descriptor.name, context=singleton)
                 self.assertGreaterEqual(value, round(220 * .38), descriptor.name)
                 self.assertLessEqual(value, 220, descriptor.name)
+
+    def test_wall_wash_energy_response_lifts_midrange_but_preserves_zero(self):
+        self.assertEqual(0.0, wall_wash_dimmer_energy_response(0.0))
+        self.assertAlmostEqual(0.7071, wall_wash_dimmer_energy_response(0.25), places=4)
+        self.assertAlmostEqual(0.8409, wall_wash_dimmer_energy_response(0.5), places=4)
+        self.assertEqual(1.0, wall_wash_dimmer_energy_response(1.0))
+
+    def test_dynamic_composer_uses_full_zero_to_full_step_range_for_all_show_roles(self):
+        wash = {
+            "dimmer": 255,
+            "_slot_context": {"role": "wash"},
+            "_dynamic_dimmer_motif": "chase_forward",
+            "_auto_show_rhythm_mode": "full_on",
+        }
+        moving = {**wash, "_slot_context": {"role": "moving"}}
+        par = {**wash, "_slot_context": {"role": "par"}}
+        manual_wash = {"dimmer": 255, "_slot_context": {"role": "wash"}}
+
+        with patch.object(self.controller, "_brightness_for_config", return_value=27):
+            self.assertEqual(36, self.controller._effective_brightness_with_motion(wash, None, {}, 0))
+            self.assertEqual(36, self.controller._effective_brightness_with_motion(moving, None, {}, 0))
+            self.assertEqual(36, self.controller._effective_brightness_with_motion(par, None, {}, 0))
+            self.assertEqual(27, self.controller._effective_brightness_with_motion(manual_wash, None, {}, 0))
+
+        with patch.object(self.controller, "_brightness_for_config", side_effect=(0, 180, 180, 180, 255)):
+            self.assertEqual(0, self.controller._effective_brightness_with_motion(wash, None, {}, 0))
+            self.assertEqual(182, self.controller._effective_brightness_with_motion(wash, None, {}, 0))
+            self.assertEqual(182, self.controller._effective_brightness_with_motion(moving, None, {}, 0))
+            self.assertEqual(182, self.controller._effective_brightness_with_motion(par, None, {}, 0))
+            self.assertEqual(255, self.controller._effective_brightness_with_motion(par, None, {}, 0))
 
     def test_bar_quantized_motifs_only_change_on_their_declared_boundary(self):
         self.assertEqual(self._brightness("bar_gate", 8.10), self._brightness("bar_gate", 8.90))

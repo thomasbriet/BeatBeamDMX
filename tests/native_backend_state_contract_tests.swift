@@ -114,6 +114,31 @@ struct ContractOscState: Decodable {
     let decks: ContractOscDecks?
 }
 
+struct ContractVenueSummary: Decodable {
+    let id: String
+    let name: String
+    let fixtureCount: Int
+    let active: Bool
+}
+
+struct ContractVenueState: Decodable {
+    let schemaVersion: Int
+    let activeVenueID: String
+    let activeVenueName: String
+    let switchRequiresRearm: Bool
+    let storagePersisted: Bool
+    let venues: [ContractVenueSummary]
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case activeVenueID = "activeVenueId"
+        case activeVenueName
+        case switchRequiresRearm
+        case storagePersisted
+        case venues
+    }
+}
+
 func decodeOsc(_ json: String) throws -> ContractOscState {
     let decoder = JSONDecoder()
     decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -124,6 +149,12 @@ func decodeLiveUi(_ json: String) throws -> ContractLiveUi {
     let decoder = JSONDecoder()
     decoder.keyDecodingStrategy = .convertFromSnakeCase
     return try decoder.decode(ContractLiveUi.self, from: Data(json.utf8))
+}
+
+func decodeVenueStatus(_ json: String) throws -> ContractVenueState {
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    return try decoder.decode(ContractVenueState.self, from: Data(json.utf8))
 }
 
 func redactRemoteURL(_ value: String?) -> String {
@@ -152,6 +183,26 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 do {
+    // Exact dmx.venue shape captured from the live Beta /api/state response.
+    let venue = try decodeVenueStatus("""
+    {
+      "schema_version": 1,
+      "active_venue_id": "current-venue",
+      "active_venue_name": "Current Venue",
+      "switch_requires_rearm": false,
+      "storage_persisted": false,
+      "venues": [
+        { "id": "current-venue", "name": "Current Venue", "fixture_count": 11, "active": true }
+      ]
+    }
+    """)
+    require(venue.schemaVersion == 1, "Venue schema version")
+    require(venue.activeVenueID == "current-venue", "Venue active ID decodes from active_venue_id")
+    require(venue.activeVenueName == "Current Venue", "Venue active name")
+    require(!venue.switchRequiresRearm, "Venue re-arm state")
+    require(!venue.storagePersisted, "Legacy venue bootstrap remains in memory")
+    require(venue.venues.count == 1 && venue.venues[0].fixtureCount == 11 && venue.venues[0].active, "Venue list")
+
     let nullableUi = try decodeLiveUi("""
     { "phrase": null, "next_phrase": null, "bars_to_next": null }
     """)

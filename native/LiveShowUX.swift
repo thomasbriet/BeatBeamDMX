@@ -1,5 +1,28 @@
 import SwiftUI
 
+struct LiveRenderedFixture: Identifiable {
+    let id: String
+    let label: String
+    let dimmer: Int
+    let red: Int
+    let green: Int
+    let blue: Int
+    let white: Int
+    let strobe: Int
+    let effectiveIntensity: Double
+    let ledRows: [LiveRenderedLed]?
+}
+
+struct LiveRenderedLed: Identifiable {
+    let index: Int
+    let red: Int
+    let green: Int
+    let blue: Int
+    let intensity: Double
+
+    var id: Int { index }
+}
+
 // MARK: - Live Show presentation
 
 /// Presentation-only live console. It renders the backend's typed state and
@@ -44,55 +67,212 @@ struct LiveShowWorkspaceView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            LiveAuthorityCard(activeDeck: activeDeck)
-
-            if !operationalWarnings.isEmpty {
-                VStack(spacing: 8) {
-                    ForEach(operationalWarnings) { notice in
-                        LiveOperationalNoticeView(notice: notice)
+            LiveNowPlayingPanel(activeDeck: activeDeck)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 14) {
+                    LiveShowNowPanel()
+                        .frame(minWidth: 300, maxWidth: 390)
+                    LiveRenderedOutputPanel(fixtures: model.liveRenderedOutput, frameAvailable: model.liveRenderedOutputAvailable)
+                        .frame(minWidth: 440, maxWidth: .infinity)
+                }
+                VStack(spacing: 14) {
+                    LiveShowNowPanel()
+                    LiveRenderedOutputPanel(fixtures: model.liveRenderedOutput, frameAvailable: model.liveRenderedOutputAvailable)
+                }
+            }
+            PanelSurface(title: "ACTIVE WARNINGS", compact: true) {
+                if operationalWarnings.isEmpty {
+                    HStack(spacing: 8) {
+                        LiveStatusBadge(text: "NO ACTIVE WARNINGS", tone: .active)
+                        Text("BeatBeam meldt momenteel geen operationele waarschuwingen.")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(BeatBeamPalette.secondaryText)
+                    }
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(operationalWarnings) { notice in
+                            LiveOperationalNoticeView(notice: notice)
+                        }
                     }
                 }
             }
 
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 14) {
+            DisclosureGroup("Meer Live-details") {
+                VStack(alignment: .leading, spacing: 14) {
                     LiveDecksCard(decks: decks)
-                    LiveMusicalStateCard()
-                }
-                VStack(spacing: 14) {
-                    LiveDecksCard(decks: decks)
-                    LiveMusicalStateCard()
-                }
-            }
-
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 14) {
-                    LiveIntensityCard()
-                    LiveEventEnvelopeCard()
-                    LiveComposerSummaryCard()
-                }
-                VStack(spacing: 14) {
-                    LiveIntensityCard()
-                    LiveEventEnvelopeCard()
-                    LiveComposerSummaryCard()
-                }
-            }
-
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 14) {
-                    LiveDmxConnectionCard()
-                    LiveFixtureGroupsCard()
-                    LiveSafetyAndPhysicalCard()
-                }
-                VStack(spacing: 14) {
-                    LiveDmxConnectionCard()
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 14) {
+                            LiveMusicalStateCard()
+                            LiveIntensityCard()
+                            LiveEventEnvelopeCard()
+                            LiveComposerSummaryCard()
+                        }
+                        VStack(spacing: 14) {
+                            LiveMusicalStateCard()
+                            LiveIntensityCard()
+                            LiveEventEnvelopeCard()
+                            LiveComposerSummaryCard()
+                        }
+                    }
                     LiveFixtureGroupsCard()
                     LiveSafetyAndPhysicalCard()
                 }
             }
+            .font(.system(size: 12, weight: .semibold))
+            .tint(BeatBeamPalette.brandCyan)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("BeatBeam Live Show")
+    }
+}
+
+private struct LiveMasterDimmerControl: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var sliderValue = 1.0
+    @State private var isEditing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("MASTER DIMMER · HELE RIG")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(BeatBeamPalette.secondaryText)
+                Spacer()
+                Text("\(Int((sliderValue * 100).rounded()))%")
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .monospacedDigit()
+            }
+            Slider(value: $sliderValue, in: 0...1, onEditingChanged: { editing in
+                isEditing = editing
+                if !editing { model.setMasterDimmer(sliderValue) }
+            })
+            .disabled(model.masterDimmerUpdateInFlight)
+            .accessibilityLabel("Master Dimmer, hele rig")
+        }
+        .onAppear { sliderValue = model.masterDimmer }
+        .onChange(of: model.masterDimmer) { _, value in
+            if !isEditing { sliderValue = value }
+        }
+    }
+}
+
+private struct LiveRenderedOutputPanel: View {
+    @EnvironmentObject private var model: AppModel
+    let fixtures: [LiveRenderedFixture]
+    let frameAvailable: Bool
+
+    private let columns = [GridItem(.adaptive(minimum: 118), spacing: 9)]
+
+    var body: some View {
+        PanelSurface(title: "RENDERED OUTPUT", compact: false) {
+            VStack(alignment: .leading, spacing: 11) {
+                HStack(spacing: 8) {
+                    LiveStatusBadge(
+                        text: model.physicalDmxConnected ? "PHYSICAL DMX" : "PREVIEW / NO PHYSICAL DMX",
+                        tone: model.physicalDmxConnected ? .active : .warning
+                    )
+                    Spacer()
+                    Text("\(fixtures.count) FIXTURES")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(BeatBeamPalette.secondaryText)
+                }
+
+                if !frameAvailable {
+                    LiveEmptyState(icon: "lightbulb.slash", text: "Rendered frame is not available.")
+                } else if fixtures.isEmpty {
+                    LiveEmptyState(icon: "lightbulb.2", text: "No enabled fixtures in the rendered frame.")
+                } else {
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 9) {
+                        ForEach(fixtures) { fixture in
+                            LiveRenderedFixtureTile(fixture: fixture, blackout: model.blackoutActive)
+                        }
+                    }
+                }
+
+                Divider()
+                LiveDmxConnectionCard()
+            }
+        }
+    }
+}
+
+private struct LiveRenderedFixtureTile: View {
+    let fixture: LiveRenderedFixture
+    let blackout: Bool
+
+    private var swatch: Color {
+        let red = min(255, fixture.red + fixture.white)
+        let green = min(255, fixture.green + fixture.white)
+        let blue = min(255, fixture.blue + fixture.white)
+        return Color(red: Double(red) / 255, green: Double(green) / 255, blue: Double(blue) / 255)
+    }
+
+    private func ledColor(_ row: LiveRenderedLed) -> Color {
+        Color(red: Double(min(255, row.red + fixture.white)) / 255,
+              green: Double(min(255, row.green + fixture.white)) / 255,
+              blue: Double(min(255, row.blue + fixture.white)) / 255)
+    }
+
+    @ViewBuilder
+    private var outputVisualization: some View {
+        if let rows = fixture.ledRows, rows.count == 24 {
+            VStack(spacing: 1) {
+                ForEach(rows) { row in
+                    GeometryReader { proxy in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(BeatBeamPalette.appBackground)
+                            Capsule()
+                                .fill(blackout ? Color.black : ledColor(row))
+                                .frame(width: proxy.size.width * (blackout ? 0 : min(1, max(0, row.intensity))))
+                        }
+                    }
+                    .frame(height: 2.5)
+                }
+            }
+            .padding(.horizontal, 5)
+            .padding(.vertical, 3)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(BeatBeamPalette.appBackground)
+            .accessibilityLabel("24 LED-rijen, horizontaal gevuld volgens de gerenderde output")
+        } else {
+            GeometryReader { proxy in
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    Rectangle()
+                        .fill(blackout ? Color.black : swatch)
+                        .frame(height: proxy.size.height * (blackout ? 0 : min(1, max(0, fixture.effectiveIntensity))))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(BeatBeamPalette.appBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            outputVisualization
+                .frame(height: fixture.ledRows == nil ? 50 : 83)
+
+            Text(fixture.label.uppercased())
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(blackout ? "BLACKOUT" : "RGB \(fixture.red)/\(fixture.green)/\(fixture.blue)")
+                .font(.system(size: 8, weight: .medium, design: .monospaced))
+                .foregroundStyle(BeatBeamPalette.secondaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+            Text(blackout ? "0%" : "\(Int((fixture.effectiveIntensity * 100).rounded()))%")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(BeatBeamPalette.brandCyan)
+        }
+        .padding(7)
+        .background(BeatBeamPalette.raisedGradient)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(BeatBeamPalette.border, lineWidth: 1))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(fixture.label), intensity \(Int((fixture.effectiveIntensity * 100).rounded())) percent, RGB \(fixture.red), \(fixture.green), \(fixture.blue)")
     }
 }
 
@@ -120,59 +300,49 @@ private struct LiveDmxConnectionCard: View {
     }
 
     var body: some View {
-        PanelSurface(title: "Physical DMX", compact: true) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    LiveStatusBadge(
-                        text: model.physicalDmxConnected ? "DMX CONNECTED" : "DMX DISCONNECTED",
-                        tone: model.physicalDmxConnected ? .active : .neutral
-                    )
-                    Text(connectionDetail)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(BeatBeamPalette.secondaryText)
-                        .lineLimit(2)
-                }
-
-                Picker("DMX interface", selection: $model.selectedPortLabel) {
-                    Text("Selecteer interface").tag("")
-                    ForEach(model.ports, id: \.device) { port in
-                        Text(port.label).tag(port.label)
-                    }
-                }
-                .pickerStyle(.menu)
-                .disabled(model.ports.isEmpty)
-
-                HStack(spacing: 8) {
-                    Button("REFRESH") { model.refreshPorts() }
-                        .buttonStyle(.bordered)
-
-                    if model.physicalDmxConnected {
-                        Button("RECONNECT") { model.reconnectDMX() }
-                            .buttonStyle(.borderedProminent)
-                        Button("DISCONNECT") { model.disconnectDMX() }
-                            .buttonStyle(.bordered)
-                    } else {
-                        Button("CONNECT DMX") { model.connectDMX() }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(model.selectedPortLabel.isEmpty)
-                    }
-                }
-
-                Text("Connection controls do not change production authority.")
-                    .font(.system(size: 9, weight: .medium))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                LiveStatusBadge(
+                    text: model.physicalDmxConnected ? "DMX CONNECTED" : "DMX DISCONNECTED",
+                    tone: model.physicalDmxConnected ? .active : .neutral
+                )
+                Text(connectionDetail)
+                    .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(BeatBeamPalette.secondaryText)
+                    .lineLimit(2)
+            }
+
+            Picker("DMX interface", selection: $model.selectedPortLabel) {
+                Text("Selecteer interface").tag("")
+                ForEach(model.ports, id: \.device) { port in
+                    Text(port.label).tag(port.label)
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(model.ports.isEmpty)
+
+            HStack(spacing: 8) {
+                Button("REFRESH") { model.refreshPorts() }
+                    .buttonStyle(.bordered)
+
+                if model.physicalDmxConnected {
+                    Button("RECONNECT") { model.reconnectDMX() }
+                        .buttonStyle(.borderedProminent)
+                    Button("DISCONNECT") { model.disconnectDMX() }
+                        .buttonStyle(.bordered)
+                } else {
+                    Button("CONNECT DMX") { model.connectDMX() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.selectedPortLabel.isEmpty)
+                }
             }
         }
     }
 }
 
-private struct LiveAuthorityCard: View {
+private struct LiveNowPlayingPanel: View {
     @EnvironmentObject private var model: AppModel
     let activeDeck: LiveDeckState?
-    @State private var confirmEnable = false
-    @State private var confirmRevert = false
-
-    private var dynamicMode: Bool { model.productionShowMode == "DYNAMIC_COMPOSER_ENABLED" }
 
     private var deckNumber: String {
         activeDeck?.deckNumber.map { "DECK \($0)" } ?? "NO MASTER"
@@ -193,11 +363,11 @@ private struct LiveAuthorityCard: View {
     }
 
     var body: some View {
-        PanelSurface(title: "Live Show", compact: false) {
+        PanelSurface(title: "NOW PLAYING", compact: false) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("NOW PLAYING / MASTER")
+                        Text("AUTHORITATIVE PLAYBACK")
                             .font(.system(size: 11, weight: .bold, design: .monospaced))
                             .foregroundStyle(BeatBeamPalette.brandCyan)
                         Text(title)
@@ -223,39 +393,76 @@ private struct LiveAuthorityCard: View {
                     LiveKeyMetric(title: "ANALYSIS", value: readiness.title)
                 }
 
-                Divider()
+            }
+        }
+        .accessibilityLabel("Authoritative playback: \(deckNumber), \(title), \(readiness.title)")
+    }
+}
 
-                HStack(spacing: 10) {
-                    LiveSourceBadge(title: "PRODUCTION", value: productionModeDisplay(model.productionShowMode), tone: dynamicMode ? .active : .neutral)
-                    LiveSourceBadge(title: "FRAME", value: productionDisplay(model.productionShowSource), tone: model.productionFallbackActive ? .warning : .neutral)
-                    LiveSourceBadge(title: "PREVIEW", value: previewDisplay(model.previewComposition?.mode), tone: .active)
-                    Spacer(minLength: 0)
-                    Text("Physical: \(model.physicalOutputSource)")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(BeatBeamPalette.secondaryText)
-                        .lineLimit(1)
-                }
+private struct LiveShowNowPanel: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var confirmEnable = false
+    @State private var confirmRevert = false
 
-                if dynamicMode, model.productionFallbackActive {
-                    Text("DYNAMIC COMPOSER · Fallback: BASELINE · \(model.productionFallbackReason ?? "unknown")")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+    private var dynamicMode: Bool { model.productionShowMode == "DYNAMIC_COMPOSER_ENABLED" }
+    private var musicalState: String {
+        if let event = nonPlaceholder(model.previewComposition?.event?.type) { return event.uppercased() }
+        return model.phraseCurrentValue == "-" ? "UNKNOWN" : model.phraseCurrentValue.uppercased()
+    }
+    private var overrideSummary: String {
+        let active = [
+            model.liveOverrideColor != "none" ? model.liveOverrideColorLabel : nil,
+            model.liveOneShotCue != "none" ? model.liveOneShotCueLabel : nil,
+            model.liveOverrideManualStrobe ? "Manual strobe" : nil,
+            model.liveOverrideAudienceSweep ? "Audience sweep" : nil,
+            model.liveOverrideAllOn ? "All on" : nil,
+            model.liveOverrideParChase ? "PAR chase" : nil,
+            model.liveOverrideParSnake ? "PAR snake" : nil,
+        ].compactMap { $0 }
+        return active.isEmpty ? "AUTOMATIC" : active.joined(separator: " · ").uppercased()
+    }
+
+    var body: some View {
+        PanelSurface(title: "SHOW NOW", compact: false) {
+            VStack(alignment: .leading, spacing: 12) {
+                LiveShowValueRow(title: "PRODUCTION MODE", value: productionModeDisplay(model.productionShowMode), tone: dynamicMode ? .active : .neutral)
+                LiveShowValueRow(
+                    title: "ACTUAL FRAME SOURCE",
+                    value: productionDisplay(model.productionShowSource) + (model.productionFallbackActive ? " · FALLBACK" : ""),
+                    tone: model.productionFallbackActive ? .warning : .active
+                )
+                if model.productionFallbackActive, let reason = model.productionFallbackReason {
+                    Text("Fallback reason · \(reason)")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(BeatBeamPalette.brandAmber)
+                        .lineLimit(2)
                 }
+                LiveShowValueRow(title: "MUSICAL STATE", value: musicalState, tone: .neutral)
+                LiveShowValueRow(title: "MANUAL OVERRIDE", value: overrideSummary, tone: overrideSummary == "AUTOMATIC" ? .neutral : .warning)
 
-                HStack(spacing: 10) {
-                    if dynamicMode {
-                        Button("REVERT TO BASELINE") { confirmRevert = true }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.orange)
-                    } else {
-                        Button("ENABLE DYNAMIC COMPOSER") { confirmEnable = true }
-                            .buttonStyle(.borderedProminent)
-                            .tint(BeatBeamPalette.brandCyan)
+                Divider()
+                LiveMasterDimmerControl()
+                Divider()
+                HStack(spacing: 8) {
+                    Button {
+                        model.blackout()
+                    } label: {
+                        Label(model.blackoutActive ? "BLACKOUT ACTIVE" : "BLACKOUT", systemImage: "lightbulb.slash.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .frame(maxWidth: .infinity)
                     }
-                    Text("Fallback available · Manual and blackout always win")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(BeatBeamPalette.secondaryText)
+                    .buttonStyle(.borderedProminent)
+                    .tint(model.blackoutActive ? .red : .red.opacity(0.72))
+
+                    Button(dynamicMode ? "REVERT" : "ENABLE COMPOSER") {
+                        if dynamicMode { confirmRevert = true } else { confirmEnable = true }
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(BeatBeamPalette.brandCyan)
                 }
+                Text("Manual and blackout always override the automatic show.")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(BeatBeamPalette.secondaryText)
             }
         }
         .confirmationDialog("Enable Dynamic Composer for physical production?", isPresented: $confirmEnable, titleVisibility: .visible) {
@@ -270,7 +477,25 @@ private struct LiveAuthorityCard: View {
         } message: {
             Text("This takes effect immediately and will not auto-enable again.")
         }
-        .accessibilityLabel("Authoritative playback: \(deckNumber), \(title), \(readiness.title)")
+    }
+}
+
+private struct LiveShowValueRow: View {
+    let title: String
+    let value: String
+    let tone: LiveStatusTone
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(BeatBeamPalette.secondaryText)
+            Text(value)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(tone == .warning ? BeatBeamPalette.brandAmber : .white)
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -615,8 +840,8 @@ struct PreviewComposerWorkspaceView: View {
 struct AutoShowWorkspaceView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            PanelSurface(title: "Auto Show", compact: true) {
-                Text("Musical style, Preview Composer and Audience PAN settings live here. Stage Map and fixture calibration stay separate.")
+            PanelSurface(title: "Show Configuration", compact: true) {
+                Text("Musical style, Preview Composer and Audience PAN settings. Stage Map and fixture calibration stay separate.")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(BeatBeamPalette.secondaryText)
             }
@@ -628,12 +853,13 @@ struct AutoShowWorkspaceView: View {
 struct AdvancedOperationsWorkspaceView: View {
     let fixtureBank: AnyView
     let selectedEditor: SlotEditor?
-    @State private var section: AdvancedSection = .diagnostics
+    @State private var section: AdvancedSection = .showConfiguration
 
     private enum AdvancedSection: String, CaseIterable, Identifiable {
-        case diagnostics = "Diagnostics"
-        case fixtures = "Fixtures"
-        case map = "Map"
+        case showConfiguration = "Show Configuration"
+        case simulator = "Simulator"
+        case fixtureDiagnostics = "Fixture Diagnostics"
+        case developer = "Developer"
         var id: String { rawValue }
     }
 
@@ -643,14 +869,22 @@ struct AdvancedOperationsWorkspaceView: View {
                 ForEach(AdvancedSection.allCases) { item in Text(item.rawValue).tag(item) }
             }
             .pickerStyle(.segmented)
-            Text("Developer and operational detail. Live Show remains the primary performance view.")
+            Text("User advanced configuration and developer diagnostics. Live Show remains the primary performance view.")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(BeatBeamPalette.secondaryText)
 
             switch section {
-            case .diagnostics:
-                DebugInspectorView()
-            case .fixtures:
+            case .showConfiguration:
+                ScrollView {
+                    AutoShowWorkspaceView()
+                        .padding(.bottom, 32)
+                }
+            case .simulator:
+                ScrollView {
+                    SimulatorWorkspaceView()
+                        .padding(.bottom, 32)
+                }
+            case .fixtureDiagnostics:
                 VStack(alignment: .leading, spacing: 12) {
                     fixtureBank
                     if let selectedEditor {
@@ -659,8 +893,17 @@ struct AdvancedOperationsWorkspaceView: View {
                         LiveEmptyState(icon: "lightbulb.slash", text: "Geen fixture geselecteerd")
                     }
                 }
-            case .map:
-                MapWorkspaceView()
+            case .developer:
+                VStack(alignment: .leading, spacing: 12) {
+                    PanelSurface(title: "Developer / Diagnostics", compact: true) {
+                        Text("Preview tests, production audition and backend diagnostics. These controls are not part of normal show operation.")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(BeatBeamPalette.secondaryText)
+                    }
+                    PreviewPulseTestPanel()
+                    MovementLabPanel()
+                    DebugInspectorView()
+                }
             }
         }
     }

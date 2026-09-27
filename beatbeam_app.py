@@ -85,6 +85,18 @@ REMOTE_ADDRESS_CACHE_TTL = 3.0
 DEFAULT_HTTP_PORT = 8780
 DEFAULT_OSC_PORT = 4461
 DEFAULT_DMX_FPS = 30.0
+VENUE_STORAGE_SCHEMA_VERSION = 1
+LEGACY_CURRENT_VENUE_ID = "current-venue"
+VENUE_PHYSICAL_CONFIG_KEYS = (
+    "active_slot", "venue_geometry", "slot_order", "slots",
+)
+RENDERER_FAILURE_RELEASE_AUTO_SHOW_KEYS = (
+    "override_manual_strobe",
+    "override_audience_sweep",
+    "override_all_on",
+    "override_par_chase",
+    "override_par_snake",
+)
 SHOW_INTENT_SEMANTIC_HISTORY_MAX_FRAMES = 120000
 # Fase 1 van de bounded promotion: uitsluitend parity-diagnostiek. Deze private
 # gate heeft geen UI, persistence of runtime-endpoint en blijft default uit.
@@ -157,6 +169,34 @@ class VenuePhysicalPoint:
         return {"x": self.x, "y": self.y, "z": self.z}
 
 
+@dataclass
+class Venue:
+    """One independently persisted physical BeatBeam environment.
+
+    A Venue deliberately owns only the physical fixture document consumed by
+    the one existing renderer.  Music, playback and transient show ownership
+    stay outside this model.
+    """
+
+    id: str
+    name: str
+    active_slot: str
+    venue_geometry: dict
+    slot_order: list
+    slots: dict
+
+    def physical_document(self):
+        return {
+            "active_slot": self.active_slot,
+            "venue_geometry": copy.deepcopy(self.venue_geometry),
+            "slot_order": list(self.slot_order),
+            "slots": copy.deepcopy(self.slots),
+        }
+
+    def storage_document(self):
+        return {"id": self.id, "name": self.name, **self.physical_document()}
+
+
 @dataclass(frozen=True)
 class VenueGeometry:
     """Persisted physical scale; every field is intentionally unset by default."""
@@ -181,6 +221,43 @@ class VenueTargetVerticalLayer(str, Enum):
     FLOOR = "FLOOR"
     NORMAL = "NORMAL"
     CEILING = "CEILING"
+
+
+class MountingOrientation(str, Enum):
+    """How the complete fixture is mounted around the world vertical axis."""
+
+    NORMAL = "NORMAL"
+    ROTATED_180 = "ROTATED_180"
+
+
+def canonical_mounting_orientation(value, default=MountingOrientation.NORMAL):
+    value = default if value is None else value
+    if isinstance(value, MountingOrientation):
+        return value
+    try:
+        return MountingOrientation(str(value))
+    except ValueError:
+        return None
+
+
+def apply_mounting_orientation_to_world_direction(direction, orientation):
+    """Rotate a direction by the fixture's world-Z mounting transform.
+
+    ROTATED_180 is its own inverse, so this same function is used before the
+    inverse solver and after final-frame raw decoding. Calibration stays in
+    the fixture's measured local frame.
+    """
+    vector = (
+        _vector3_tuple(direction)
+        if hasattr(direction, "x")
+        else tuple(float(component) for component in direction)
+    )
+    resolved = canonical_mounting_orientation(orientation)
+    if resolved is None:
+        raise ValueError("invalid mounting orientation")
+    if resolved == MountingOrientation.ROTATED_180:
+        return VenueVector3(-vector[0], -vector[1], vector[2])
+    return VenueVector3(*vector)
 
 
 def canonical_venue_target_vertical_layer(value, default=VenueTargetVerticalLayer.NORMAL):
@@ -1269,6 +1346,7 @@ class VenueFixtureCalibration:
     mounting_height_m: Optional[float] = None
     physical_forward: Optional[VenueVector3] = None
     physical_up: Optional[VenueVector3] = None
+    mounting_orientation: MountingOrientation = MountingOrientation.NORMAL
     pan_min_degrees: Optional[float] = None
     pan_max_degrees: Optional[float] = None
     tilt_min_degrees: Optional[float] = None
@@ -1431,6 +1509,18 @@ def resolve_venue_target(
     )
     world_azimuth = math.degrees(math.atan2(global_vector[0], global_vector[1])) % 360.0
     world_elevation = math.degrees(math.atan2(global_vector[2], math.hypot(global_vector[0], global_vector[1])))
+    mounting_orientation = canonical_mounting_orientation(calibration.mounting_orientation)
+    if mounting_orientation is None:
+        return {
+            "status": "INVALID_CALIBRATION", "reason": "invalid_mounting_orientation",
+            "pan": None, "tilt": None,
+        }
+    solver_vector_value = apply_mounting_orientation_to_world_direction(
+        global_vector, mounting_orientation
+    )
+    solver_vector = _vector3_tuple(solver_vector_value)
+    solver_world_azimuth = math.degrees(math.atan2(solver_vector[0], solver_vector[1])) % 360.0
+    solver_world_elevation = math.degrees(math.atan2(solver_vector[2], math.hypot(solver_vector[0], solver_vector[1])))
     common_diagnostics = {
         "fixture_xyz_m": fixture_point.as_dict(),
         "target_xyz_m": target_point.as_dict(),
@@ -1440,6 +1530,10 @@ def resolve_venue_target(
         "direct_distance_m": _vector3_length(global_vector),
         "desired_world_azimuth_degrees": world_azimuth,
         "desired_world_elevation_degrees": world_elevation,
+        "mounting_orientation": mounting_orientation.value,
+        "solver_target_vector_m": solver_vector_value.as_dict(),
+        "solver_world_azimuth_degrees": solver_world_azimuth,
+        "solver_world_elevation_degrees": solver_world_elevation,
     }
     if v2_active:
         physical_limits = physical_tilt_limits
@@ -1447,8 +1541,8 @@ def resolve_venue_target(
         raw_min = raw_from_local_tilt_degrees(physical_limits["min_deg"], physical_limits, tilt_supports_fine)
         raw_max = raw_from_local_tilt_degrees(physical_limits["max_deg"], physical_limits, tilt_supports_fine)
         mechanical_candidates = _axis_mapping_v2_target_candidates(
-            world_azimuth,
-            world_elevation,
+            solver_world_azimuth,
+            solver_world_elevation,
             v2_model.get("pan"),
             v2_model.get("tilt"),
         )
@@ -1465,10 +1559,10 @@ def resolve_venue_target(
             boundaries = _axis_mapping_v2_physical_tilt_boundaries(
                 v2_model.get("tilt"), physical_limits, tilt_supports_fine
             )
-            desired_direction = _vector3_normalize(global_vector)
+            desired_direction = _vector3_normalize(solver_vector)
             for branch_name, pan_degrees, requested_tilt in (
-                ("FRONT_SIDE", world_azimuth, _normalize_directed_tilt_plane_angle(world_elevation)),
-                ("BACK_SIDE", (world_azimuth + 180.0) % 360.0, _normalize_directed_tilt_plane_angle(180.0 - world_elevation)),
+                ("FRONT_SIDE", solver_world_azimuth, _normalize_directed_tilt_plane_angle(solver_world_elevation)),
+                ("BACK_SIDE", (solver_world_azimuth + 180.0) % 360.0, _normalize_directed_tilt_plane_angle(180.0 - solver_world_elevation)),
             ):
                 for pan_candidate in axis_mapping_v2_inverse_pan(pan_degrees, v2_model.get("pan")).get("candidates", []):
                     for boundary in boundaries:
@@ -1522,7 +1616,7 @@ def resolve_venue_target(
         predicted_pan = axis_mapping_v2_forward(pan_output["raw"], v2_model.get("pan"))
         predicted_tilt = axis_mapping_v2_forward(tilt_output["raw"], v2_model.get("tilt"))
         requested_tilt_raw = chosen["tilt_raw"] if not clamped else _axis_mapping_v2_extrapolated_raw(
-            chosen.get("requested_tilt_plane_degrees", world_elevation), v2_model.get("tilt")
+            chosen.get("requested_tilt_plane_degrees", solver_world_elevation), v2_model.get("tilt")
         )
         requested_local_tilt = local_tilt_degrees_from_raw(requested_tilt_raw, physical_limits, tilt_supports_fine) if requested_tilt_raw is not None else None
         resolved_local_tilt = local_tilt_degrees_from_raw(tilt_output["raw"], physical_limits, tilt_supports_fine)
@@ -1537,7 +1631,7 @@ def resolve_venue_target(
             "predicted_physical_azimuth_degrees": predicted_pan,
             "predicted_physical_tilt_plane_degrees": predicted_tilt,
             "predicted_physical_elevation_degrees": math.degrees(math.asin(max(-1.0, min(1.0, axis_mapping_v2_world_direction(predicted_pan, predicted_tilt).z)))),
-            "pan_degrees": world_azimuth, "tilt_degrees": world_elevation,
+            "pan_degrees": solver_world_azimuth, "tilt_degrees": solver_world_elevation,
             "requested_local_tilt_deg": requested_local_tilt,
             "resolved_local_tilt_deg": resolved_local_tilt,
             "physical_tilt_min_deg": physical_limits["min_deg"],
@@ -1550,9 +1644,9 @@ def resolve_venue_target(
         }
     forward = _vector3_tuple(basis["forward"])
     right = _vector3_tuple(basis["right"])
-    local_right = _vector3_dot(global_vector, right)
-    local_forward = _vector3_dot(global_vector, forward)
-    local_up = _vector3_dot(global_vector, _vector3_tuple(basis["up"]))
+    local_right = _vector3_dot(solver_vector, right)
+    local_forward = _vector3_dot(solver_vector, forward)
+    local_up = _vector3_dot(solver_vector, _vector3_tuple(basis["up"]))
     pan_degrees = math.degrees(math.atan2(local_right, local_forward))
     tilt_degrees = math.degrees(math.atan2(local_up, math.hypot(local_right, local_forward)))
     pan_degrees += float(calibration.pan_correction_degrees)
@@ -1818,6 +1912,7 @@ def rendered_motion_projection(config, rendered_final_values):
             "world_direction": None,
             "fixture_position_m": None,
             "calibration_status": calibration.get("status"),
+            "mounting_orientation": calibration.get("mounting_orientation", MountingOrientation.NORMAL.value),
         }
         if not (available and has_pan and has_tilt and calibration_ready):
             result[str(slot_id)] = projection
@@ -1835,7 +1930,10 @@ def rendered_motion_projection(config, rendered_final_values):
                 projection.update({"status": "UNREACHABLE", "mapping_source": "AXIS_MAPPING_V2"})
                 result[str(slot_id)] = projection
                 continue
-            direction = axis_mapping_v2_world_direction(physical_pan, physical_tilt)
+            direction = apply_mounting_orientation_to_world_direction(
+                axis_mapping_v2_world_direction(physical_pan, physical_tilt),
+                calibration.get("mounting_orientation"),
+            )
             projection.update({
                 "status": "AVAILABLE",
                 "mapping_source": "AXIS_MAPPING_V2",
@@ -1900,13 +1998,16 @@ def rendered_motion_projection(config, rendered_final_values):
             + up[index] * math.sin(tilt_radians)
             for index in range(3)
         ))
+        mounted_direction = None if direction is None else apply_mounting_orientation_to_world_direction(
+            direction, calibration.get("mounting_orientation")
+        )
         projection.update({
             "status": "AVAILABLE",
             "commanded_pan_degrees": commanded_pan,
             "commanded_tilt_degrees": commanded_tilt,
             "physical_pan_degrees": physical_pan,
             "physical_tilt_degrees": physical_tilt,
-            "world_direction": None if direction is None else VenueVector3(*direction).as_dict(),
+            "world_direction": None if mounted_direction is None else mounted_direction.as_dict(),
         })
         projection["fixture_position_m"] = calibration.get("position_m")
         position = _point_from_mapping(raw_calibration.get("position"))
@@ -2069,6 +2170,9 @@ def _venue_calibration_for_slot(slot_id, slot_config, geometry, *, use_kinematic
         mounting_height_m=_optional_physical_dimension(raw_venue.get("mounting_height_m"), allow_zero=True),
         physical_forward=_vector3_from_mapping(raw_venue.get("physical_forward")),
         physical_up=_vector3_from_mapping(raw_venue.get("physical_up")),
+        mounting_orientation=canonical_mounting_orientation(
+            slot_config.get("mounting_orientation")
+        ) or MountingOrientation.NORMAL,
         pan_min_degrees=-(capabilities.get("pan_range_degrees") or 0) / 2.0,
         pan_max_degrees=(capabilities.get("pan_range_degrees") or 0) / 2.0,
         tilt_min_degrees=-(capabilities.get("tilt_range_degrees") or 0) / 2.0,
@@ -2159,6 +2263,9 @@ def fixture_calibration_state(slot_id, slot_config, geometry=None):
         mounting_height_m=mounting_height_m,
         physical_forward=forward,
         physical_up=up,
+        mounting_orientation=canonical_mounting_orientation(
+            slot_config.get("mounting_orientation")
+        ) or MountingOrientation.NORMAL,
         pan_min_degrees=None if pan_range is None else -pan_range / 2.0,
         pan_max_degrees=None if pan_range is None else pan_range / 2.0,
         tilt_min_degrees=None if tilt_range is None else -tilt_range / 2.0,
@@ -2186,6 +2293,7 @@ def fixture_calibration_state(slot_id, slot_config, geometry=None):
         "position_migration_status": position_migration_status,
         "position": None if position is None else position.as_dict(),
         "mounting_height_m": mounting_height_m,
+        "mounting_orientation": calibration.mounting_orientation.value,
         "physical_forward": None if forward is None else forward.as_dict(),
         "physical_up": None if up is None else up.as_dict(),
         "derived_right": None,
@@ -2223,14 +2331,20 @@ def venue_space_state(config=None):
         config.get("venue_geometry") if isinstance(config, dict) else None
     )
     fixtures = []
+    targetable_fixtures = []
     if isinstance(config, dict):
         slots = config.get("slots") if isinstance(config.get("slots"), dict) else {}
         for slot_id in config.get("slot_order") or list(slots):
             if slot_id in slots:
                 fixture_state = fixture_calibration_state(slot_id, slots[slot_id], geometry)
+                # Stage Map is a complete physical-layout consumer: fixed
+                # fixtures still have canonical position_m coordinates even
+                # though they cannot take a venue target. Never make their
+                # presentation depend on the client-side layout cache.
+                fixtures.append(fixture_state)
                 if fixture_state["status"] != "UNSUPPORTED":
-                    fixtures.append(fixture_state)
-    valid_count = sum(item["status"] == "VALID" for item in fixtures)
+                    targetable_fixtures.append(fixture_state)
+    valid_count = sum(item["status"] == "VALID" for item in targetable_fixtures)
     missing_scale = venue_geometry_missing_fields(geometry)
     vertical_layers = venue_target_vertical_layer_state(geometry)
     if missing_scale:
@@ -2284,7 +2398,7 @@ def venue_space_state(config=None):
             "status": (
                 geometry_status
                 if geometry_status != "READY"
-                else "READY" if fixtures and valid_count == len(fixtures) else VENUE_TARGET_RESOLVER_HOLD
+                else "READY" if targetable_fixtures and valid_count == len(targetable_fixtures) else VENUE_TARGET_RESOLVER_HOLD
             ),
             "missing_calibration": [
                 "backend_authoritative_fixture_venue_position",
@@ -2312,6 +2426,7 @@ DEFAULT_VIRTUALDJ_PLAYBACK_STATE_PATH = (
 SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION = 2
 SONG_ANALYZER_STRUCTURE_LEGACY_SCHEMA_VERSION = 1
 SONG_ANALYZER_ACTIVE_TRACK_SCHEMA_VERSION = 1
+SONG_ANALYZER_COMPOSER_BACKBONE_VERSION = "dynamic-composer-backbone-v1"
 SONG_ANALYZER_RICH_ANALYSIS_MODEL = "SongAnalyzerRichAnalysis"
 SONG_ANALYZER_ENERGY_SCALE = "segment-normalized-rms-z-score"
 # The source energy is a normalized-RMS z-score, not absolute loudness. Its
@@ -2583,6 +2698,10 @@ class SongAnalyzerStructureTrack:
     shadow_sections: tuple = ()
     shadow_event_evidence: tuple = ()
     rich_musical_events: object = None
+    composer_readiness_status: str = "missing"
+    composer_readiness_version: Optional[str] = None
+    composer_readiness_reason: str = "readiness_metadata_missing"
+    composer_readiness_missing_fields: tuple = ("composer_readiness",)
 
 
 @dataclass(frozen=True)
@@ -2921,6 +3040,38 @@ class SongAnalyzerStructureHandoff:
         return cls._parse_active_track(raw.get("active_track"))
 
     @classmethod
+    def _composer_readiness(cls, raw, availability, sections, segments):
+        if raw is None:
+            return "missing", None, "readiness_metadata_missing", ("composer_readiness",)
+        if not isinstance(raw, dict):
+            raise ValueError("composer_readiness is invalid")
+        status = raw.get("status")
+        version = cls._optional_text(raw.get("version"), "composer_readiness.version")
+        reason = cls._optional_text(raw.get("reason"), "composer_readiness.reason")
+        missing = raw.get("missing_fields")
+        if status not in {"ready", "missing", "stale", "invalid"} or not reason \
+                or not isinstance(missing, list) or not all(isinstance(item, str) and item.strip() for item in missing):
+            raise ValueError("composer_readiness is invalid")
+        if status != "ready":
+            return status, version, reason, tuple(missing)
+        if availability != "current" or version != SONG_ANALYZER_COMPOSER_BACKBONE_VERSION \
+                or reason != "ready" or missing or not sections:
+            raise ValueError("composer-ready track is incomplete")
+        previous_end = -math.inf
+        for section in sections:
+            if section.start_seconds < previous_end - 1e-6 or section.relative_energy is None:
+                raise ValueError("composer-ready section backbone is invalid")
+            previous_end = section.end_seconds
+        for segment in segments:
+            midpoint = segment.start_seconds + (segment.end_seconds - segment.start_seconds) / 2.0
+            coverage = sum(1 for index, section in enumerate(sections)
+                           if section.start_seconds <= midpoint < section.end_seconds
+                           or index == len(sections) - 1 and midpoint == section.end_seconds)
+            if coverage != 1:
+                raise ValueError("composer-ready section coverage is incomplete")
+        return status, version, reason, ()
+
+    @classmethod
     def _parse_document(cls, raw):
         if not isinstance(raw, dict):
             raise ValueError("document is invalid")
@@ -3176,6 +3327,8 @@ class SongAnalyzerStructureHandoff:
                             cls._boundary_temporal_context(evidence_item.get("temporal_context"), "shadow.event_evidence.temporal_context"),
                         ))
                 shadow_event_evidence = tuple(event_evidence)
+            composer_readiness = cls._composer_readiness(
+                track_raw.get("composer_readiness"), availability, shadow_sections, segments)
             rich_musical_events_raw = track_raw.get("rich_musical_events")
             if rich_musical_events_raw is not None:
                 if schema != SONG_ANALYZER_STRUCTURE_SCHEMA_VERSION:
@@ -3193,7 +3346,7 @@ class SongAnalyzerStructureHandoff:
                 availability,
                 model,
                 tuple(segments), rich_model, rich_energy_scale, rich_segments, rich_events, semantic_sections, shadow_sections,
-                shadow_event_evidence, rich_musical_events,
+                shadow_event_evidence, rich_musical_events, *composer_readiness,
             )
         return schema, tracks, cls._parse_active_track(raw.get("active_track"))
 
@@ -3410,6 +3563,10 @@ class SongAnalyzerStructureHandoff:
                 "analysis_version": None,
                 "phrase_analysis_version": None,
                 "model": None,
+                "composer_readiness": {
+                    "status": "missing", "version": None,
+                    "reason": "track_unavailable", "missing_fields": ["track"],
+                },
                 "active_track": None,
                 "rich_analysis": None,
                 "rich_musical_events": None,
@@ -3473,6 +3630,12 @@ class SongAnalyzerStructureHandoff:
                 "analysis_version": track.analysis_version,
                 "phrase_analysis_version": track.phrase_analysis_version,
                 "model": track.model,
+                "composer_readiness": {
+                    "status": track.composer_readiness_status,
+                    "version": track.composer_readiness_version,
+                    "reason": track.composer_readiness_reason,
+                    "missing_fields": list(track.composer_readiness_missing_fields),
+                },
                 "segment_count": len(track.segments),
             })
             if track.rich_segments:
@@ -3646,6 +3809,8 @@ class SongAnalyzerStructureHandoff:
 class SongAnalyzerBridgeDiagnostics:
     """Small read-only diagnostics client with a one-second bounded cache."""
 
+    MAXIMUM_MESSAGE_BYTES = 65536
+
     def __init__(self, socket_path=DEFAULT_SONG_ANALYZER_BRIDGE_SOCKET_PATH, refresh_seconds=1.0):
         self.socket_path = str(socket_path)
         self.refresh_seconds = max(0.5, float(refresh_seconds))
@@ -3665,8 +3830,7 @@ class SongAnalyzerBridgeDiagnostics:
                     client.settimeout(0.2)
                     client.connect(self.socket_path)
                     client.sendall(request.encode("utf-8"))
-                    payload = client.recv(65536)
-                response = json.loads(payload.decode("utf-8"))
+                    response = self._receive_response(client)
                 diagnostics = response.get("diagnostics") if response.get("success") else None
                 self._snapshot = {
                     "status": "connected" if isinstance(diagnostics, dict) else "unavailable",
@@ -3676,6 +3840,23 @@ class SongAnalyzerBridgeDiagnostics:
             except Exception as exc:
                 self._snapshot = {"status": "unavailable", "error": type(exc).__name__, "diagnostics": None}
             return dict(self._snapshot)
+
+    @classmethod
+    def _receive_response(cls, client):
+        payload = bytearray()
+        while len(payload) <= cls.MAXIMUM_MESSAGE_BYTES:
+            chunk = client.recv(min(8192, cls.MAXIMUM_MESSAGE_BYTES + 1 - len(payload)))
+            if not chunk:
+                raise EOFError("Bridge diagnostics response ended before its newline delimiter.")
+            payload.extend(chunk)
+            newline = payload.find(b"\n")
+            if newline >= 0:
+                if newline > cls.MAXIMUM_MESSAGE_BYTES:
+                    raise ValueError("Bridge diagnostics response is too large.")
+                if payload[newline + 1:].strip():
+                    raise ValueError("Bridge diagnostics response contains multiple messages.")
+                return json.loads(bytes(payload[:newline]).decode("utf-8"))
+        raise ValueError("Bridge diagnostics response is too large.")
 
 
 def force_reanalyze_active_song_analyzer_track():
@@ -9291,6 +9472,11 @@ def clamp_unit(value):
     return max(0.0, min(1.0, float(value)))
 
 
+def wall_wash_dimmer_energy_response(energy):
+    """Lift medium wash energy without inventing light at zero energy."""
+    return clamp_unit(energy) ** 0.25
+
+
 def clamp_rgbw(rgbw):
     return tuple(clamp_dmx(component) for component in rgbw)
 
@@ -13243,8 +13429,9 @@ class OscListener:
 
 
 class TransportController:
-    def __init__(self, osc_listener):
+    def __init__(self, osc_listener, config_path=None):
         self.osc = osc_listener
+        self.config_path = Path(config_path) if config_path is not None else TRANSPORT_CONFIG_PATH
         self.lock = osc_listener.lock
         self.decks = osc_listener.decks
         self._lock = threading.Lock()
@@ -13339,20 +13526,20 @@ class TransportController:
 
     def _load_config(self):
         defaults = self.default_config()
-        if not TRANSPORT_CONFIG_PATH.exists():
+        if not self.config_path.exists():
             return defaults
         try:
-            payload = json.loads(TRANSPORT_CONFIG_PATH.read_text(encoding="utf-8"))
+            payload = json.loads(self.config_path.read_text(encoding="utf-8"))
         except Exception:
             return defaults
         return self._clean_config(payload)
 
     def _save_config(self, config):
         cleaned = self._clean_config(config)
-        TRANSPORT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = TRANSPORT_CONFIG_PATH.with_suffix(".tmp")
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.config_path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(cleaned, indent=2), encoding="utf-8")
-        tmp_path.replace(TRANSPORT_CONFIG_PATH)
+        tmp_path.replace(self.config_path)
 
     def _recent_tap_count_locked(self, now):
         return len([tap for tap in self.tap_times if now - tap <= 2.8])
@@ -13939,11 +14126,14 @@ class DmxController:
         osc_listener,
         structure_behavior_bridge=None,
         show_intent_semantic_history_capacity=SHOW_INTENT_SEMANTIC_HISTORY_MAX_FRAMES,
+        config_path=None,
     ):
         self.osc = osc_listener
         self.structure_behavior_bridge = structure_behavior_bridge
+        self.config_path = Path(config_path) if config_path is not None else CONFIG_PATH
+        self.config_persistence_blocked_reason = None
         self.debug_log = TRIGGER_LOG
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.dmx_send_lock = threading.Lock()
         self.dmx = None
         self.render_thread = None
@@ -13957,6 +14147,18 @@ class DmxController:
         # Renderer health is deliberately independent from optional DMX dispatch.
         # `error` remains the operator-visible transport/runtime diagnostic.
         self.renderer_error = None
+        self.renderer_output_state = "STARTING"
+        self.consecutive_renderer_failures = 0
+        self.renderer_failure_events = 0
+        self.safe_frame_sequence = 0
+        self.last_safe_output_at = None
+        self.last_safe_output_dispatch_at = None
+        self.last_renderer_recovery_at = None
+        self.renderer_safe_output = {
+            "active": False,
+            "movement_policy": None,
+            "profile_count": 0,
+        }
         self.dmx_dispatch_failures = 0
         self.last_sent = None
         self.render_frame_sequence = 0
@@ -14031,6 +14233,7 @@ class DmxController:
         self.last_playback_generation = None
         self.last_structure_behavior_source = None
         self._last_dynamic_composer_handoff_effect = None
+        self._dynamic_composer_handoff_hold = None
         self.playback_runtime_resets = 0
         self.active_virtualdj_beat_pulse = None
         self.active_virtualdj_beat_pulse_preview = None
@@ -14093,7 +14296,21 @@ class DmxController:
             "lifecycle_reset": False,
             "lifecycle_reason": None,
         }
+        # Runtime always receives exactly one flat active physical document.
+        # The collection below is storage/domain state only; it never creates a
+        # second solver, Preview mapping or DMX route.
+        self._venues = {}
+        self._venue_order = []
+        self._active_venue_id = LEGACY_CURRENT_VENUE_ID
+        self._venue_storage_enabled = False
+        # A connected mapping change must never revive output on new addresses
+        # until an operator explicitly acknowledges the new physical setup.
+        self._venue_switch_requires_rearm = False
         self.config = self._load_config()
+        # Safety fallback input is updated only after a complete successful
+        # render.  It never aliases partially calculated normal-render state.
+        self.last_valid_render_config = copy.deepcopy(self.config)
+        self.last_valid_final_values = {}
         self.virtualdj_beat_pulse_scheduler = VirtualDjBeatPulseScheduler(
             self._dispatch_virtualdj_beat_pulse,
             self._cancel_virtualdj_beat_pulse,
@@ -14121,6 +14338,260 @@ class DmxController:
                 "par": DmxController.default_slot_config("par"),
             },
         }
+
+    @staticmethod
+    def _venue_name(value):
+        name = str(value or "").strip()
+        if not name or len(name) > 80:
+            raise ValueError("venue name must contain 1 to 80 characters")
+        return name
+
+    @staticmethod
+    def _venue_id(value):
+        venue_id = str(value or "").strip()
+        if not venue_id or len(venue_id) > 96 or any(
+            not (character.isascii() and (character.isalnum() or character in "-_."))
+            for character in venue_id
+        ):
+            raise ValueError("venue id is invalid")
+        return venue_id
+
+    def _physical_config_from_full_config(self, config):
+        cleaned = self._clean_full_config(config)
+        return {
+            key: copy.deepcopy(cleaned[key])
+            for key in VENUE_PHYSICAL_CONFIG_KEYS
+        }
+
+    def _venue_from_physical_document(self, venue_id, name, physical):
+        venue_id = self._venue_id(venue_id)
+        name = self._venue_name(name)
+        if not isinstance(physical, dict):
+            raise ValueError(f"venue {venue_id} is invalid")
+        self._validate_physical_config_document(physical)
+        cleaned = self._physical_config_from_full_config(physical)
+        return Venue(
+            venue_id, name, cleaned["active_slot"], cleaned["venue_geometry"],
+            cleaned["slot_order"], cleaned["slots"],
+        )
+
+    def _empty_venue(self, venue_id, name):
+        return self._venue_from_physical_document(venue_id, name, {
+            "active_slot": "",
+            "venue_geometry": default_venue_geometry_config(),
+            "slot_order": [],
+            "slots": {},
+        })
+
+    def _active_venue_locked(self):
+        venue = self._venues.get(self._active_venue_id)
+        if venue is None:
+            raise RuntimeError("active venue is missing")
+        return venue
+
+    def _sync_active_venue_from_config_locked(self, config=None):
+        if not self._venues:
+            return
+        source = self.config if config is None else config
+        current = self._active_venue_locked()
+        updated = self._venue_from_physical_document(
+            current.id, current.name, self._physical_config_from_full_config(source)
+        )
+        self._venues[updated.id] = updated
+
+    def _runtime_config_for_venue_locked(self, venue, global_config=None):
+        source = self.config if global_config is None else global_config
+        result = {
+            key: copy.deepcopy(value)
+            for key, value in dict(source).items()
+            if key not in VENUE_PHYSICAL_CONFIG_KEYS
+            and key not in {"venue_schema_version", "active_venue_id", "venues", "venue_switch_requires_rearm"}
+        }
+        result.update(venue.physical_document())
+        return self._clean_full_config(result)
+
+    def _venue_state_locked(self):
+        active = self._active_venue_locked()
+        return {
+            "schema_version": VENUE_STORAGE_SCHEMA_VERSION,
+            "active_venue_id": active.id,
+            "active_venue_name": active.name,
+            "switch_requires_rearm": self._venue_switch_requires_rearm,
+            "storage_persisted": self._venue_storage_enabled,
+            "venues": [
+                {
+                    "id": venue.id,
+                    "name": venue.name,
+                    "fixture_count": len(venue.slot_order),
+                    "active": venue.id == active.id,
+                }
+                for venue in (self._venues[venue_id] for venue_id in self._venue_order)
+            ],
+        }
+
+    def _new_venue_id_locked(self):
+        while True:
+            venue_id = "venue-" + secrets.token_hex(8)
+            if venue_id not in self._venues:
+                return venue_id
+
+    def _enable_venue_storage_locked(self):
+        self._sync_active_venue_from_config_locked()
+        self._venue_storage_enabled = True
+
+    def _release_venue_switch_transients_locked(self):
+        self.manual_smoke_active = False
+        self.active_one_shot_cue = None
+        self.movement_lab_authority = None
+        self.active_virtualdj_beat_pulse = None
+        self.active_virtualdj_beat_pulse_preview = None
+        self._release_venue_target_test_locked("venue_switched")
+        self.motion_states.clear()
+        self.slot_rhythm_states.clear()
+        self.last_slot_trigger_signatures.clear()
+        self.last_slot_rhythm_signatures.clear()
+        self.last_slot_strobe_outputs.clear()
+        self.last_auto_show_signature = None
+        self.outro_behavior_state = None
+
+    def _active_render_config_locked(self, config=None):
+        resolved = self._clean_full_config(dict(self.config if config is None else config))
+        if self._venue_switch_requires_rearm:
+            resolved["blackout_active"] = True
+        return resolved
+
+    def create_venue(self, name):
+        with self.lock:
+            if self.config_persistence_blocked_reason is not None:
+                raise ValueError("venue persistence is unavailable while configuration recovery is required")
+            self._enable_venue_storage_locked()
+            venue = self._empty_venue(self._new_venue_id_locked(), self._venue_name(name))
+            self._venues[venue.id] = venue
+            self._venue_order.append(venue.id)
+            self._write_config(self.config)
+            self.debug_log.log("VENUE_CREATE", venue_id=venue.id, name=venue.name)
+            return self._venue_state_locked()
+
+    def duplicate_venue(self, source_venue_id=None, name=None):
+        with self.lock:
+            if self.config_persistence_blocked_reason is not None:
+                raise ValueError("venue persistence is unavailable while configuration recovery is required")
+            self._enable_venue_storage_locked()
+            source_id = self._active_venue_id if source_venue_id is None else self._venue_id(source_venue_id)
+            source = self._venues.get(source_id)
+            if source is None:
+                raise ValueError("source venue does not exist")
+            venue = self._venue_from_physical_document(
+                self._new_venue_id_locked(),
+                self._venue_name(name or f"{source.name} Copy"),
+                source.physical_document(),
+            )
+            self._venues[venue.id] = venue
+            self._venue_order.append(venue.id)
+            self._write_config(self.config)
+            self.debug_log.log("VENUE_DUPLICATE", source_id=source.id, venue_id=venue.id, name=venue.name)
+            return self._venue_state_locked()
+
+    def rename_venue(self, venue_id, name):
+        with self.lock:
+            if self.config_persistence_blocked_reason is not None:
+                raise ValueError("venue persistence is unavailable while configuration recovery is required")
+            self._enable_venue_storage_locked()
+            venue_id = self._venue_id(venue_id)
+            previous = self._venues.get(venue_id)
+            if previous is None:
+                raise ValueError("venue does not exist")
+            self._venues[venue_id] = self._venue_from_physical_document(
+                venue_id, self._venue_name(name), previous.physical_document()
+            )
+            self._write_config(self.config)
+            self.debug_log.log("VENUE_RENAME", venue_id=venue_id, name=name)
+            return self._venue_state_locked()
+
+    def delete_venue(self, venue_id):
+        with self.lock:
+            if self.config_persistence_blocked_reason is not None:
+                raise ValueError("venue persistence is unavailable while configuration recovery is required")
+            self._enable_venue_storage_locked()
+            venue_id = self._venue_id(venue_id)
+            if venue_id not in self._venues:
+                raise ValueError("venue does not exist")
+            if len(self._venue_order) <= 1:
+                raise ValueError("the final venue cannot be deleted")
+            if venue_id == self._active_venue_id:
+                raise ValueError("switch to another venue before deleting the active venue")
+            del self._venues[venue_id]
+            self._venue_order.remove(venue_id)
+            self._write_config(self.config)
+            self.debug_log.log("VENUE_DELETE", venue_id=venue_id)
+            return self._venue_state_locked()
+
+    def switch_venue(self, venue_id):
+        stop_pulses = False
+        with self.lock:
+            if self.config_persistence_blocked_reason is not None:
+                raise ValueError("venue persistence is unavailable while configuration recovery is required")
+            self._enable_venue_storage_locked()
+            venue_id = self._venue_id(venue_id)
+            target = self._venues.get(venue_id)
+            if target is None:
+                raise ValueError("venue does not exist")
+            # Validate before any current mapping or transient state is touched.
+            self._validate_physical_config_document(target.physical_document())
+            if venue_id == self._active_venue_id:
+                return self._venue_state_locked()
+
+            old_config = self._clean_full_config(dict(self.config))
+            old_active_id = self._active_venue_id
+            old_rearm = self._venue_switch_requires_rearm
+            was_connected = bool(self.connected and self.running and self.dmx is not None)
+            if was_connected:
+                # Safe output is authored with the old fixture profile/address map.
+                safe_values, _safe_state = self._renderer_failure_safe_values(old_config)
+                try:
+                    self._send_dmx_frame(self.dmx, safe_values)
+                    self.last_sent = time.time()
+                except Exception as exc:
+                    self.error = str(exc)
+                    self.dmx_dispatch_failures += 1
+                    raise ValueError("old venue safe output could not be dispatched; venue remains unchanged") from exc
+
+            self._release_venue_switch_transients_locked()
+            stop_pulses = True
+            self._active_venue_id = venue_id
+            self._venue_switch_requires_rearm = was_connected
+            self.config = self._runtime_config_for_venue_locked(target, old_config)
+            self.current_values = {}
+            self.current_final_values = {}
+            self.current_slot_previews = {}
+            self.current_rendered_slot_intensities = {}
+            self.last_valid_render_config = copy.deepcopy(self.config)
+            try:
+                self._write_config(self.config)
+            except Exception:
+                self._active_venue_id = old_active_id
+                self._venue_switch_requires_rearm = old_rearm
+                self.config = old_config
+                raise
+            self.debug_log.log(
+                "VENUE_SWITCH", old_venue_id=old_active_id, venue_id=venue_id,
+                requires_rearm=self._venue_switch_requires_rearm,
+            )
+            result = self._venue_state_locked()
+        if stop_pulses:
+            self.virtualdj_beat_pulse_scheduler.stop("venue_switched")
+            self.virtualdj_beat_pulse_preview_scheduler.stop("venue_switched")
+        return result
+
+    def rearm_active_venue(self):
+        with self.lock:
+            if not self._venue_switch_requires_rearm:
+                return self._venue_state_locked()
+            self._validate_physical_config_document(self._active_venue_locked().physical_document())
+            self._venue_switch_requires_rearm = False
+            self._write_config(self.config)
+            self.debug_log.log("VENUE_REARM", venue_id=self._active_venue_id)
+            return self._venue_state_locked()
 
     @staticmethod
     def default_auto_show_config():
@@ -14167,6 +14638,8 @@ class DmxController:
             "color_source": "manual",
             "osc_strobe_enabled": True,
             "use_fine_pan_tilt": True,
+            "mounting_orientation": MountingOrientation.NORMAL.value,
+            "wall_wash_zones_mirrored": False,
             "pan_invert": False,
             "tilt_invert": False,
             "pan_offset_deg": 0,
@@ -14249,7 +14722,7 @@ class DmxController:
         with self.lock:
             if not self.connected or not self.running or self.dmx is None:
                 raise ValueError("Verbind eerst de bestaande DMX-output voordat je de Beat Pulse Test start.")
-            config = self._clean_full_config(dict(self.config))
+            config = self._active_render_config_locked()
             if config["blackout_active"]:
                 raise ValueError("Schakel blackout uit voordat je de Beat Pulse Test start.")
             self._virtualdj_pulse_channels_locked(config, slot_id)
@@ -14293,7 +14766,7 @@ class DmxController:
         )
 
         with self.lock:
-            config = self._clean_full_config(dict(self.config))
+            config = self._active_render_config_locked()
             self._virtualdj_pulse_channels_locked(config, slot_id)
 
         playback_state = self.osc.developer_playback_state()
@@ -16410,6 +16883,9 @@ class DmxController:
                 mounting_height_m=_optional_physical_dimension((draft_slot.get("venue_calibration") or {}).get("mounting_height_m"), allow_zero=True),
                 physical_forward=_vector3_from_mapping((draft_slot.get("venue_calibration") or {}).get("physical_forward")),
                 physical_up=_vector3_from_mapping((draft_slot.get("venue_calibration") or {}).get("physical_up")),
+                mounting_orientation=canonical_mounting_orientation(
+                    draft_slot.get("mounting_orientation")
+                ) or MountingOrientation.NORMAL,
                 pan_min_degrees=-(diagnostic["capabilities"].get("pan_range_degrees") or 0) / 2.0,
                 pan_max_degrees=(diagnostic["capabilities"].get("pan_range_degrees") or 0) / 2.0,
                 tilt_min_degrees=-(diagnostic["capabilities"].get("tilt_range_degrees") or 0) / 2.0,
@@ -16446,7 +16922,7 @@ class DmxController:
                 self._release_venue_target_test_locked("configuration_changed")
             self.config = self._merge_payload(payload)
             now = time.time()
-            config = self._clean_full_config(dict(self.config))
+            config = self._active_render_config_locked()
             if config.get("blackout_active") or not self._manual_smoke_slots_locked(config):
                 self.manual_smoke_active = False
             osc = self.osc.snapshot_for_render()
@@ -16623,7 +17099,7 @@ class DmxController:
         developer_playback_state = self.osc.developer_playback_state()
         self._observe_virtualdj_beat_pulse_preview_test(developer_playback_state)
         with self.lock:
-            config = self._clean_full_config(dict(self.config))
+            config = self._active_render_config_locked()
             osc = self.osc.snapshot_for_render()
             auto_show = dict(self.current_auto_show or {})
             preview_auto_show = dict(self.current_preview_auto_show or {})
@@ -16652,6 +17128,14 @@ class DmxController:
                     "active": self.render_active,
                     "healthy": bool(self.render_active and self.renderer_error is None),
                     "error": self.renderer_error,
+                    "output_state": self.renderer_output_state,
+                    "consecutive_failures": self.consecutive_renderer_failures,
+                    "failure_events": self.renderer_failure_events,
+                    "safe_frame_sequence": self.safe_frame_sequence,
+                    "safe_output": dict(self.renderer_safe_output),
+                    "last_safe_output_at": self.last_safe_output_at,
+                    "last_safe_output_dispatch_at": self.last_safe_output_dispatch_at,
+                    "last_recovery_at": self.last_renderer_recovery_at,
                     "render_frame_sequence": self.render_frame_sequence,
                     "last_rendered": self.last_rendered,
                 },
@@ -16661,6 +17145,7 @@ class DmxController:
                 "last_rendered": self.last_rendered,
                 "active_slot": config["active_slot"],
                 "blackout_active": config["blackout_active"],
+                "venue": self._venue_state_locked(),
                 "master_dimmer": config["master_dimmer"],
                 "manual_smoke": self._manual_smoke_state_locked(config),
                 "production_show_mode": config["production_show_mode"],
@@ -16728,7 +17213,7 @@ class DmxController:
         selected_mode = mode or fixture_preset(fixture_id)["mode"]
         find_mode(fixture, selected_mode)
         with self.lock:
-            config = self._clean_full_config(dict(self.config))
+            config = self._active_render_config_locked()
             slot_id = self._next_slot_id(config, fixture_id)
             label = self._next_slot_label(config, fixture_preset(fixture_id)["label_base"])
             address = self._next_available_address(config, fixture, selected_mode)
@@ -16785,7 +17270,7 @@ class DmxController:
         if not slot_id:
             raise ValueError("Geen fixture geselecteerd om te verwijderen")
         with self.lock:
-            config = self._clean_full_config(dict(self.config))
+            config = self._active_render_config_locked()
             if slot_id not in config["slots"]:
                 raise ValueError(f"Fixture '{slot_id}' bestaat niet")
             if len(config["slot_order"]) <= 1:
@@ -16847,8 +17332,10 @@ class DmxController:
     def _merge_payload(self, payload):
         config = self._clean_full_config(dict(self.config))
         active_slot = str(payload.get("active_slot") or config["active_slot"])
-        if active_slot not in config["slots"]:
+        if config["slot_order"] and active_slot not in config["slots"]:
             active_slot = config["slot_order"][0]
+        elif not config["slot_order"]:
+            active_slot = ""
         config["active_slot"] = active_slot
 
         if "blackout_active" in payload:
@@ -16881,6 +17368,8 @@ class DmxController:
         slot_id = payload.get("slot_id")
         slot_payload = payload.get("slot")
         if slot_id and slot_id in config["slots"] and isinstance(slot_payload, dict):
+            if "mounting_orientation" in slot_payload and canonical_mounting_orientation(slot_payload["mounting_orientation"]) is None:
+                raise ValueError("mounting_orientation must be NORMAL or ROTATED_180")
             if isinstance(slot_payload.get("venue_calibration"), dict):
                 if "physical_tilt_limits" in slot_payload["venue_calibration"] and _validated_physical_tilt_limits(slot_payload["venue_calibration"].get("physical_tilt_limits")) is None:
                     raise ValueError("physical_tilt_limits require finite min < center < max")
@@ -16897,6 +17386,8 @@ class DmxController:
         if "slots" in payload and isinstance(payload["slots"], dict):
             for current_slot_id, current_payload in payload["slots"].items():
                 if current_slot_id in config["slots"] and isinstance(current_payload, dict):
+                    if "mounting_orientation" in current_payload and canonical_mounting_orientation(current_payload["mounting_orientation"]) is None:
+                        raise ValueError("mounting_orientation must be NORMAL or ROTATED_180")
                     if isinstance(current_payload.get("venue_calibration"), dict):
                         if "physical_tilt_limits" in current_payload["venue_calibration"] and _validated_physical_tilt_limits(current_payload["venue_calibration"].get("physical_tilt_limits")) is None:
                             raise ValueError("physical_tilt_limits require finite min < center < max")
@@ -16916,20 +17407,66 @@ class DmxController:
 
     def _load_config(self):
         defaults = self.default_config()
-        if not CONFIG_PATH.exists():
+        if not self.config_path.exists():
+            venue = self._venue_from_physical_document(
+                LEGACY_CURRENT_VENUE_ID, "Current Venue", defaults
+            )
+            self._venues = {venue.id: venue}
+            self._venue_order = [venue.id]
             return defaults
         try:
-            payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            payload = json.loads(self.config_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            print(f"{APP_NAME}: config load failed, using defaults: {exc}")
+            self.config_persistence_blocked_reason = "CONFIG_LOAD_FAILED"
+            print(f"{APP_NAME}: config load failed; preserving existing file and blocking persistence: {exc}")
             return defaults
         try:
-            cleaned = self._clean_full_config(payload)
+            self._validate_config_document(payload)
+            if payload.get("venue_schema_version") == VENUE_STORAGE_SCHEMA_VERSION:
+                raw_venues = payload.get("venues")
+                active_venue_id = payload.get("active_venue_id")
+                if not isinstance(raw_venues, list) or not raw_venues:
+                    raise ValueError("venue document requires one or more venues")
+                venues = {}
+                order = []
+                for raw_venue in raw_venues:
+                    if not isinstance(raw_venue, dict):
+                        raise ValueError("venue entry is invalid")
+                    venue = self._venue_from_physical_document(
+                        raw_venue.get("id"), raw_venue.get("name"), raw_venue
+                    )
+                    if venue.id in venues:
+                        raise ValueError("venue id is duplicated")
+                    venues[venue.id] = venue
+                    order.append(venue.id)
+                active_venue_id = self._venue_id(active_venue_id)
+                if active_venue_id not in venues:
+                    raise ValueError("active venue does not exist")
+                self._venues = venues
+                self._venue_order = order
+                self._active_venue_id = active_venue_id
+                self._venue_storage_enabled = True
+                self._venue_switch_requires_rearm = bool(payload.get("venue_switch_requires_rearm", False))
+                cleaned = self._runtime_config_for_venue_locked(venues[active_venue_id], payload)
+            else:
+                cleaned = self._clean_full_config(payload)
+                venue = self._venue_from_physical_document(
+                    LEGACY_CURRENT_VENUE_ID, "Current Venue", cleaned
+                )
+                self._venues = {venue.id: venue}
+                self._venue_order = [venue.id]
+                self._active_venue_id = venue.id
+                self._venue_storage_enabled = False
+                self._venue_switch_requires_rearm = False
             # A successful legacy freeze is a one-time migration, not a
             # presentation-time conversion. Persist it immediately so a later
             # geometry edit or restart cannot reinterpret the old normalized
             # coordinates.
-            raw_slots = payload.get("slots") if isinstance(payload, dict) else {}
+            raw_slots = (
+                payload.get("slots")
+                if isinstance(payload, dict) and isinstance(payload.get("slots"), dict)
+                else {}
+            )
             froze_legacy_position = any(
                 isinstance(cleaned_slot.get("venue_calibration"), dict)
                 and cleaned_slot["venue_calibration"].get("position_m") is not None
@@ -16940,14 +17477,119 @@ class DmxController:
                 )
                 for slot_id, cleaned_slot in cleaned.get("slots", {}).items()
             )
-            if froze_legacy_position:
+            if froze_legacy_position and not self._venue_storage_enabled:
                 self._write_config(cleaned)
             return cleaned
         except Exception as exc:
-            print(f"{APP_NAME}: config invalid, using defaults: {exc}")
+            self.config_persistence_blocked_reason = "CONFIG_INVALID"
+            print(f"{APP_NAME}: config invalid; preserving existing file and blocking persistence: {exc}")
             return defaults
 
+    @staticmethod
+    def _validate_config_document(payload):
+        if not isinstance(payload, dict):
+            raise ValueError("config root must be an object")
+        if payload.get("venue_schema_version") == VENUE_STORAGE_SCHEMA_VERSION:
+            raw_venues = payload.get("venues")
+            if not isinstance(raw_venues, list) or not raw_venues:
+                raise ValueError("venue document requires one or more venues")
+            if not isinstance(payload.get("active_venue_id"), str):
+                raise ValueError("venue document requires an active venue")
+            seen = set()
+            for venue in raw_venues:
+                if not isinstance(venue, dict):
+                    raise ValueError("venue entry is invalid")
+                venue_id = venue.get("id")
+                if not isinstance(venue_id, str) or venue_id in seen:
+                    raise ValueError("venue id is invalid or duplicated")
+                seen.add(venue_id)
+                if not isinstance(venue.get("name"), str):
+                    raise ValueError("venue name is invalid")
+                DmxController._validate_physical_config_document(venue)
+            return
+        DmxController._validate_physical_config_document(payload)
+
+    @staticmethod
+    def _validate_physical_config_document(payload):
+        if not isinstance(payload, dict):
+            raise ValueError("physical config root must be an object")
+        if not isinstance(payload.get("slots"), dict):
+            raise ValueError("config slots must be an object")
+        if not isinstance(payload.get("slot_order"), list):
+            raise ValueError("config slot_order must be an array")
+        if not all(isinstance(slot_id, str) for slot_id in payload["slot_order"]):
+            raise ValueError("config slot_order entries must be strings")
+        if not all(isinstance(slot, dict) for slot in payload["slots"].values()):
+            raise ValueError("config slot entries must be objects")
+        slot_order = payload["slot_order"]
+        slots = payload["slots"]
+        if len(slot_order) != len(set(slot_order)) or set(slot_order) != set(slots):
+            raise ValueError("config slot_order must contain every fixture exactly once")
+        if slots and payload.get("active_slot") not in slots:
+            raise ValueError("config active_slot must identify an existing fixture")
+
+        for slot_id, slot in slots.items():
+            if "mounting_orientation" in slot and canonical_mounting_orientation(slot["mounting_orientation"]) is None:
+                raise ValueError(f"fixture {slot_id} has invalid mounting_orientation")
+            fixture_id = slot.get("fixture")
+            if not isinstance(fixture_id, str):
+                raise ValueError(f"fixture {slot_id} has no valid fixture identity")
+            fixture = find_fixture(FIXTURE_LIBRARY, fixture_id)
+            mode_name = slot.get("mode")
+            if not isinstance(mode_name, str):
+                raise ValueError(f"fixture {slot_id} has no valid mode identity")
+            find_mode(fixture, mode_name)
+            address = slot.get("address")
+            if (
+                isinstance(address, bool)
+                or not isinstance(address, (int, float))
+                or not float(address).is_integer()
+                or not 1 <= int(address) <= 512
+            ):
+                raise ValueError(f"fixture {slot_id} has an invalid DMX address")
+
+            calibration = slot.get("venue_calibration")
+            if calibration is not None and not isinstance(calibration, dict):
+                raise ValueError(f"fixture {slot_id} has invalid venue calibration")
+            if isinstance(calibration, dict):
+                if calibration.get("position_m") is not None and _physical_point_from_mapping(calibration["position_m"]) is None:
+                    raise ValueError(f"fixture {slot_id} has invalid position_m")
+                position = calibration.get("position")
+                decoded_position = _point_from_mapping(position) if position is not None else None
+                if position is not None and (
+                    decoded_position is None
+                    or not -1.0 <= decoded_position.x <= 1.0
+                    or not -1.0 <= decoded_position.y <= 1.0
+                ):
+                    raise ValueError(f"fixture {slot_id} has invalid legacy position")
+                for vector_key in ("physical_forward", "physical_up"):
+                    if calibration.get(vector_key) is not None and _vector3_from_mapping(calibration[vector_key]) is None:
+                        raise ValueError(f"fixture {slot_id} has invalid {vector_key}")
+                mounting_height = calibration.get("mounting_height_m")
+                if mounting_height is not None and _optional_physical_dimension(mounting_height, allow_zero=True) is None:
+                    raise ValueError(f"fixture {slot_id} has invalid mounting_height_m")
+                tilt_limits = calibration.get("physical_tilt_limits")
+                if tilt_limits is not None and _validated_physical_tilt_limits(tilt_limits) is None:
+                    raise ValueError(f"fixture {slot_id} has invalid physical_tilt_limits")
+                for correction_key in ("pan_correction_degrees", "tilt_correction_degrees"):
+                    correction = calibration.get(correction_key)
+                    if correction is None:
+                        continue
+                    try:
+                        correction = float(correction)
+                    except (TypeError, ValueError):
+                        raise ValueError(f"fixture {slot_id} has invalid {correction_key}")
+                    if not math.isfinite(correction) or not -15.0 <= correction <= 15.0:
+                        raise ValueError(f"fixture {slot_id} has invalid {correction_key}")
+            if slot.get("kinematic_calibration") is not None and not isinstance(slot["kinematic_calibration"], dict):
+                raise ValueError(f"fixture {slot_id} has invalid kinematic calibration")
+            if slot.get("axis_mapping_v2") is not None and not isinstance(slot["axis_mapping_v2"], dict):
+                raise ValueError(f"fixture {slot_id} has invalid axis mapping")
+
     def _schedule_save_locked(self):
+        if self.config_persistence_blocked_reason is not None:
+            return
+        self._sync_active_venue_from_config_locked()
         if self.save_timer:
             self.save_timer.cancel()
         timer = threading.Timer(0.35, self._save_config_worker)
@@ -16962,22 +17604,59 @@ class DmxController:
         self._write_config(config)
 
     def _write_config(self, config):
-        persistable = self._persistable_config(config)
-        tmp_path = CONFIG_PATH.with_suffix(".tmp")
+        if self.config_persistence_blocked_reason is not None:
+            print(
+                f"{APP_NAME}: config persistence blocked ({self.config_persistence_blocked_reason}); "
+                f"preserving {self.config_path}"
+            )
+            return False
+        with self.lock:
+            persistable = self._persistable_config(config)
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.config_path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(persistable, indent=2), encoding="utf-8")
-        tmp_path.replace(CONFIG_PATH)
+        tmp_path.replace(self.config_path)
+        return True
 
     def _persistable_config(self, config):
         persistable = self._clean_full_config(dict(config))
         persistable["blackout_active"] = False
-        return persistable
+        if not self._venue_storage_enabled:
+            return persistable
+        self._sync_active_venue_from_config_locked(persistable)
+        document = {
+            key: copy.deepcopy(value)
+            for key, value in persistable.items()
+            if key not in VENUE_PHYSICAL_CONFIG_KEYS
+            and key not in {"venue_schema_version", "active_venue_id", "venues", "venue_switch_requires_rearm"}
+        }
+        document.update({
+            "venue_schema_version": VENUE_STORAGE_SCHEMA_VERSION,
+            "active_venue_id": self._active_venue_id,
+            "venues": [self._venues[venue_id].storage_document() for venue_id in self._venue_order],
+            "venue_switch_requires_rearm": bool(self._venue_switch_requires_rearm),
+        })
+        return document
 
     def _clean_slot_config(self, slot_id, config):
+        has_explicit_mounting_orientation = "mounting_orientation" in (config or {})
         fixture_id = (config or {}).get("fixture")
         if not any(fixture["id"] == fixture_id for fixture in FIXTURE_LIBRARY):
             fixture_id = None
         defaults = self.default_slot_config(slot_id, fixture_id=fixture_id)
         cleaned = {**defaults, **config}
+        cleaned["wall_wash_zones_mirrored"] = bool(
+            cleaned.get("wall_wash_zones_mirrored", False)
+        )
+        if has_explicit_mounting_orientation:
+            orientation = canonical_mounting_orientation(cleaned.get("mounting_orientation"))
+            cleaned["mounting_orientation"] = (
+                orientation or MountingOrientation.NORMAL
+            ).value
+        else:
+            # A legacy fixture remains semantically NORMAL without causing a
+            # config rewrite solely because this newly introduced key is absent.
+            cleaned.pop("mounting_orientation", None)
         color = config.get("color") or {}
         cleaned["color"] = {
             "red": clamp_dmx(color.get("red", 255)),
@@ -17250,13 +17929,13 @@ class DmxController:
 
     def _clean_full_config(self, config):
         defaults = self.default_config()
-        raw_slots = config.get("slots") if isinstance(config.get("slots"), dict) else {}
-        if not raw_slots:
-            raw_slots = dict(defaults["slots"])
+        config = config if isinstance(config, dict) else {}
+        has_explicit_slots = isinstance(config.get("slots"), dict)
+        raw_slots = dict(config["slots"]) if has_explicit_slots else dict(defaults["slots"])
         raw_order = config.get("slot_order") if isinstance(config.get("slot_order"), list) else []
-        if not raw_order:
+        if not raw_order and raw_slots:
             raw_order = [slot_id for slot_id in defaults["slot_order"] if slot_id in raw_slots]
-        cleaned = {
+        cleaned = {**config, **{
             "active_slot": str(config.get("active_slot", defaults["active_slot"])),
             "blackout_active": bool(config.get("blackout_active", False)),
             "master_dimmer": 1.0,
@@ -17268,7 +17947,7 @@ class DmxController:
             "auto_show": self._clean_auto_show_config(config.get("auto_show")),
             "slot_order": [],
             "slots": {},
-        }
+        }}
         try:
             cleaned["master_dimmer"] = clamp_unit(
                 float(config.get("master_dimmer", defaults["master_dimmer"]))
@@ -17295,12 +17974,14 @@ class DmxController:
                 continue
             cleaned["slots"][slot_id] = self._clean_slot_config(slot_id, slot_config)
             cleaned["slot_order"].append(slot_id)
-        if not cleaned["slot_order"]:
+        if not cleaned["slot_order"] and not has_explicit_slots:
             for slot_id in defaults["slot_order"]:
                 cleaned["slots"][slot_id] = self._clean_slot_config(slot_id, defaults["slots"][slot_id])
                 cleaned["slot_order"].append(slot_id)
-        if cleaned["active_slot"] not in cleaned["slots"]:
+        if cleaned["slot_order"] and cleaned["active_slot"] not in cleaned["slots"]:
             cleaned["active_slot"] = cleaned["slot_order"][0]
+        elif not cleaned["slot_order"]:
+            cleaned["active_slot"] = ""
         # Freeze every valid pre-metric normalized fixture position exactly
         # once.  The original normalized evidence remains for auditability,
         # but subsequent venue geometry edits can only move targets, never a
@@ -17346,7 +18027,7 @@ class DmxController:
         ]
 
     def _manual_smoke_state_locked(self, config=None):
-        config = config or self._clean_full_config(dict(self.config))
+        config = config or self._active_render_config_locked()
         slots = self._manual_smoke_slots_locked(config)
         blackout = bool(config.get("blackout_active"))
         active = bool(self.manual_smoke_active and slots and not blackout)
@@ -17380,7 +18061,7 @@ class DmxController:
 
     def start_manual_smoke_hold(self):
         with self.lock:
-            config = self._clean_full_config(dict(self.config))
+            config = self._active_render_config_locked()
             state = self._manual_smoke_state_locked(config)
             if config.get("blackout_active"):
                 raise ValueError("blackout is active")
@@ -18987,6 +19668,119 @@ class DmxController:
             advance_motion=advance_motion,
         )
 
+    def _renderer_failure_safe_values(self, config):
+        """Build a safe physical frame without re-entering the show renderer.
+
+        The existing fixture mapper remains the sole profile/channel
+        interpreter. Optical, fog, strobe, program, reset and macro inputs are
+        neutralized. Movement bytes are copied from the last completely
+        rendered final frame; before the first valid frame only the already
+        configured raw position is used, never an invented zero target.
+        """
+        safe_values = {}
+        last_valid = self.last_valid_final_values
+        held_from_last_valid = False
+        configured_position_fallback = False
+        profile_count = 0
+
+        for slot_id in config.get("slot_order", []):
+            slot = (config.get("slots") or {}).get(slot_id)
+            if not isinstance(slot, dict) or not slot.get("enabled"):
+                continue
+            fixture = find_fixture(FIXTURE_LIBRARY, slot["fixture"])
+            mode = find_mode(fixture, slot["mode"])
+            address = int(slot["address"])
+            profile_count += 1
+            slot_values = values_for_fixture(
+                mode,
+                address,
+                (0, 0, 0, 0),
+                0,
+                clamp_dmx(slot.get("pan", 127)),
+                clamp_dmx(slot.get("tilt", 127)),
+                pan_fine=0,
+                tilt_fine=0,
+                strobe=0,
+                speed=0,
+                program=0,
+                color_program=0,
+                color_speed=0,
+                auto_mode=0,
+                pan_tilt_speed=clamp_dmx(slot.get("pan_tilt_speed", 0)),
+                reset=0,
+            )
+            for channel in mode.get("channels", []):
+                channel_type = str(channel.get("type") or "")
+                if channel_type not in {
+                    "pan", "pan_fine", "tilt", "tilt_fine", "pan_tilt_speed",
+                }:
+                    continue
+                absolute = address + int(channel["offset"]) - 1
+                if absolute in last_valid:
+                    slot_values[absolute] = clamp_dmx(last_valid[absolute])
+                    held_from_last_valid = True
+                else:
+                    configured_position_fallback = True
+            safe_values.update(slot_values)
+
+        if held_from_last_valid:
+            movement_policy = "HOLD_LAST_VALID_FINAL_BYTES"
+            if configured_position_fallback:
+                movement_policy += "_WITH_CONFIGURED_FALLBACK"
+        else:
+            movement_policy = "CONFIGURED_POSITION_FALLBACK"
+        return safe_values, {
+            "active": True,
+            "movement_policy": movement_policy,
+            "profile_count": profile_count,
+        }
+
+    def _enter_renderer_failure_safe_state_locked(self, exc, config, now):
+        first_failure = self.consecutive_renderer_failures == 0
+        self.renderer_error = str(exc)
+        self.error = self.renderer_error
+        self.consecutive_renderer_failures += 1
+        self.safe_frame_sequence += 1
+        self.last_safe_output_at = now
+        if first_failure:
+            self.renderer_failure_events += 1
+            self.manual_smoke_active = False
+            self.active_one_shot_cue = None
+            self.movement_lab_authority = None
+            active_pulse = self.active_virtualdj_beat_pulse
+            if active_pulse is not None and active_pulse.get("restore_timer") is not None:
+                active_pulse["restore_timer"].cancel()
+            self.active_virtualdj_beat_pulse = None
+            auto_show_config = self.config.get("auto_show")
+            if isinstance(auto_show_config, dict):
+                for key in RENDERER_FAILURE_RELEASE_AUTO_SHOW_KEYS:
+                    auto_show_config[key] = False
+            self._release_venue_target_test_locked("renderer_failure")
+            self.debug_log.log("RENDERER_SAFE_OUTPUT_ENTER", error=self.renderer_error)
+
+        safe_values, safe_state = self._renderer_failure_safe_values(config)
+        self.current_values = dict(safe_values)
+        self.current_final_values = dict(safe_values)
+        self.current_rendered_slot_intensities = {
+            slot_id: 0.0
+            for slot_id in config.get("slot_order", [])
+            if bool(((config.get("slots") or {}).get(slot_id) or {}).get("enabled"))
+        }
+        self.current_slot_previews = {}
+        self.current_preview_auto_show = {}
+        self.rme_preview_differential = {
+            "mode": "RENDERER_FAILURE_SAFE_OUTPUT",
+            "physical_output_source": "profile_aware_safe_frame",
+        }
+        self.renderer_output_state = "SAFE_RENDERER_FAILURE"
+        self.renderer_safe_output = {
+            **safe_state,
+            "reason": "renderer_failure",
+            "consecutive_failures": self.consecutive_renderer_failures,
+            "safe_frame_sequence": self.safe_frame_sequence,
+        }
+        return safe_values
+
     def _observe_active_playback_generation(self, osc):
         generation = osc.get("_playback_generation")
         if not isinstance(generation, int):
@@ -19346,7 +20140,22 @@ class DmxController:
             multiplier = max(0.78, min(1.18, float(multiplier)))
         except (TypeError, ValueError):
             multiplier = 1.0
-        return clamp_dmx(round(brightness * multiplier))
+        brightness = clamp_dmx(round(brightness * multiplier))
+        slot_context = config.get("_slot_context") or {}
+        role = slot_context.get("role")
+        if role in {"wash", "moving", "par"} and config.get("_auto_show_rhythm_mode") is not None:
+            # Snap the actual show dimmer to eight levels across its full
+            # 0-100 range. Do not remap the composer's low end: that could
+            # collapse an already-scaled wash signal to zero. The show marker
+            # also covers non-Composer rhythm modes used by the live show.
+            try:
+                maximum = clamp_dmx(config.get("dimmer", 255))
+            except (TypeError, ValueError):
+                maximum = 255
+            relative = max(0.0, min(1.0, brightness / float(maximum))) if maximum > 0 else 0.0
+            level = round(relative * 7.0)
+            brightness = clamp_dmx(round(maximum * level / 7.0))
+        return brightness
 
     def _render_slot_values(self, slot_id, config, osc, now, advance_motion=True,
                             include_effective_intensity=False):
@@ -19387,6 +20196,8 @@ class DmxController:
                     )
                     for segment in zone_rgb
                 ]
+            if config.get("wall_wash_zones_mirrored"):
+                output_zone_rgb.reverse()
         spatial_resolution = None
         if motion and isinstance(motion.get("spatial_intent"), dict):
             spatial_resolution = resolve_spatial_movement_intent(
@@ -20150,10 +20961,13 @@ class DmxController:
         if decision.get("production_show_source") == "dynamic_composer":
             track_path = canonical_song_analyzer_track_path((osc or {}).get("track_path"))
             if track_path:
+                if self._dynamic_composer_handoff_hold is not None:
+                    decision["handoff_effect_hold_exit_reason"] = "composer_ready"
+                self._dynamic_composer_handoff_hold = None
                 self._last_dynamic_composer_handoff_effect = {
                     "auto_show": copy.deepcopy(selected),
                     "track_path": track_path,
-                    "selected_at": now,
+                    "playback_generation": decision.get("playback_generation"),
                 }
         else:
             held = self._dynamic_composer_handoff_effect_hold(decision, osc, now)
@@ -20177,26 +20991,108 @@ class DmxController:
         return selected, candidate, decision
 
     def _dynamic_composer_handoff_effect_hold(self, decision, osc, now):
-        """Retain one prior rendered effect across a bounded new-track handoff only."""
+        """Keep the last Composer visual through one bounded playback handoff."""
         previous = self._last_dynamic_composer_handoff_effect
         track_path = canonical_song_analyzer_track_path((osc or {}).get("track_path"))
+        playback_generation = decision.get("playback_generation")
+
+        def reject(reason, invalidate=False):
+            decision["handoff_effect_hold_exit_reason"] = reason
+            if invalidate:
+                self._dynamic_composer_handoff_hold = None
+                self._last_dynamic_composer_handoff_effect = None
+            return None
+
+        if previous is None:
+            return reject("no_previous_composer")
+        if decision.get("production_mode") != DYNAMIC_COMPOSER_ENABLED:
+            return reject("mode_not_enabled", invalidate=True)
+        if decision.get("blackout_active") is True:
+            return reject("blackout_active", invalidate=True)
+        if decision.get("manual_override_active") is True:
+            return reject("manual_override", invalidate=True)
+        if decision.get("renderer_healthy") is not True:
+            return reject("renderer_unhealthy", invalidate=True)
+        previous_playback_generation = previous.get("playback_generation")
+        same_playback = (
+            track_path == previous["track_path"]
+            and playback_generation == previous_playback_generation
+        )
+        new_playback = (
+            track_path != previous["track_path"]
+            or playback_generation != previous_playback_generation
+        )
+        playback_state = (osc or {}).get("playback_state")
         if (
-            previous is None
-            or not track_path
-            or track_path == previous["track_path"]
-            or decision.get("fallback_reason") not in {
-                "track_mismatch", "deck_mismatch", "handoff_not_current", "transport_not_advancing",
-            }
+            not track_path
+            or (osc or {}).get("stale") is True
+            or isinstance(playback_state, dict) and (
+                playback_state.get("availability") != "available"
+            )
         ):
-            return None
-        elapsed = now - previous["selected_at"]
-        if elapsed < 0.0 or elapsed > SONG_ANALYZER_HANDOFF_EFFECT_HOLD_SECONDS:
-            return None
-        remaining = max(0.0, SONG_ANALYZER_HANDOFF_EFFECT_HOLD_SECONDS - elapsed)
-        held_auto_show = copy.deepcopy(previous["auto_show"])
+            return reject("transport_not_advancing", invalidate=True)
+        transport_not_advancing = (
+            (osc or {}).get("playing") is False
+            or isinstance(playback_state, dict)
+            and playback_state.get("transport_state") != "advancing"
+        )
+        transition_discontinuity = (
+            new_playback
+            and isinstance(playback_state, dict)
+            and playback_state.get("last_discontinuity") in {"track_changed", "deck_changed"}
+        )
+        if transport_not_advancing and not transition_discontinuity:
+            return reject("transport_not_advancing", invalidate=True)
+        if decision.get("fallback_reason") not in {
+            "handoff_not_current", "track_mismatch", "deck_mismatch", "generation_mismatch",
+            "transport_not_advancing",
+        }:
+            return reject("fallback_not_transition_pending", invalidate=True)
+
+        handoff_status = decision.get("handoff_status")
+        if handoff_status not in {"pending", "ready"}:
+            status = str(handoff_status or "missing")
+            return reject("handoff_" + status, invalidate=True)
+
+        if same_playback:
+            # Prewarm is preparation only. Playback is still A, so A remains
+            # the visible Composer source and no transition timer exists yet.
+            self._dynamic_composer_handoff_hold = None
+            return copy.deepcopy(previous["auto_show"]), {
+                **decision,
+                "production_source": "dynamic_composer",
+                "production_show_source": "dynamic_composer",
+                "composer_active": True,
+                "dynamic_composer_active": True,
+                "fallback_active": False,
+                "handoff_effect_hold": False,
+                "handoff_effect_hold_remaining_seconds": None,
+                "handoff_effect_hold_age_seconds": None,
+                "handoff_effect_hold_deadline_monotonic": None,
+                "handoff_effect_hold_from_track_path": None,
+                "handoff_effect_hold_exit_reason": None,
+            }
+
+        if not new_playback:
+            return reject("playback_identity_not_transition")
+
+        hold = self._dynamic_composer_handoff_hold
+        if hold is None:
+            hold = {
+                "auto_show": self._safe_dynamic_composer_handoff_visual(previous["auto_show"]),
+                "source_track_path": previous["track_path"],
+                "started_at": now,
+                "deadline": now + SONG_ANALYZER_HANDOFF_EFFECT_HOLD_SECONDS,
+            }
+            self._dynamic_composer_handoff_hold = hold
+        elapsed = now - hold["started_at"]
+        if elapsed < 0.0 or now > hold["deadline"]:
+            return reject("hold_expired", invalidate=True)
+        remaining = max(0.0, hold["deadline"] - now)
+        held_auto_show = copy.deepcopy(hold["auto_show"])
         held_auto_show["dynamic_composer_handoff_effect_hold"] = True
         held_auto_show["dynamic_composer_handoff_effect_hold_remaining_seconds"] = remaining
-        held_auto_show["dynamic_composer_handoff_effect_hold_from_track_path"] = previous["track_path"]
+        held_auto_show["dynamic_composer_handoff_effect_hold_from_track_path"] = hold["source_track_path"]
         held_decision = {
             **decision,
             "production_source": "dynamic_composer",
@@ -20207,9 +21103,40 @@ class DmxController:
             "fallback_reason": "handoff_effect_hold",
             "handoff_effect_hold": True,
             "handoff_effect_hold_remaining_seconds": remaining,
-            "handoff_effect_hold_from_track_path": previous["track_path"],
+            "handoff_effect_hold_age_seconds": elapsed,
+            "handoff_effect_hold_deadline_monotonic": hold["deadline"],
+            "handoff_effect_hold_from_track_path": hold["source_track_path"],
+            "handoff_effect_hold_exit_reason": None,
         }
         return held_auto_show, held_decision
+
+    @staticmethod
+    def _safe_dynamic_composer_handoff_visual(auto_show):
+        """Freeze a Composer look without retaining one-shot or strobe authority."""
+        held = copy.deepcopy(auto_show)
+        held.update({
+            "beat_pulse": False,
+            "dynamic_level": False,
+            "external_strobe": False,
+            "strobe_window": False,
+            "one_shot_active": False,
+            "one_shot_cue": "none",
+            "one_shot_duration_beats": 0.0,
+            "one_shot_elapsed_beats": 0.0,
+            "one_shot_progress": 0.0,
+        })
+        rme = held.get("rme_preview")
+        if isinstance(rme, dict):
+            held["rme_preview"] = {**rme, "current_rme": None}
+        held["event_envelope"] = {}
+        primitives = held.get("selected_primitives")
+        if isinstance(primitives, dict):
+            held["selected_primitives"] = {
+                role: {**primitive, "pulse": "none", "dimmer_motif": None}
+                if isinstance(primitive, dict) else primitive
+                for role, primitive in primitives.items()
+            }
+        return held
 
     def _render_selected_production_values(
         self, now, config, osc, baseline_auto_show, selected_auto_show, decision
@@ -20954,6 +21881,15 @@ class DmxController:
         return resolved_mode
 
     def _effective_slot_config(self, slot_id, config, osc, auto_show, full_config=None):
+        if auto_show.get("dynamic_composer_handoff_effect_hold"):
+            # The hold is a visual bridge, not permission to run the previous
+            # track's beat-triggered timeline against the new track clock.
+            osc = {
+                **osc,
+                "beat_value": auto_show.get("beat_value", osc.get("beat_value")),
+                "strobe_active": False,
+                "strobe_count_in": None,
+            }
         effective = {
             **config,
             "color": dict(config["color"]),
@@ -20999,7 +21935,10 @@ class DmxController:
         role_profiles = {
             "moving": {"base": 96, "span": 128, "energy_bias": 0.08, "pulse": 26, "decay": -40},
             "par": {"base": 84, "span": 142, "energy_bias": -0.04, "pulse": -6, "decay": 32},
-            "wash": {"base": 76, "span": 136, "energy_bias": -0.12, "pulse": -22, "decay": 78},
+            # Wall washers use the fixture's complete output range. A raised
+            # base plus a short span capped them at 212/255 before the rhythm
+            # envelope was even applied, so they could never reach full output.
+            "wash": {"base": 0, "span": 255, "energy_bias": 0.0, "pulse": -22, "decay": 78},
             "static": {"base": 88, "span": 138, "energy_bias": -0.02, "pulse": -4, "decay": 18},
         }
         role_profile = role_profiles.get(role, role_profiles["static"])
@@ -21186,6 +22125,10 @@ class DmxController:
             slot_energy -= slot_context.get("group_edge_bias", slot_context["edge_bias"]) * 0.05
             slot_energy += slot_context.get("group_alternate", slot_context["alternate"]) * 0.04
         slot_energy = clamp_unit(slot_energy)
+        if role == "wash":
+            # Lift medium track energy enough to clear the dimmer motifs more
+            # often; retain true zero and let the motifs preserve contrast.
+            slot_energy = wall_wash_dimmer_energy_response(slot_energy)
 
         if role == "par":
             par_section_dimmer = {
@@ -22192,12 +23135,15 @@ class DmxController:
         developer_playback_state = None
         dmx = None
         values = None
+        safe_output = False
+        config = self.last_valid_render_config
+        osc = {}
         with self.lock:
             if not self.render_active:
                 return False
             try:
                 render_now = time.time()
-                config = self._clean_full_config(dict(self.config))
+                config = self._active_render_config_locked()
                 osc = self.osc.snapshot_for_render()
                 self._observe_active_playback_generation(osc)
                 baseline_auto_show, shadow_context = self._auto_show_evaluation(
@@ -22234,12 +23180,23 @@ class DmxController:
                 self.current_values = values
                 self.current_final_values = final_values
                 self.current_slot_previews = slot_previews
+                self.last_valid_render_config = copy.deepcopy(config)
+                self.last_valid_final_values = dict(final_values)
                 self.render_frame_sequence += 1
                 self.last_rendered = render_now
                 if self.renderer_error is not None:
                     if self.error == self.renderer_error:
                         self.error = None
                     self.renderer_error = None
+                    self.last_renderer_recovery_at = render_now
+                    self.debug_log.log("RENDERER_SAFE_OUTPUT_EXIT")
+                self.consecutive_renderer_failures = 0
+                self.renderer_output_state = "NORMAL"
+                self.renderer_safe_output = {
+                    "active": False,
+                    "movement_policy": None,
+                    "profile_count": 0,
+                }
                 self._record_physical_dmx_trace(
                     config, osc, auto_show, production_decision, values, final_values,
                     "current_values_ready",
@@ -22248,13 +23205,18 @@ class DmxController:
                 if self.connected and self.running and self.dmx is not None:
                     dmx = self.dmx
             except Exception as exc:
-                self.renderer_error = str(exc)
-                self.error = self.renderer_error
-                self.manual_smoke_active = False
-                self._release_venue_target_test_locked("renderer_failure")
-                return False
+                render_now = time.time()
+                values = self._enter_renderer_failure_safe_state_locked(
+                    exc,
+                    config if isinstance(config, dict) else self.last_valid_render_config,
+                    render_now,
+                )
+                safe_output = True
+                if self.connected and self.running and self.dmx is not None:
+                    dmx = self.dmx
 
-        self._observe_virtualdj_beat_pulse_test(developer_playback_state)
+        if not safe_output:
+            self._observe_virtualdj_beat_pulse_test(developer_playback_state)
         if dmx is None:
             return False
 
@@ -22268,12 +23230,16 @@ class DmxController:
                 ):
                     return False
                 output_values = dict(self.current_final_values)
-                self._record_physical_dmx_trace(
-                    config, osc, self.current_auto_show or {}, self.production_show_decision,
-                    values, output_values, "dmx_dispatch",
-                )
+                if not safe_output:
+                    self._record_physical_dmx_trace(
+                        config, osc, self.current_auto_show or {}, self.production_show_decision,
+                        values, output_values, "dmx_dispatch",
+                    )
                 self._send_dmx_frame(dmx, output_values)
-                self.error = None
+                if safe_output:
+                    self.last_safe_output_dispatch_at = time.time()
+                else:
+                    self.error = None
                 self.last_sent = time.time()
         except Exception as exc:
             with self.lock:
@@ -23169,6 +24135,7 @@ def beatbeam_debug_state(osc_state=None):
             "analysis_version": projection.get("analysis_version"),
             "phrase_analysis_version": projection.get("phrase_analysis_version"),
             "model": projection.get("model"),
+            "composer_readiness": projection.get("composer_readiness"),
             "segment": current or None,
             "semantic_section": projection.get("semantic_section"),
             "rich_current": rich or None,
@@ -23181,6 +24148,7 @@ def beatbeam_debug_state(osc_state=None):
         "handoff": {
             "track_match": projection.get("track_match"),
             "availability": projection.get("availability"),
+            "composer_readiness": projection.get("composer_readiness"),
             "rich_analysis": projection.get("rich_analysis"),
             "fallback_reason": fallback,
             "effective_source": behavior.get("effective_source"),
@@ -23299,6 +24267,7 @@ def _remote_live_output_preview(dmx_state):
         except (TypeError, ValueError, KeyError):
             continue
         channels = {"dimmer": 0, "red": 0, "green": 0, "blue": 0, "white": 0, "strobe": 0}
+        zone_colors = {}
         pan = tilt = None
         for definition in mode.get("channels", []):
             absolute = address + int(definition.get("offset") or 1) - 1
@@ -23309,6 +24278,12 @@ def _remote_live_output_preview(dmx_state):
                 channels["dimmer"] = value
             elif channel_type == "color" and component in {"red", "green", "blue", "white"}:
                 channels[component] = value
+                try:
+                    zone = int(definition.get("zone"))
+                except (TypeError, ValueError):
+                    zone = 0
+                if zone > 0:
+                    zone_colors.setdefault(zone, {})[component] = value
             elif channel_type == "strobe":
                 channels["strobe"] = value
             elif channel_type == "pan":
@@ -23331,11 +24306,51 @@ def _remote_live_output_preview(dmx_state):
         if blackout:
             channels = {key: 0 for key in channels}
             effective_intensity = 0.0
+            zone_colors = {
+                zone: {component: 0 for component in values}
+                for zone, values in zone_colors.items()
+            }
         def resolved_component(name):
             try:
                 return max(0, min(255, int(round(float(preview.get(f"resolved_{name}", channels[name]))))))
             except (TypeError, ValueError):
                 return channels[name]
+        led_rows = None
+        beam_layout = fixture.get("beam_layout") if isinstance(fixture, dict) else None
+        if (
+            isinstance(beam_layout, dict)
+            and beam_layout.get("type") == "strip"
+            and beam_layout.get("length") == 24
+            and zone_colors
+        ):
+            ordered_zones = sorted(zone_colors)
+            led_rows = []
+            for row_index in range(24):
+                zone_index = min(len(ordered_zones) - 1, row_index * len(ordered_zones) // 24)
+                zone_values = zone_colors[ordered_zones[zone_index]]
+                raw_color = {
+                    component: int(zone_values.get(component, 0))
+                    for component in ("red", "green", "blue")
+                }
+                row_intensity = max(
+                    raw_color["red"], raw_color["green"], raw_color["blue"],
+                    int(zone_values.get("white", 0)),
+                ) / 255.0
+                if row_intensity > 0.0:
+                    display_color = {
+                        component: max(0, min(255, int(round(value / row_intensity))))
+                        for component, value in raw_color.items()
+                    }
+                else:
+                    display_color = {
+                        component: resolved_component(component)
+                        for component in ("red", "green", "blue")
+                    }
+                led_rows.append({
+                    "index": row_index,
+                    **display_color,
+                    "intensity": row_intensity,
+                })
         role = "moving" if capabilities.get("pan") or capabilities.get("tilt") else _remote_live_role(slot)
         fixtures.append({
             "id": str(slot_id), "label": str(slot.get("label") or slot_id), "role": role,
@@ -23346,6 +24361,7 @@ def _remote_live_output_preview(dmx_state):
             "resolved_green": resolved_component("green"),
             "resolved_blue": resolved_component("blue"),
             "resolved_white": resolved_component("white"),
+            "led_rows": led_rows,
             "pan": pan, "tilt": tilt,
         })
     return {
@@ -24229,6 +25245,30 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/dmx/axis-mapping-v2/reset":
                 self.send_json(DMX.reset_axis_mapping_v2(payload))
+                return
+            if path == "/api/dmx/venue/create":
+                DMX.create_venue(payload.get("name"))
+                self.send_json(full_state())
+                return
+            if path == "/api/dmx/venue/duplicate":
+                DMX.duplicate_venue(payload.get("source_venue_id"), payload.get("name"))
+                self.send_json(full_state())
+                return
+            if path == "/api/dmx/venue/rename":
+                DMX.rename_venue(payload.get("venue_id"), payload.get("name"))
+                self.send_json(full_state())
+                return
+            if path == "/api/dmx/venue/delete":
+                DMX.delete_venue(payload.get("venue_id"))
+                self.send_json(full_state())
+                return
+            if path == "/api/dmx/venue/switch":
+                DMX.switch_venue(payload.get("venue_id"))
+                self.send_json(full_state())
+                return
+            if path == "/api/dmx/venue/rearm":
+                DMX.rearm_active_venue()
+                self.send_json(full_state())
                 return
             if path == "/api/dmx/update":
                 DMX.update_config(payload)

@@ -217,7 +217,9 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         self.assertIn("2+", unavailable["reason_if_unavailable"])
 
     def test_output_preview_projects_post_authority_frame_while_dmx_is_disconnected(self):
-        payload = self.project(fixture_state(connected=False))
+        state = fixture_state(connected=False)
+        state["dmx"]["rendered_final_values"].update({50: 0, 51: 128, 52: 0})
+        payload = self.project(state)
         self.assertFalse(payload["dmx"]["physical_output_available"])
         self.assertTrue(payload["dmx"]["rendered_output_available"])
         self.assertTrue(payload["output"]["rendered_available"])
@@ -226,12 +228,22 @@ class RemoteLiveStateV2Tests(unittest.TestCase):
         fixtures = {fixture["id"]: fixture for fixture in payload["output"]["fixtures"]}
         self.assertEqual((201, 20, 10, 180, 12), tuple(fixtures["moving"][key] for key in ("red", "green", "blue", "dimmer", "strobe")))
         self.assertEqual((111, 22, 33, 210), tuple(fixtures["par"][key] for key in ("red", "green", "blue", "dimmer")))
+        wash_rows = fixtures["wash"]["led_rows"]
+        self.assertEqual(24, len(wash_rows))
+        self.assertEqual([0, 1, 2, 3, 4, 5], [row["index"] for row in wash_rows[:6]])
+        self.assertAlmostEqual(90 / 255, wash_rows[0]["intensity"])
+        self.assertEqual((198, 227, 255), tuple(wash_rows[0][key] for key in ("red", "green", "blue")))
+        self.assertAlmostEqual(128 / 255, wash_rows[3]["intensity"])
+        self.assertEqual((0, 255, 0), tuple(wash_rows[3][key] for key in ("red", "green", "blue")))
 
         blackout = self.project(fixture_state(connected=False, blackout=True))["output"]
         self.assertTrue(blackout["blackout"])
         self.assertTrue(all(not fixture["active"] and fixture["dimmer"] == 0
                             and fixture["red"] == 0 and fixture["green"] == 0 and fixture["blue"] == 0
                             for fixture in blackout["fixtures"]))
+        self.assertTrue(all(row["intensity"] == 0 for row in next(
+            fixture for fixture in blackout["fixtures"] if fixture["id"] == "wash"
+        )["led_rows"]))
 
     def test_output_preview_preserves_authoritative_zero_on_native_dimmers(self):
         state = fixture_state(connected=False)

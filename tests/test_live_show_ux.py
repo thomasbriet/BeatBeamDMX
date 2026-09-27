@@ -13,8 +13,10 @@ class LiveShowUxTests(unittest.TestCase):
 
     def test_live_show_has_operational_hierarchy_and_keeps_raw_diagnostics_advanced(self):
         for text in (
-            'PanelSurface(title: "Live Show"',
-            '"NOW PLAYING / MASTER"',
+            'PanelSurface(title: "NOW PLAYING"',
+            'PanelSurface(title: "SHOW NOW"',
+            'PanelSurface(title: "RENDERED OUTPUT"',
+            'PanelSurface(title: "ACTIVE WARNINGS"',
             'PanelSurface(title: "Decks"',
             'PanelSurface(title: "Musical State"',
             'PanelSurface(title: "Current Event"',
@@ -25,6 +27,54 @@ class LiveShowUxTests(unittest.TestCase):
             self.assertIn(text, self.live)
         self.assertIn('case advanced = "Advanced"', self.native)
         self.assertIn('DebugInspectorView()', self.live)
+
+    def test_live_show_follows_ipad_console_sections_and_always_reports_warnings_state(self):
+        live_show = self.live[
+            self.live.index('struct LiveShowWorkspaceView'):
+            self.live.index('private struct LiveMasterDimmerControl')
+        ]
+        section_order = [
+            live_show.index('LiveNowPlayingPanel(activeDeck: activeDeck)'),
+            live_show.index('LiveShowNowPanel()'),
+            live_show.index('LiveRenderedOutputPanel(fixtures: model.liveRenderedOutput'),
+            live_show.index('title: "ACTIVE WARNINGS"'),
+        ]
+        self.assertEqual(section_order, sorted(section_order))
+        self.assertIn('"NO ACTIVE WARNINGS"', live_show)
+        self.assertIn('ForEach(operationalWarnings)', live_show)
+        for panel_title in ('NOW PLAYING', 'SHOW NOW', 'RENDERED OUTPUT'):
+            self.assertIn(f'PanelSurface(title: "{panel_title}"', self.live)
+
+    def test_live_rendered_output_uses_post_authority_frame_and_fixture_patch(self):
+        self.assertIn('let renderedFinalValues: [String: Int]?', self.native)
+        self.assertIn('latestLiveDmxState = state.dmx', self.native)
+        self.assertIn('for channel in mode.channels ?? []', self.native)
+        self.assertIn('let absoluteChannel = slot.address + channel.offset - 1', self.native)
+        self.assertIn('values[String(absoluteChannel)]', self.native)
+        self.assertIn('LiveRenderedOutputPanel(fixtures: model.liveRenderedOutput', self.live)
+
+    def test_wall_wash_output_maps_final_zone_channels_to_twenty_four_horizontal_rows(self):
+        for text in (
+            'let zone: Int?',
+            'if let zone = channel.zone',
+            'let orderedZones = zoneColors.keys.sorted()',
+            'return (0..<24).map { rowIndex in',
+            'rowIndex * orderedZones.count / 24',
+            'let renderedIntensity = preview?.effectiveIntensity',
+            'let displayComponent: (Int) -> Int',
+            'Double(value) / renderedIntensity',
+            'red: displayComponent(red)',
+            'green: displayComponent(green)',
+            'blue: displayComponent(blue)',
+            'intensity: renderedIntensity',
+            'ledRows: ledRows',
+        ):
+            self.assertIn(text, self.native)
+        self.assertIn('let ledRows: [LiveRenderedLed]?', self.live)
+        self.assertIn('rows.count == 24', self.live)
+        self.assertIn('proxy.size.width * (blackout ? 0 : min(1, max(0, row.intensity)))', self.live)
+        self.assertIn('Capsule().fill(BeatBeamPalette.appBackground)', self.live)
+
 
     def test_live_show_deck_cards_use_existing_typed_authority_and_readiness_fields(self):
         for text in (
@@ -57,7 +107,8 @@ class LiveShowUxTests(unittest.TestCase):
         self.assertIn('"Map editing is preview-only. Only explicit Physical Aim or Move actions lease bounded Pan/Tilt', self.native)
         self.assertIn('AutoShowControlView()', self.live)
         self.assertIn('struct AutoShowWorkspaceView: View', self.live)
-        self.assertIn('case autoShow = "Auto Show"', self.native)
+        workspace_mode = self.native[self.native.index('private enum WorkspaceMode'):self.native.index('private enum UtilityPanel')]
+        self.assertNotIn('case autoShow = "Auto Show"', workspace_mode)
         live_show_section = self.live[self.live.index('struct LiveShowWorkspaceView'):self.live.index('// MARK: - Preview and advanced workspaces')]
         self.assertNotIn('Pulse Test (Preview only)', live_show_section)
         self.assertIn('"auto_show -> current_values"', self.native)
@@ -136,7 +187,7 @@ class LiveShowUxTests(unittest.TestCase):
     def test_live_show_restores_existing_dmx_connection_controls(self):
         for text in (
             'LiveDmxConnectionCard()',
-            'PanelSurface(title: "Physical DMX"',
+            'PanelSurface(title: "RENDERED OUTPUT"',
             'Picker("DMX interface", selection: $model.selectedPortLabel)',
             '"CONNECT DMX"',
             '"RECONNECT"',

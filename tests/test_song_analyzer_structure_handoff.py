@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from beatbeam_app import SongAnalyzerStructureHandoff, shadow_section_character_at
+from dynamic_composer import project_continuous_musical_state
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "beatbeam-structure-handoff-v1.json"
@@ -19,6 +20,56 @@ def playback(path, seconds, source="virtualdj"):
 
 
 class SongAnalyzerStructureHandoffTests(unittest.TestCase):
+    def test_legacy_record_without_readiness_metadata_is_current_but_not_composer_ready(self):
+        projected = SongAnalyzerStructureHandoff(FIXTURE, check_interval_seconds=0).project(
+            playback(TRACK, 2), include_shadow=True)
+
+        self.assertEqual("available_current", projected["availability"])
+        self.assertEqual("missing", projected["composer_readiness"]["status"])
+        self.assertEqual((None, "composer_readiness_missing"),
+                         project_continuous_musical_state(projected, 2))
+
+    def test_explicit_ready_record_reconstructs_continuous_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            payload["schema_version"] = 2
+            backbone = shadow_analysis()
+            backbone["section_characters"][1].update({
+                "end_seconds": 32, "end_bar": 16, "bar_count": 12,
+                "relative_energy": .55, "energy_rise": -.1,
+            })
+            payload["tracks"][0]["shadow_analysis"] = backbone
+            payload["tracks"][0]["composer_readiness"] = {
+                "status": "ready", "version": "dynamic-composer-backbone-v1",
+                "reason": "ready", "missing_fields": [],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            projected = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(
+                playback(TRACK, 2), include_shadow=True)
+            state, reason = project_continuous_musical_state(projected, 2)
+
+        self.assertEqual("current", reason)
+        self.assertEqual(.72, state.relative_energy)
+
+    def test_ready_claim_without_backbone_fails_the_atomic_document(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            payload["schema_version"] = 2
+            payload["tracks"][0]["composer_readiness"] = {
+                "status": "ready", "version": "dynamic-composer-backbone-v1",
+                "reason": "ready", "missing_fields": [],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            projected = SongAnalyzerStructureHandoff(path, check_interval_seconds=0).project(
+                playback(TRACK, 2), include_shadow=True)
+
+        self.assertEqual("invalid", projected["load_status"])
+        self.assertEqual("unavailable", projected["availability"])
+
     def test_default_refresh_interval_bounds_live_handoff_reloads(self):
         handoff = SongAnalyzerStructureHandoff(FIXTURE)
 

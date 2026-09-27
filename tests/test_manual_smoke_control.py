@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 import beatbeam_app
 
@@ -13,7 +15,11 @@ class _Osc:
 
 class ManualSmokeControlTests(unittest.TestCase):
     def setUp(self):
-        self.controller = beatbeam_app.DmxController(_Osc())
+        self.config_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.config_directory.cleanup)
+        self.controller = beatbeam_app.DmxController(
+            _Osc(), config_path=Path(self.config_directory.name) / "beatbeam_config.json"
+        )
         blaze = self.controller.default_slot_config(
             "blaze", fixture_id="beamz_blaze_series_rgba_fogger", mode="8ch", address=200
         )

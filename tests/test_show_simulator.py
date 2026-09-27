@@ -14,6 +14,10 @@ class FakeHandoff:
         self.last_playback = dict(playback)
         return {
             "track_match": "exact", "availability": "available_current", "projection_status": "in_segment",
+            "composer_readiness": {
+                "status": "ready", "version": "dynamic-composer-backbone-v1",
+                "reason": "ready", "missing_fields": [],
+            },
             "analysis_version": "current", "shadow_analysis": {"model": "SectionCharacterProfileShadow", "section_characters": [{
                 "observation_id": "section-0", "start_seconds": 0.0, "end_seconds": 120.0,
                 "relative_energy": 0.5, "energy_rise": 0.1, "recurrence_strength": 0.0, "family_salience": 0.2,

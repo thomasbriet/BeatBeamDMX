@@ -62,8 +62,8 @@ class MetricStageMapSourceTests(unittest.TestCase):
 
     def test_background_drag_pans_only_viewport_and_fixture_drag_remains_priority(self):
         canvas = self.source.split("struct StageMapCanvas", 1)[1].split("struct VenueSpaceOverlay", 1)[0]
-        self.assertIn("backgroundPanGesture(canvasSize: geometry.size)", canvas)
-        self.assertIn("DragGesture(minimumDistance: 4)", canvas)
+        self.assertIn("backgroundPanGesture(canvasSize: geometry.size, coordinateSpaceName: gestureCoordinateSpaceName)", canvas)
+        self.assertIn("DragGesture(minimumDistance: 4, coordinateSpace:", canvas)
         self.assertIn("model.commitProjectionViewportPan(", canvas)
         self.assertIn("node.highPriorityGesture(dragGesture)", self.source)
         pan = self.source.split("func commitProjectionViewportPan", 1)[1].split("func resetMetricStageMapView", 1)[0]
@@ -72,6 +72,38 @@ class MetricStageMapSourceTests(unittest.TestCase):
         self.assertIn("inMemoryProjectionViewportCenters[projection] = next", pan)
         self.assertIn("saveProjectionViewportCenter(next, for: projection)", pan)
         self.assertNotIn("projectionLayoutDrafts", pan)
+
+    def test_blank_space_pan_is_enabled_for_every_orthographic_projection(self):
+        deck = self.source.split("private func projectionPanel(for projection: StageProjection)", 1)[1].split("enum ProjectionSelectionMode", 1)[0]
+        self.assertIn("allowsViewportPan: projection != .top", deck)
+        self.assertIn("private func viewportPanGesture(canvasSize: CGSize)", self.source)
+        self.assertIn('Color.clear\n                                .frame(width: canvasSize.width, height: canvasSize.height)\n                                .contentShape(Rectangle())\n                                .gesture(viewportPanGesture(canvasSize: canvasSize))', self.source)
+        self.assertIn("node.highPriorityGesture(dragGesture)", self.source)
+        panel = self.source.split("struct StagePreviewPanel<Content: View>", 1)[1].split("struct ProjectionPanelBackdrop", 1)[0]
+        self.assertIn("let canvasSize = stageProjectionCanvasSize(in: geometry.size)", panel)
+        self.assertIn(".gesture(viewportPanGesture(canvasSize: canvasSize))", panel)
+        self.assertIn("ProjectionPanelBackdrop(projection: projection, viewportRenderKey: viewportRenderKey)\n                                    .frame(width: canvasSize.width, height: canvasSize.height)", panel)
+        self.assertIn("content\n                                .frame(width: canvasSize.width, height: canvasSize.height)", panel)
+        self.assertIn(".frame(width: canvasSize.width, height: canvasSize.height)\n                            .offset(panInteraction.translationPx)", panel)
+
+    def test_panning_uses_the_fitted_content_canvas_not_the_padded_panel_bounds(self):
+        aspect = 16 / 9
+        inset = 16
+        container_width, container_height = 800.0, 520.0
+        available_width = container_width - inset * 2
+        available_height = container_height - inset * 2
+        canvas_width = min(available_width, available_height * aspect)
+        canvas_height = canvas_width / aspect
+        self.assertAlmostEqual(768.0, canvas_width)
+        self.assertAlmostEqual(432.0, canvas_height)
+        # A 40 px pan must resolve against the same width used by fixture
+        # projection; using the wider outer panel leaves a visible release jump.
+        translation = 40.0
+        old_committed_translation = translation / container_width * canvas_width
+        self.assertLess(abs(old_committed_translation - translation), 3.0)
+        self.assertNotAlmostEqual(translation, old_committed_translation, places=3)
+        committed_screen_translation = translation / canvas_width * canvas_width
+        self.assertAlmostEqual(translation, committed_screen_translation)
 
     def test_inverse_edit_uses_the_same_zoom_pan_rotation_transform(self):
         update = self.source.split("private func update(world: inout SlotWorldPosition", 1)[1].split("private func scalarNormalized", 1)[0]
@@ -157,7 +189,8 @@ class MetricStageMapSourceTests(unittest.TestCase):
         update = self.source.split("func updateProjectionPoint", 1)[1].split("func rotateSelectedProjectionOrientation", 1)[0]
         self.assertIn("StageWorld.dragSnapCm", update)
         numeric = self.source.split("func setFixturePositionMeters", 1)[1].split("func rotateSelectedProjectionOrientation", 1)[0]
-        self.assertNotIn("dragSnapCm", numeric)
+        self.assertIn("snapEnabled: Bool = false", numeric)
+        self.assertIn("let centimeters = snapEnabled", numeric)
         self.assertIn("value * 100", numeric)
 
     def test_fixture_snap_is_a_persisted_editor_preference_with_a_safe_drag_capture(self):

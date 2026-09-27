@@ -23,8 +23,8 @@ case "$VARIANT" in
     TEMP_DIRECTORY_NAME="BeatBeamDMX"
     LOG_STEM="beatbeam"
     APP_SLUG="BeatBeamDMX"
-    VERSION="1.1.0"
-    BUILD_NUMBER="110"
+    VERSION="1.2.0"
+    BUILD_NUMBER="120"
     ;;
   beta)
     APP_NAME="BeatBeam DMX Beta"
@@ -109,6 +109,7 @@ swiftc \
   -framework Metal \
   -framework MetalKit \
   -framework SwiftUI \
+  native/BackendConfigBootstrap.swift \
   native/BeatBeamDMXApp.swift \
   native/LiveShowUX.swift \
   native/SimulatorUX.swift \

@@ -141,6 +141,10 @@ def select_production_show_source(
         "fallback_reason": fallback_reason,
         "handoff_effect_hold": False,
         "handoff_effect_hold_remaining_seconds": None,
+        "handoff_effect_hold_age_seconds": None,
+        "handoff_effect_hold_deadline_monotonic": None,
+        "handoff_effect_hold_from_track_path": None,
+        "handoff_effect_hold_exit_reason": None,
         "manual_override_active": manual,
         "blackout_active": safety_context.get("blackout_active") is True,
         "continuous_state_valid": _valid_continuous_state(
@@ -150,6 +154,8 @@ def select_production_show_source(
         "handoff_availability": projection.get("availability"),
         "playback_generation": playback_generation,
         "handoff_generation": handoff_generation,
+        "handoff_track_path": active_track.get("canonical_path"),
+        "handoff_status": active_track.get("status"),
         "composer_generation": composer_generation,
         "renderer_healthy": bool(renderer_healthy),
         "current_rme": context.get("current_rme") if isinstance(context, dict) else None,
@@ -268,6 +274,9 @@ def _eligibility_reason(baseline, candidate, projection, playback, playback_gene
             or composer_generation != playback_generation:
         return "generation_mismatch"
     candidate_context = candidate.get("rme_preview") if isinstance(candidate, dict) else None
+    continuous_reason = candidate_context.get("continuous_state_reason") if isinstance(candidate_context, dict) else None
+    if isinstance(continuous_reason, str) and continuous_reason.startswith("composer_readiness_"):
+        return continuous_reason
     if isinstance(candidate_context, dict) \
             and candidate_context.get("continuous_state_reason") == "composer_exception":
         return "composer_exception"

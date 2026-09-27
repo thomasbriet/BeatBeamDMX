@@ -281,6 +281,15 @@ class CompositionHistory:
             else:
                 fresh = [candidate for candidate in candidates if candidate["signature"].key() not in recent_keys]
                 pool = fresh or candidates
+                recent_washes = {
+                    entry["signature"].wash for entry in compatible_recent[-2:]
+                }
+                wash_alternatives = [
+                    candidate for candidate in pool
+                    if candidate["signature"].wash not in recent_washes
+                ]
+                if wash_alternatives:
+                    pool = wash_alternatives
                 selected = min(pool, key=self._recency_score)
                 selection = "anti_repeat_alternative" if fresh else "continuity_reuse"
                 previous = compatible_recent[-1]["signature"] if compatible_recent else None
@@ -313,9 +322,9 @@ class CompositionHistory:
     def _recency_score(self, candidate):
         """Prefer changes in the perceptually dominant dimensions, newest first."""
         weights = {
-            "dimmer": 7.0, "palette": 6.0, "fixture_partition": 5.0,
+            "dimmer": 7.0, "palette": 6.0, "wash": 5.0, "fixture_partition": 5.0,
             "movement": 4.0, "color_animation": 4.0, "palette_relation": 3.0,
-            "pulse": 2.0, "wash": 1.5, "complexity": 1.0,
+            "pulse": 2.0, "complexity": 1.0,
         }
         score = 0.0
         components = candidate["signature"].components()
@@ -348,6 +357,11 @@ def project_continuous_musical_state(projection, position_seconds):
         return None, "track_not_current"
     if projection.get("projection_status") not in {"in_segment", "in_final_segment"}:
         return None, "position_not_current"
+    readiness = projection.get("composer_readiness")
+    if not isinstance(readiness, dict) or readiness.get("status") != "ready":
+        status = readiness.get("status") if isinstance(readiness, dict) else "missing"
+        status = status if status in {"missing", "stale", "invalid"} else "invalid"
+        return None, f"composer_readiness_{status}"
     position = _number(position_seconds)
     if position is None or position < 0:
         return None, "position_invalid"

@@ -4,11 +4,12 @@ import math
 import tempfile
 import time
 import unittest
+import weakref
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from beatbeam_app import (
-    DmxController,
+    DmxController as ProductionDmxController,
     VENUE_TARGETS,
     canonical_venue_target_id,
     VenueTargetVerticalLayer,
@@ -40,6 +41,17 @@ from beatbeam_app import (
     venue_normalized_to_meters,
     venue_space_state,
 )
+
+
+class DmxController(ProductionDmxController):
+    """Every controller in this module owns a unique writable config root."""
+
+    def __init__(self, *args, config_path=None, **kwargs):
+        if config_path is None:
+            test_config_directory = tempfile.TemporaryDirectory()
+            config_path = Path(test_config_directory.name) / "beatbeam_config.json"
+            self._test_config_cleanup = weakref.finalize(self, test_config_directory.cleanup)
+        super().__init__(*args, config_path=config_path, **kwargs)
 
 
 TEST_GEOMETRY = VenueGeometry(10.0, 12.0, 3.0, 1.2)
@@ -205,8 +217,9 @@ class VenueGeometryV1Tests(unittest.TestCase):
         self.assertEqual("CEILING_HEIGHT_INVALID", resolve_venue_target_z(VenueGeometry(6, 8, .5, 1, .5), "CEILING")[2])
 
     def test_ceiling_geometry_is_optional_persistent_and_does_not_rewrite_fixture_position(self):
-        with tempfile.TemporaryDirectory() as directory, patch("beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"):
-            controller = DmxController(MagicMock())
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            controller = DmxController(MagicMock(), config_path=config_path)
             slot_id = controller.config["slot_order"][0]
             controller.config = controller._merge_payload({"venue_geometry": geometry_dict(ceiling_height_m=3.27)})
             fixture_position = {"x": -1.75, "y": 2.5, "z": 2.8}
@@ -215,7 +228,7 @@ class VenueGeometryV1Tests(unittest.TestCase):
                 "mounting_height_m": 2.8, "physical_forward": {"x": 0, "y": 1, "z": 0}, "physical_up": {"x": 0, "y": 0, "z": 1},
             }
             controller.flush_config()
-            restarted = DmxController(MagicMock())
+            restarted = DmxController(MagicMock(), config_path=config_path)
             self.assertEqual(3.27, restarted.config["venue_geometry"]["ceiling_height_m"])
             self.assertEqual(fixture_position, restarted.config["slots"][slot_id]["venue_calibration"]["position_m"])
 
@@ -416,8 +429,9 @@ class VenueGeometryV1Tests(unittest.TestCase):
         self.assertEqual("RESOLVED", state["audience_center_test"]["status"])
 
     def test_geometry_and_fixture_height_persist_while_legacy_remains_fail_closed(self):
-        with tempfile.TemporaryDirectory() as directory, patch("beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"):
-            controller = DmxController(MagicMock())
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            controller = DmxController(MagicMock(), config_path=config_path)
             slot_id = controller.config["slot_order"][0]
             controller.config = controller._merge_payload({"venue_geometry": geometry_dict()})
             controller.config = controller._merge_payload({"slot_id": slot_id, "slot": {"venue_calibration": {
@@ -430,7 +444,7 @@ class VenueGeometryV1Tests(unittest.TestCase):
                 "tilt_correction_degrees": -1.5,
             }}})
             controller.flush_config()
-            restarted = DmxController(MagicMock())
+            restarted = DmxController(MagicMock(), config_path=config_path)
             self.assertEqual(geometry_dict(), restarted.config["venue_geometry"])
             self.assertEqual(3.4, restarted.config["slots"][slot_id]["venue_calibration"]["mounting_height_m"])
             self.assertNotIn("z", restarted.config["slots"][slot_id]["venue_calibration"]["position"])
@@ -438,7 +452,7 @@ class VenueGeometryV1Tests(unittest.TestCase):
             payload.pop("venue_geometry")
             payload["slots"][slot_id]["venue_calibration"].pop("mounting_height_m")
             Path(directory, "config.json").write_text(json.dumps(payload), encoding="utf-8")
-            legacy = DmxController(MagicMock())
+            legacy = DmxController(MagicMock(), config_path=config_path)
             legacy_state = venue_space_state(legacy.config)
             self.assertEqual("MISSING_VENUE_SCALE", legacy_state["venue_geometry"]["status"])
             self.assertIsNone(legacy.config["slots"][slot_id]["venue_calibration"]["mounting_height_m"])
@@ -492,12 +506,12 @@ class VenueTargetPhysicalTestV1Tests(unittest.TestCase):
             "physical_up": {"x": 0, "y": 0, "z": 1},
         }}})
 
-    def make_ready_controller(self):
+    def make_ready_controller(self, config_path=None):
         osc = MagicMock()
         osc.snapshot_for_render.return_value = {
             "phrase_current": "verse", "stale": False, "beat_value": 0.0,
         }
-        controller = DmxController(osc)
+        controller = DmxController(osc, config_path=config_path)
         controller.config = controller.default_config()
         controller.config = controller._merge_payload({"venue_geometry": geometry_dict()})
         slot_id = controller.config["slot_order"][0]
@@ -766,14 +780,15 @@ class PhysicalAimKinematicCalibrationV1Tests(unittest.TestCase):
         return controller.save_aim_calibration_anchor()
 
     def test_selected_fixture_workflow_persists_model_and_does_not_restore_lease(self):
-        with tempfile.TemporaryDirectory() as directory, patch("beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"):
-            controller, slot_id = VenueTargetPhysicalTestV1Tests().make_ready_controller()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            controller, slot_id = VenueTargetPhysicalTestV1Tests().make_ready_controller(config_path)
             for target_id in ("AUDIENCE_MID_CENTER", "AUDIENCE_FAR_LEFT", "AUDIENCE_NEAR_CENTER"):
                 saved = self._save_synthetic_anchor(controller, slot_id, target_id)
             self.assertEqual("CALIBRATED", saved["status"])
             self.assertIsNone(controller.venue_target_test_authority)
             controller.flush_config()
-            restarted = DmxController(MagicMock())
+            restarted = DmxController(MagicMock(), config_path=config_path)
             aim = kinematic_calibration_state(
                 slot_id,
                 restarted.config["slots"][slot_id],
@@ -1227,8 +1242,9 @@ class PhysicalAxisMappingV2Tests(unittest.TestCase):
         self.assertAlmostEqual(0, axis_mapping_v2_inverse_tilt(0, model["tilt"]), delta=1)
 
     def test_guided_sample_api_persists_complete_candidate_and_restart_has_no_lease(self):
-        with tempfile.TemporaryDirectory() as directory, patch("beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"):
-            controller, slot_id = VenueTargetPhysicalTestV1Tests().make_ready_controller()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            controller, slot_id = VenueTargetPhysicalTestV1Tests().make_ready_controller(config_path)
             blocked = controller.begin_axis_mapping_v2({"slot_id": slot_id, "axis": "PAN"})
             self.assertFalse(blocked["accepted"])
             self.assertIn("CALIBRATE TILT FIRST", blocked["reason"])
@@ -1256,7 +1272,7 @@ class PhysicalAxisMappingV2Tests(unittest.TestCase):
                     self.assertIsNone(controller.venue_target_test_authority)
             self.assertEqual("CALIBRATED_CANDIDATE", saved["status"])
             controller.flush_config()
-            restarted = DmxController(MagicMock())
+            restarted = DmxController(MagicMock(), config_path=config_path)
             self.assertEqual("CALIBRATED_CANDIDATE", axis_mapping_v2_state(slot_id, restarted.config["slots"][slot_id], restarted.config["venue_geometry"])["status"])
             self.assertIsNone(restarted.venue_target_test_authority)
 
@@ -1335,15 +1351,16 @@ class PhysicalAxisMappingV2Tests(unittest.TestCase):
         self.assertEqual(first_evidence, controller.config["slots"][slot_id]["axis_mapping_v2"]["tilt_samples"]["0"])
 
     def test_progressive_wizard_phase_and_sample_survive_restart_without_restoring_lease(self):
-        with tempfile.TemporaryDirectory() as directory, patch("beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"):
-            controller, slot_id = VenueTargetPhysicalTestV1Tests().make_ready_controller()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            controller, slot_id = VenueTargetPhysicalTestV1Tests().make_ready_controller(config_path)
             self.assertTrue(controller.nudge_axis_mapping_v2_tilt_reference({
                 "slot_id": slot_id, "axis": "PAN", "direction": "RIGHT", "granularity": "FINE",
             })["accepted"])
             self.assertTrue(controller.lock_axis_mapping_v2_tilt_reference({})["accepted"])
             self.assertTrue(controller.save_axis_mapping_v2_sample({"axis": "TILT", "measured_degrees": 0})["accepted"])
             controller.flush_config()
-            restarted = DmxController(MagicMock())
+            restarted = DmxController(MagicMock(), config_path=config_path)
             state = axis_mapping_v2_state(slot_id, restarted.config["slots"][slot_id], restarted.config["venue_geometry"])
             self.assertEqual("TILT", state["workflow_phase"])
             self.assertEqual(1, state["workflow_sample_index"])
@@ -1580,8 +1597,9 @@ class MetricVenueSpaceAndNativeEffectV1Tests(unittest.TestCase):
         self.assertEqual("MISSING_VENUE_SCALE", legacy["status"])
 
     def test_metric_position_round_trips_without_grid_rounding_or_drift(self):
-        with tempfile.TemporaryDirectory() as directory, patch("beatbeam_app.CONFIG_PATH", Path(directory) / "config.json"):
-            controller = DmxController(MagicMock())
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            controller = DmxController(MagicMock(), config_path=config_path)
             slot_id = controller.config["slot_order"][0]
             controller.config = controller._merge_payload({"slot_id": slot_id, "slot": {"venue_calibration": {
                 "position_m": {"x": -1.82, "y": 3.17, "z": 2.64},
@@ -1589,13 +1607,13 @@ class MetricVenueSpaceAndNativeEffectV1Tests(unittest.TestCase):
                 "physical_up": {"x": 0, "y": 0, "z": 1},
             }}})
             controller._write_config(controller.config)
-            restarted = DmxController(MagicMock())
+            restarted = DmxController(MagicMock(), config_path=config_path)
             self.assertEqual(
                 {"x": -1.82, "y": 3.17, "z": 2.64},
                 restarted.config["slots"][slot_id]["venue_calibration"]["position_m"],
             )
             restarted._write_config(restarted.config)
-            again = DmxController(MagicMock())
+            again = DmxController(MagicMock(), config_path=config_path)
             self.assertEqual(
                 {"x": -1.82, "y": 3.17, "z": 2.64},
                 again.config["slots"][slot_id]["venue_calibration"]["position_m"],
