@@ -9,13 +9,13 @@ BACKUPS="$SANDBOX/Backups"
 mkdir -p "$APPS" "$BACKUPS"
 
 make_bundle() {
-  local destination="$1" app_name="$2" bundle_id="$3" marker="$4"
+  local destination="$1" app_name="$2" bundle_id="$3" marker="$4" version="${5:-1.1.0}"
   mkdir -p "$destination/Contents/MacOS" "$destination/Contents/Resources/backend"
   printf '#!/bin/sh\necho %s\n' "$marker" > "$destination/Contents/MacOS/$app_name"
   chmod +x "$destination/Contents/MacOS/$app_name"
   printf 'test-backend\n' > "$destination/Contents/Resources/backend/beatbeam_app.py"
   cat > "$destination/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${bundle_id}</string><key>CFBundleShortVersionString</key><string>1.1.0</string></dict></plist>
+<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${bundle_id}</string><key>CFBundleShortVersionString</key><string>${version}</string></dict></plist>
 PLIST
 }
 
@@ -49,6 +49,8 @@ run_beta() {
 make_bundle "$APPS/BeatBeam DMX Beta.app.before-v1" "BeatBeam DMX Beta" "com.local.beatbeamdmx.beta" historic-beta
 make_bundle "$APPS/BeatBeam DMX.app.before-v1" "BeatBeam DMX" "com.local.beatbeamdmx.native" historic-release
 make_bundle "$APPS/BeatBeam DMX Tools.app" "BeatBeam DMX Tools" "com.example.unknown" unknown
+# The active prior Release may have an older version than the pinned candidate.
+make_bundle "$APPS/BeatBeam DMX.app" "BeatBeam DMX" "com.local.beatbeamdmx.native" old-release 1.0.0
 
 if BEATBEAM_ALLOW_UNSIGNED=1 BEATBEAM_SKIP_STOP=1 BEATBEAM_APPLICATIONS_DIR="$APPS" BEATBEAM_BACKUPS_DIR="$BACKUPS" BEATBEAM_RELEASE_SOURCE_MANIFEST="$TEST_MANIFEST" "$ROOT_DIR/deploy_release_app.sh" "$release_candidate_one"; then
   echo "Expected implicit release deployment rejection" >&2; exit 1

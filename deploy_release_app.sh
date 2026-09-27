@@ -49,6 +49,22 @@ verify_bundle() {
   fi
 }
 
+# The pinned source manifest describes the new candidate, not the installed
+# release being replaced. Accept the prior Release for rollback based on its
+# product identity and signature, even when its version/backend are older.
+verify_existing_release() {
+  local app="$1"
+  local plist="${app}/Contents/Info.plist"
+  local executable="${app}/Contents/MacOS/BeatBeam DMX"
+  local backend="${app}/Contents/Resources/backend/beatbeam_app.py"
+  [[ -d "$app" && -f "$plist" && -x "$executable" && -f "$backend" ]] || return 1
+  [[ "$(plutil -extract CFBundleIdentifier raw "$plist" 2>/dev/null)" == "$RELEASE_BUNDLE_ID" ]] || return 1
+  [[ -n "$(plutil -extract CFBundleShortVersionString raw "$plist" 2>/dev/null)" ]] || return 1
+  if [[ "$ALLOW_UNSIGNED" != "1" ]]; then
+    codesign --verify --deep --strict "$app" >/dev/null 2>&1 || return 1
+  fi
+}
+
 verify_bundle "$CANDIDATE" || fail "Kandidaat is geen geldige BeatBeam release-bundle"
 mkdir -p "$BACKUPS_DIR"
 
@@ -72,7 +88,7 @@ fi
 
 had_canonical=0
 if [[ -d "$CANONICAL_APP" ]]; then
-  verify_bundle "$CANONICAL_APP" || fail "Bestaande canonieke release is ongeldig; handmatige beoordeling vereist"
+  verify_existing_release "$CANONICAL_APP" || fail "Bestaande canonieke release is ongeldig; handmatige beoordeling vereist"
   had_canonical=1
   if [[ -e "$ROLLBACK_APP" ]]; then rm -rf "$ROLLBACK_APP"; fi
   mv "$CANONICAL_APP" "$ROLLBACK_APP"

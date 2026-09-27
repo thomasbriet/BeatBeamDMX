@@ -37,8 +37,8 @@ case "$VARIANT" in
     TEMP_DIRECTORY_NAME="BeatBeamDMXBeta"
     LOG_STEM="beatbeam-beta"
     APP_SLUG="BeatBeamDMXBeta"
-    VERSION="1.2.0-beta"
-    BUILD_NUMBER="120"
+    VERSION="1.3.0-beta"
+    BUILD_NUMBER="130"
     ;;
   *)
     echo "Onbekende variant: $VARIANT" >&2
