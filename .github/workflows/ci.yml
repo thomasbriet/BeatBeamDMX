@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: ["beta/1.3"]
+  pull_request:
+
+jobs:
+  tests:
+    # macOS is the product runtime: the playback clock uses CLOCK_UPTIME_RAW,
+    # which only exists on Darwin.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt pytest pytest-subtests pyflakes
+      - name: pyflakes (reporting only until the existing findings are cleared)
+        continue-on-error: true
+        run: pyflakes *.py tools/*.py tests/*.py
+      - run: pytest tests -q
+      - name: Workspace configuration must be untouched by tests
+        run: git diff --exit-code
